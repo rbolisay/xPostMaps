@@ -1,0 +1,554 @@
+"""SQLite persistence for projects and parsed navigation data."""
+
+from __future__ import annotations
+
+import json
+import sqlite3
+from datetime import datetime, timezone
+from pathlib import Path
+
+from xpostmaps.core.legend_utils import legend_from_dict, legend_to_dict
+from xpostmaps.core.sequence_utils import nav_cache_from_json, nav_cache_to_json
+from xpostmaps.core.models import (
+    DisplayMode,
+    GeoBounds,
+    LineSegment,
+    LineSequence,
+    MapData,
+    PositionRecord,
+    PostmapInfo,
+    ProjectSettings,
+    RecordType,
+    SurveyBounds,
+)
+
+
+class Database:
+    def __init__(self, db_path: str | Path | None = None) -> None:
+        if db_path is None:
+            db_path = Path(__file__).resolve().parents[2] / "data" / "xpostmaps.db"
+        self.db_path = Path(db_path)
+        self.db_path.parent.mkdir(parents=True, exist_ok=True)
+        self._conn = sqlite3.connect(str(self.db_path))
+        self._conn.row_factory = sqlite3.Row
+        self._init_schema()
+
+    def _init_schema(self) -> None:
+        self._conn.executescript(
+            """
+            CREATE TABLE IF NOT EXISTS projects (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL UNIQUE,
+                p111_p190_dir TEXT DEFAULT '',
+                overlay_dir TEXT DEFAULT '',
+                preplots_dir TEXT DEFAULT '',
+                display_mode TEXT DEFAULT 'lines',
+                show_source INTEGER DEFAULT 1,
+                show_vessel INTEGER DEFAULT 1,
+                show_overlay INTEGER DEFAULT 1,
+                show_preplots INTEGER DEFAULT 1,
+                postmap_info_json TEXT DEFAULT '{}',
+                bounds_json TEXT DEFAULT '{}',
+                stats_json TEXT DEFAULT '{}',
+                source_files_json TEXT DEFAULT '[]',
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS segments (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                project_id INTEGER NOT NULL,
+                category TEXT NOT NULL,
+                line_name TEXT NOT NULL,
+                record_type TEXT NOT NULL,
+                direction INTEGER DEFAULT 1,
+                xs_json TEXT NOT NULL,
+                ys_json TEXT NOT NULL,
+                FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_segments_project
+                ON segments(project_id);
+
+            CREATE TABLE IF NOT EXISTS line_sequences (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                project_id INTEGER NOT NULL,
+                seq_key TEXT NOT NULL,
+                file_name TEXT NOT NULL,
+                sequence_no TEXT NOT NULL,
+                line_name TEXT NOT NULL,
+                line_direction TEXT DEFAULT '',
+                first_sp INTEGER NOT NULL,
+                last_sp INTEGER NOT NULL,
+                record_type TEXT NOT NULL,
+                FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE,
+                UNIQUE(project_id, seq_key)
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_sequences_project
+                ON line_sequences(project_id);
+
+            CREATE TABLE IF NOT EXISTS positions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                project_id INTEGER NOT NULL,
+                file_name TEXT NOT NULL,
+                record_type TEXT NOT NULL,
+                sequence_no TEXT DEFAULT '',
+                line_name TEXT DEFAULT '',
+                line_direction TEXT DEFAULT '',
+                subline TEXT DEFAULT '',
+                point_num INTEGER NOT NULL,
+                x REAL NOT NULL,
+                y REAL NOT NULL,
+                depth REAL,
+                latitude TEXT DEFAULT '',
+                longitude TEXT DEFAULT '',
+                vessel_id TEXT DEFAULT '',
+                source_id TEXT DEFAULT '',
+                FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_positions_project
+                ON positions(project_id);
+            """
+        )
+        self._conn.commit()
+        self._migrate()
+
+    def _migrate(self) -> None:
+        cols = {row[1] for row in self._conn.execute("PRAGMA table_info(projects)")}
+        if "logo_path" not in cols:
+            self._conn.execute("ALTER TABLE projects ADD COLUMN logo_path TEXT DEFAULT ''")
+        if "legend_config_json" not in cols:
+            self._conn.execute(
+                "ALTER TABLE projects ADD COLUMN legend_config_json TEXT DEFAULT '{}'"
+            )
+        if "geo_bounds_json" not in cols:
+            self._conn.execute(
+                "ALTER TABLE projects ADD COLUMN geo_bounds_json TEXT DEFAULT '{}'"
+            )
+        if "nav_files_json" not in cols:
+            self._conn.execute(
+                "ALTER TABLE projects ADD COLUMN nav_files_json TEXT DEFAULT '[]'"
+            )
+        if "preplot_files_json" not in cols:
+            self._conn.execute(
+                "ALTER TABLE projects ADD COLUMN preplot_files_json TEXT DEFAULT '[]'"
+            )
+        if "nav_file_cache_json" not in cols:
+            self._conn.execute(
+                "ALTER TABLE projects ADD COLUMN nav_file_cache_json TEXT DEFAULT '{}'"
+            )
+
+        seg_cols = {row[1] for row in self._conn.execute("PRAGMA table_info(segments)")}
+        if "sequence_id" not in seg_cols:
+            self._conn.execute("ALTER TABLE segments ADD COLUMN sequence_id TEXT DEFAULT ''")
+        if "file_name" not in seg_cols:
+            self._conn.execute("ALTER TABLE segments ADD COLUMN file_name TEXT DEFAULT ''")
+        if "sequence_no" not in seg_cols:
+            self._conn.execute("ALTER TABLE segments ADD COLUMN sequence_no TEXT DEFAULT ''")
+        if "line_direction" not in seg_cols:
+            self._conn.execute("ALTER TABLE segments ADD COLUMN line_direction TEXT DEFAULT ''")
+
+        self._conn.commit()
+
+    def close(self) -> None:
+        self._conn.close()
+
+    @staticmethod
+    def _now() -> str:
+        return datetime.now(timezone.utc).isoformat()
+
+    def save_project(self, settings: ProjectSettings, map_data: MapData) -> int:
+        now = self._now()
+        postmap_json = json.dumps(map_data.postmap_info.__dict__, default=str)
+        bounds_json = json.dumps(map_data.bounds.__dict__)
+        geo_bounds_json = json.dumps(map_data.geo_bounds.__dict__)
+        stats_json = json.dumps(map_data.stats)
+        files_json = json.dumps(map_data.source_files)
+        nav_files_json = json.dumps(settings.nav_files)
+        preplot_files_json = json.dumps(settings.preplot_files)
+        legend_json = json.dumps(legend_to_dict(settings.legend_config))
+        nav_cache_json = json.dumps(nav_cache_to_json(map_data.nav_file_cache))
+
+        row = self._conn.execute(
+            "SELECT id FROM projects WHERE name = ?", (settings.name,)
+        ).fetchone()
+
+        if row:
+            project_id = row["id"]
+            self._conn.execute(
+                """
+                UPDATE projects SET
+                    p111_p190_dir=?, overlay_dir=?, preplots_dir=?,
+                    display_mode=?, show_source=?, show_vessel=?,
+                    show_overlay=?, show_preplots=?,
+                    postmap_info_json=?, bounds_json=?, geo_bounds_json=?,
+                    stats_json=?, source_files_json=?, nav_files_json=?,
+                    preplot_files_json=?, nav_file_cache_json=?, logo_path=?,
+                    legend_config_json=?, updated_at=?
+                WHERE id=?
+                """,
+                (
+                    settings.p111_p190_dir,
+                    settings.overlay_dir,
+                    settings.preplots_dir,
+                    settings.display_mode.value,
+                    int(settings.show_source),
+                    int(settings.show_vessel),
+                    int(settings.show_overlay),
+                    int(settings.show_preplots),
+                    postmap_json,
+                    bounds_json,
+                    geo_bounds_json,
+                    stats_json,
+                    files_json,
+                    nav_files_json,
+                    preplot_files_json,
+                    nav_cache_json,
+                    settings.logo_path,
+                    legend_json,
+                    now,
+                    project_id,
+                ),
+            )
+            self._conn.execute("DELETE FROM segments WHERE project_id=?", (project_id,))
+            self._conn.execute("DELETE FROM line_sequences WHERE project_id=?", (project_id,))
+            self._conn.execute("DELETE FROM positions WHERE project_id=?", (project_id,))
+        else:
+            cursor = self._conn.execute(
+                """
+                INSERT INTO projects (
+                    name, p111_p190_dir, overlay_dir, preplots_dir,
+                    display_mode, show_source, show_vessel, show_overlay, show_preplots,
+                    postmap_info_json, bounds_json, geo_bounds_json, stats_json,
+                    source_files_json, nav_files_json, preplot_files_json,
+                    nav_file_cache_json, logo_path, legend_config_json,
+                    created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    settings.name,
+                    settings.p111_p190_dir,
+                    settings.overlay_dir,
+                    settings.preplots_dir,
+                    settings.display_mode.value,
+                    int(settings.show_source),
+                    int(settings.show_vessel),
+                    int(settings.show_overlay),
+                    int(settings.show_preplots),
+                    postmap_json,
+                    bounds_json,
+                    geo_bounds_json,
+                    stats_json,
+                    files_json,
+                    nav_files_json,
+                    preplot_files_json,
+                    nav_cache_json,
+                    settings.logo_path,
+                    legend_json,
+                    now,
+                    now,
+                ),
+            )
+            project_id = cursor.lastrowid
+
+        self._save_segments(project_id, "main", map_data.segments)
+        self._save_segments(project_id, "overlay", map_data.overlay_segments)
+        self._save_segments(project_id, "preplot", map_data.preplot_segments)
+        self._save_sequences(project_id, map_data.sequences)
+        self._save_positions(project_id, map_data.positions)
+        self._conn.commit()
+        return int(project_id)
+
+    def _save_segments(
+        self, project_id: int, category: str, segments: list[LineSegment]
+    ) -> None:
+        rows = [
+            (
+                project_id,
+                category,
+                seg.line_name,
+                seg.record_type.value,
+                seg.direction,
+                json.dumps(seg.xs),
+                json.dumps(seg.ys),
+                seg.sequence_id,
+                seg.file_name,
+                seg.sequence_no,
+                seg.line_direction,
+            )
+            for seg in segments
+        ]
+        if rows:
+            self._conn.executemany(
+                """
+                INSERT INTO segments (
+                    project_id, category, line_name, record_type,
+                    direction, xs_json, ys_json,
+                    sequence_id, file_name, sequence_no, line_direction
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                rows,
+            )
+
+    def _save_sequences(self, project_id: int, sequences: list[LineSequence]) -> None:
+        rows = [
+            (
+                project_id,
+                seq.seq_id,
+                seq.file_name,
+                seq.sequence_no,
+                seq.line_name,
+                seq.line_direction,
+                seq.first_sp,
+                seq.last_sp,
+                seq.record_type.value,
+            )
+            for seq in sequences
+        ]
+        if rows:
+            self._conn.executemany(
+                """
+                INSERT INTO line_sequences (
+                    project_id, seq_key, file_name, sequence_no, line_name,
+                    line_direction, first_sp, last_sp, record_type
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                rows,
+            )
+
+    def _save_positions(self, project_id: int, positions: list[PositionRecord]) -> None:
+        rows = [
+            (
+                project_id,
+                pos.file_name,
+                pos.record_type.value,
+                pos.sequence_no,
+                pos.line_name,
+                pos.line_direction,
+                pos.subline,
+                pos.point_num,
+                pos.x,
+                pos.y,
+                pos.depth,
+                pos.latitude,
+                pos.longitude,
+                pos.vessel_id,
+                pos.source_id,
+            )
+            for pos in positions
+        ]
+        if rows:
+            self._conn.executemany(
+                """
+                INSERT INTO positions (
+                    project_id, file_name, record_type, sequence_no, line_name,
+                    line_direction, subline, point_num, x, y, depth,
+                    latitude, longitude, vessel_id, source_id
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                rows,
+            )
+
+    def load_project(self, name: str) -> tuple[ProjectSettings, MapData] | None:
+        row = self._conn.execute(
+            "SELECT * FROM projects WHERE name = ?", (name,)
+        ).fetchone()
+        if row is None:
+            return None
+
+        nav_files = []
+        if "nav_files_json" in row.keys():
+            nav_files = json.loads(row["nav_files_json"] or "[]")
+        preplot_files = []
+        if "preplot_files_json" in row.keys():
+            preplot_files = json.loads(row["preplot_files_json"] or "[]")
+
+        settings = ProjectSettings(
+            name=row["name"],
+            p111_p190_dir=row["p111_p190_dir"] or "",
+            nav_files=nav_files,
+            preplot_files=preplot_files,
+            preplots_dir=row["preplots_dir"] or "",
+            overlay_dir=row["overlay_dir"] or "",
+            display_mode=DisplayMode(row["display_mode"]),
+            show_source=bool(row["show_source"]),
+            show_vessel=bool(row["show_vessel"]),
+            show_overlay=bool(row["show_overlay"]),
+            show_preplots=bool(row["show_preplots"]),
+            logo_path=row["logo_path"] if "logo_path" in row.keys() else "",
+            legend_config=legend_from_dict(
+                json.loads(row["legend_config_json"] or "{}")
+                if "legend_config_json" in row.keys()
+                else {}
+            ),
+        )
+
+        postmap_dict = json.loads(row["postmap_info_json"] or "{}")
+        field_names = [k for k in PostmapInfo.__dataclass_fields__ if k != "extra"]
+        postmap_info = PostmapInfo(
+            **{k: postmap_dict.get(k, "") for k in field_names}
+        )
+        postmap_info.extra = {
+            k: v for k, v in postmap_dict.items() if k not in field_names
+        }
+
+        bounds_dict = json.loads(row["bounds_json"] or "{}")
+        bounds = SurveyBounds(**bounds_dict) if bounds_dict else SurveyBounds()
+        geo_dict = json.loads(row["geo_bounds_json"] or "{}") if "geo_bounds_json" in row.keys() else {}
+        geo_bounds = GeoBounds(**geo_dict) if geo_dict else GeoBounds()
+
+        project_id = row["id"]
+        map_data = MapData(
+            segments=self._load_segments(project_id, "main"),
+            overlay_segments=self._load_segments(project_id, "overlay"),
+            preplot_segments=self._load_segments(project_id, "preplot"),
+            sequences=self._load_sequences(project_id),
+            positions=self._load_positions(project_id),
+            bounds=bounds,
+            geo_bounds=geo_bounds,
+            postmap_info=postmap_info,
+            source_files=json.loads(row["source_files_json"] or "[]"),
+            nav_file_cache=nav_cache_from_json(
+                json.loads(row["nav_file_cache_json"] or "{}")
+                if "nav_file_cache_json" in row.keys()
+                else {}
+            ),
+            stats=json.loads(row["stats_json"] or "{}"),
+        )
+        return settings, map_data
+
+    def get_project_id(self, name: str) -> int | None:
+        row = self._conn.execute(
+            "SELECT id FROM projects WHERE name = ?", (name.strip(),)
+        ).fetchone()
+        return int(row["id"]) if row else None
+
+    def delete_sequence_groups(self, project_id: int, group_ids: list[str]) -> None:
+        if not group_ids:
+            return
+        for group_id in group_ids:
+            parts = group_id.split("|")
+            if len(parts) >= 3:
+                file_name, sequence_no, line_name = parts[0], parts[1], parts[2]
+                self._conn.execute(
+                    """
+                    DELETE FROM positions
+                    WHERE project_id=? AND file_name=? AND sequence_no=? AND line_name=?
+                    """,
+                    (project_id, file_name, sequence_no, line_name),
+                )
+                self._conn.execute(
+                    """
+                    DELETE FROM segments
+                    WHERE project_id=? AND category='main' AND file_name=?
+                      AND sequence_no=? AND line_name=?
+                    """,
+                    (project_id, file_name, sequence_no, line_name),
+                )
+            prefix = f"{group_id}|"
+            self._conn.execute(
+                """
+                DELETE FROM line_sequences
+                WHERE project_id=? AND (seq_key=? OR seq_key LIKE ?)
+                """,
+                (project_id, group_id, prefix + "%"),
+            )
+            self._conn.execute(
+                """
+                DELETE FROM segments
+                WHERE project_id=? AND category='main'
+                  AND (sequence_id=? OR sequence_id LIKE ?)
+                """,
+                (project_id, group_id, prefix + "%"),
+            )
+        self._conn.commit()
+
+    def _load_segments(self, project_id: int, category: str) -> list[LineSegment]:
+        rows = self._conn.execute(
+            """
+            SELECT line_name, record_type, direction, xs_json, ys_json,
+                   sequence_id, file_name, sequence_no, line_direction
+            FROM segments WHERE project_id=? AND category=?
+            ORDER BY id
+            """,
+            (project_id, category),
+        ).fetchall()
+        segments: list[LineSegment] = []
+        for row in rows:
+            segments.append(
+                LineSegment(
+                    line_name=row["line_name"],
+                    record_type=RecordType(row["record_type"]),
+                    direction=row["direction"],
+                    xs=json.loads(row["xs_json"]),
+                    ys=json.loads(row["ys_json"]),
+                    sequence_id=row["sequence_id"] or "",
+                    file_name=row["file_name"] or "",
+                    sequence_no=row["sequence_no"] or "",
+                    line_direction=row["line_direction"] or "",
+                )
+            )
+        return segments
+
+    def _load_sequences(self, project_id: int) -> list[LineSequence]:
+        rows = self._conn.execute(
+            """
+            SELECT seq_key, file_name, sequence_no, line_name, line_direction,
+                   first_sp, last_sp, record_type
+            FROM line_sequences WHERE project_id=?
+            ORDER BY id
+            """,
+            (project_id,),
+        ).fetchall()
+        return [
+            LineSequence(
+                seq_id=row["seq_key"],
+                file_name=row["file_name"],
+                sequence_no=row["sequence_no"],
+                line_name=row["line_name"],
+                line_direction=row["line_direction"] or "",
+                first_sp=row["first_sp"],
+                last_sp=row["last_sp"],
+                record_type=RecordType(row["record_type"]),
+            )
+            for row in rows
+        ]
+
+    def _load_positions(self, project_id: int) -> list[PositionRecord]:
+        rows = self._conn.execute(
+            """
+            SELECT file_name, record_type, sequence_no, line_name, line_direction,
+                   subline, point_num, x, y, depth, latitude, longitude,
+                   vessel_id, source_id
+            FROM positions WHERE project_id=?
+            ORDER BY id
+            """,
+            (project_id,),
+        ).fetchall()
+        return [
+            PositionRecord(
+                file_name=row["file_name"],
+                record_type=RecordType(row["record_type"]),
+                line_name=row["line_name"] or "",
+                vessel_id=row["vessel_id"] or "",
+                source_id=row["source_id"] or "",
+                point_num=row["point_num"],
+                x=row["x"],
+                y=row["y"],
+                depth=row["depth"],
+                latitude=row["latitude"] or "",
+                longitude=row["longitude"] or "",
+                sequence_no=row["sequence_no"] or "",
+                line_direction=row["line_direction"] or "",
+                subline=row["subline"] or "",
+            )
+            for row in rows
+        ]
+
+    def list_projects(self) -> list[str]:
+        rows = self._conn.execute(
+            "SELECT name FROM projects ORDER BY updated_at DESC"
+        ).fetchall()
+        return [row["name"] for row in rows]
