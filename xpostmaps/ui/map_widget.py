@@ -8,6 +8,7 @@ from PySide6.QtCore import Qt
 from PySide6.QtGui import QColor
 from PySide6.QtWidgets import QVBoxLayout, QWidget
 
+from xpostmaps.core.area_utils import resolve_area_polygon
 from xpostmaps.core.models import (
     DisplayMode,
     LegendConfig,
@@ -19,6 +20,7 @@ from xpostmaps.core.models import (
     RecordType,
     sequence_id_matches,
 )
+from xpostmaps.ui.map_view_box import MapViewBox
 from xpostmaps.ui.theme import (
     BG_MAP_PRINT,
     DOWN_LINE,
@@ -84,14 +86,17 @@ class PostplotMapWidget(QWidget):
         self._display_mode = DisplayMode.LINES
         self._legend = LegendConfig.default()
         self._plot_items: list[pg.GraphicsItem] = []
+        self._extent_x: tuple[float, float] | None = None
+        self._extent_y: tuple[float, float] | None = None
 
         self.setStyleSheet(f"background: {BG_MAP_PRINT};")
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
 
-        self._plot = pg.PlotWidget(background=BG_MAP_PRINT)
+        self._plot = pg.PlotWidget(viewBox=MapViewBox(), background=BG_MAP_PRINT)
         self._plot_item = self._plot.getPlotItem()
+        self._plot.setMenuEnabled(False)
         self._plot.setAspectLocked(True)
         self._plot.showGrid(x=False, y=False)
         self._plot_item.hideButtons()
@@ -105,7 +110,6 @@ class PostplotMapWidget(QWidget):
 
         vb = self._plot.getViewBox()
         vb.setBackgroundColor(BG_MAP_PRINT)
-        vb.setMouseMode(pg.ViewBox.PanMode)
         vb.enableAutoRange(False)
         layout.addWidget(self._plot)
 
@@ -244,6 +248,27 @@ class PostplotMapWidget(QWidget):
         self._plot_item.addItem(item)
         self._plot_items.append(item)
 
+    def _add_area_polygons(self, map_data: MapData | None) -> None:
+        for entry in self._legend.areas:
+            xs, ys = resolve_area_polygon(entry, map_data)
+            if len(xs) < 2:
+                continue
+            rgba = _color_with_opacity(entry.color, entry.opacity)
+            qt_style = (
+                Qt.PenStyle.DashLine
+                if entry.border_style == LineStyle.DASH
+                else Qt.PenStyle.SolidLine
+            )
+            boundary = pg.PlotDataItem(
+                xs,
+                ys,
+                pen=pg.mkPen(rgba, width=2.0, style=qt_style),
+                connect="all",
+                clipToView=False,
+            )
+            self._plot_item.addItem(boundary)
+            self._plot_items.append(boundary)
+
     def _add_boundary(self, map_data: MapData) -> None:
         if not map_data.bounds.is_valid:
             return
@@ -271,12 +296,46 @@ class PostplotMapWidget(QWidget):
         y0, y1 = view_range[1]
         self._north.setPos(x0 + (x1 - x0) * 0.04, y0 + (y1 - y0) * 0.06)
 
+    def zoom_to_extent(self) -> None:
+        vb = self._plot.getViewBox()
+        if isinstance(vb, MapViewBox):
+            vb.zoom_to_extent()
+
+    def _update_extent(self, map_data: MapData) -> None:
+        vb = self._plot.getViewBox()
+        if not map_data.bounds.is_valid:
+            self._extent_x = None
+            self._extent_y = None
+            if isinstance(vb, MapViewBox):
+                vb.set_extent_range(None, None)
+            return
+
+        b = map_data.bounds
+        margin_x = (b.xmax - b.xmin) * 0.05 or 500
+        margin_y = (b.ymax - b.ymin) * 0.05 or 500
+        self._extent_x = (b.xmin - margin_x, b.xmax + margin_x)
+        self._extent_y = (b.ymin - margin_y, b.ymax + margin_y)
+        if isinstance(vb, MapViewBox):
+            vb.set_extent_range(self._extent_x, self._extent_y)
+
     def render(self, map_data: MapData | None) -> None:
         vb = self._plot.getViewBox()
         vb.blockSignals(True)
         try:
             self.clear()
-            if map_data is None or not map_data.segments:
+            if map_data is None:
+                self._extent_x = None
+                self._extent_y = None
+                vb = self._plot.getViewBox()
+                if isinstance(vb, MapViewBox):
+                    vb.set_extent_range(None, None)
+                return
+
+            has_nav = bool(map_data.segments)
+            has_preplot = bool(map_data.preplot_segments)
+            has_areas = bool(self._legend.areas)
+
+            if not has_nav and not has_preplot and not has_areas:
                 return
 
             for seg in map_data.segments:
@@ -288,9 +347,13 @@ class PostplotMapWidget(QWidget):
             for seg in map_data.preplot_segments:
                 self._add_segment(seg, width=0.9)
 
-            self._add_boundary(map_data)
+            self._add_area_polygons(map_data)
+
+            if not self._legend.areas:
+                self._add_boundary(map_data)
 
             if map_data.bounds.is_valid:
+                self._update_extent(map_data)
                 b = map_data.bounds
                 margin_x = (b.xmax - b.xmin) * 0.05 or 500
                 margin_y = (b.ymax - b.ymin) * 0.05 or 500

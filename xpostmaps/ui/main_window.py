@@ -19,16 +19,18 @@ from xpostmaps.core.autosave import AutosaveController
 from xpostmaps.core.database import Database
 from xpostmaps.core.legend_utils import legend_from_dict, legend_to_dict
 from xpostmaps.core.mediator import Mediator
-from xpostmaps.core.models import DisplayMode, LegendConfig, MapData, PostmapInfo, ProjectSettings
-from xpostmaps.core.parse_worker import ParseWorker
-from xpostmaps.core.sequence_utils import (
-    filter_positions_by_groups,
-    filter_segments_by_groups,
-    filter_sequences_by_groups,
-    sequence_id_matches,
+from xpostmaps.core.models import (
+    DisplayMode,
+    LegendConfig,
+    LineSequence,
+    MapData,
+    PostmapInfo,
+    ProjectSettings,
 )
+from xpostmaps.core.parse_worker import ParseWorker
+from xpostmaps.core.sequence_utils import sequence_id_matches
 from xpostmaps.ui.dialogs.legend_dialog import LegendDialog
-from xpostmaps.parsers.directory_parser import NAV_EXTENSIONS
+from xpostmaps.parsers.directory_parser import NAV_EXTENSIONS, resolve_nav_files
 from xpostmaps.parsers.preplot_parser import PREPLOT_EXTENSIONS
 from xpostmaps.ui.dialogs.nav_picker_dialog import NavFilePickerDialog
 from xpostmaps.ui.dialogs.postmap_info_dialog import PostmapInfoDialog
@@ -158,44 +160,29 @@ class MainWindow(QMainWindow):
             self._on_logo_changed(path)
 
     def _open_legend(self) -> None:
+        perimeters = self._map_data.survey_perimeters if self._map_data else []
         LegendDialog.open(
             self,
             self._settings.legend_config,
             on_apply=self._on_legend_apply,
             sequences=self._map_data.sequences if self._map_data else [],
-            on_delete_sequences=self._delete_sequences,
             sequences_provider=self._current_sequences,
+            survey_perimeters=perimeters,
         )
 
-    def _current_sequences(self) -> list:
+    def _current_sequences(self) -> list[LineSequence]:
         return list(self._map_data.sequences) if self._map_data else []
 
-    def _delete_sequences(self, group_ids: list[str]) -> None:
-        if not group_ids:
+    def _prune_legend_sequence_refs(self) -> None:
+        if not self._map_data:
             return
-        group_set = set(group_ids)
-        map_data = self._ensure_map_data()
-
-        project_id = self._db.get_project_id(self._settings.name) if self._settings.name.strip() else None
-        if project_id is not None:
-            self._db.delete_sequence_groups(project_id, group_ids)
-
-        map_data.positions = filter_positions_by_groups(map_data.positions, group_set)
-        map_data.segments = filter_segments_by_groups(map_data.segments, group_set)
-        map_data.sequences = filter_sequences_by_groups(map_data.sequences, group_set)
-
+        valid_ids = {seq.seq_id for seq in self._map_data.sequences}
         for entry in self._settings.legend_config.postplot_lines:
             entry.sequence_ids = [
                 seq_id
                 for seq_id in entry.sequence_ids
-                if not sequence_id_matches(seq_id, group_ids)
+                if any(sequence_id_matches(valid_id, [seq_id]) for valid_id in valid_ids)
             ]
-
-        self._refresh_ui()
-        self._autosave.save_now()
-        self.statusBar().showMessage(
-            f"Deleted {len(group_ids)} sequence(s) from project", 4000
-        )
 
     def _on_legend_apply(self, legend: LegendConfig) -> None:
         self._settings.legend_config = legend_from_dict(legend_to_dict(legend))
@@ -255,12 +242,20 @@ class MainWindow(QMainWindow):
             initial_dir=self._settings.p111_p190_dir or "",
             initial_files=self._settings.nav_files or None,
         )
-        if not result:
+        if result is None:
             return
         files, folder = result
         self._settings.nav_files = files
+        self._settings.nav_files_explicit = True
         self._settings.p111_p190_dir = folder
-        display = folder if len(files) != 1 else files[0]
+        if files:
+            display = (
+                f"{len(files)} file(s)"
+                if len(files) != 1
+                else files[0]
+            )
+        else:
+            display = "(no nav files)"
         self._left.set_p111_p190_dir(display)
         self._ensure_project_name()
         self._start_parse()
@@ -268,7 +263,7 @@ class MainWindow(QMainWindow):
     def _start_parse(self) -> None:
         if self._worker and self._worker.isRunning():
             return
-        has_nav = bool(self._settings.nav_files or self._settings.p111_p190_dir)
+        has_nav = bool(resolve_nav_files(self._settings))
         has_preplot = bool(
             self._settings.preplot_files
             or self._settings.preplots_dir
@@ -308,6 +303,7 @@ class MainWindow(QMainWindow):
                     setattr(map_data.postmap_info, field, edited)
 
         self._map_data = map_data
+        self._prune_legend_sequence_refs()
         self._left.set_progress(100, False)
         skipped = map_data.stats.get("nav_files_skipped", 0)
         parsed = map_data.stats.get("nav_files_parsed", 0)

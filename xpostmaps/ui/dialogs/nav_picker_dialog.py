@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
     QDialog,
     QFileDialog,
@@ -37,7 +38,7 @@ class NavFilePickerDialog(QDialog):
         self.resize(520, 420)
         self.setStyleSheet(app_stylesheet())
 
-        self._extensions = extensions or {".p111", ".p190", ".txt", ".nav"}
+        self._extensions = {ext.lower() for ext in (extensions or {".p111", ".p190", ".txt", ".nav"})}
         self._file_filter = file_filter
         self._initial_dir = initial_dir
         self._selected_files: list[str] = list(initial_files or [])
@@ -55,6 +56,9 @@ class NavFilePickerDialog(QDialog):
         folder_btn = QPushButton("Browse Folder…")
         files_btn = QPushButton("Add Files…")
         remove_btn = QPushButton("Remove Selected")
+        for btn in (folder_btn, files_btn, remove_btn):
+            btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+            btn.setAutoDefault(False)
         folder_btn.clicked.connect(self._browse_folder)
         files_btn.clicked.connect(self._add_files)
         remove_btn.clicked.connect(self._remove_selected)
@@ -67,13 +71,17 @@ class NavFilePickerDialog(QDialog):
         layout.addWidget(self._summary)
 
         self._list = QListWidget()
+        self._list.setObjectName("fileList")
         self._list.setSelectionMode(QListWidget.SelectionMode.ExtendedSelection)
+        self._list.setAlternatingRowColors(True)
         layout.addWidget(self._list, stretch=1)
 
         action_row = QHBoxLayout()
         ok_btn = QPushButton("OK")
         ok_btn.setObjectName("primaryBtn")
         cancel_btn = QPushButton("Cancel")
+        ok_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        cancel_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         ok_btn.clicked.connect(self.accept)
         cancel_btn.clicked.connect(self.reject)
         action_row.addStretch()
@@ -97,7 +105,7 @@ class NavFilePickerDialog(QDialog):
             return []
         files: list[str] = []
         for path in sorted(root.rglob("*")):
-            if path.is_file() and path.suffix in self._extensions:
+            if path.is_file() and path.suffix.lower() in self._extensions:
                 files.append(str(path.resolve()))
         return files
 
@@ -142,9 +150,11 @@ class NavFilePickerDialog(QDialog):
         self._refresh_list()
 
     def _remove_selected(self) -> None:
-        rows = sorted({item.row() for item in self._list.selectedIndexes()}, reverse=True)
-        for row in rows:
-            del self._selected_files[row]
+        selected = self._list.selectedItems()
+        if not selected:
+            return
+        remove_paths = {item.text() for item in selected}
+        self._selected_files = [path for path in self._selected_files if path not in remove_paths]
         self._refresh_list()
 
     @classmethod
@@ -169,7 +179,5 @@ class NavFilePickerDialog(QDialog):
             initial_files=initial_files,
         )
         if dialog.exec() != QDialog.DialogCode.Accepted:
-            return None
-        if not dialog.selected_files:
             return None
         return dialog.selected_files, dialog.selected_folder

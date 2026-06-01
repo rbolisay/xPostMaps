@@ -84,17 +84,21 @@ def build_display_sequences(records: list[PositionRecord]) -> list[LineSequence]
 
 
 def records_to_segments(records: list[PositionRecord]) -> list[LineSegment]:
-    grouped: dict[tuple[str, str, str, RecordType], list[PositionRecord]] = defaultdict(list)
+    grouped: dict[tuple[str, str, str, RecordType], dict[int, PositionRecord]] = defaultdict(dict)
     for rec in records:
         if rec.record_type not in (RecordType.SOURCE, RecordType.VESSEL):
             continue
         seq_no = rec.sequence_no or rec.line_name or "1"
         key = (rec.file_name, seq_no, rec.line_name.strip() or "UNNAMED", rec.record_type)
-        grouped[key].append(rec)
+        bucket = grouped[key]
+        if rec.record_type == RecordType.SOURCE:
+            bucket[rec.point_num] = rec
+        elif rec.point_num not in bucket:
+            bucket[rec.point_num] = rec
 
     segments: list[LineSegment] = []
-    for (file_name, seq_no, line_name, rtype), group in grouped.items():
-        group.sort(key=lambda r: r.point_num)
+    for (file_name, seq_no, line_name, rtype), bucket in grouped.items():
+        group = sorted(bucket.values(), key=lambda r: r.point_num)
         xs = [r.x for r in group]
         ys = [r.y for r in group]
         pnums = np.array([r.point_num for r in group], dtype=np.int64)

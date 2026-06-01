@@ -20,6 +20,7 @@ from xpostmaps.core.models import (
     ProjectSettings,
     RecordType,
     SurveyBounds,
+    SurveyPerimeter,
 )
 
 
@@ -110,6 +111,21 @@ class Database:
 
             CREATE INDEX IF NOT EXISTS idx_positions_project
                 ON positions(project_id);
+
+            CREATE TABLE IF NOT EXISTS survey_perimeters (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                project_id INTEGER NOT NULL,
+                file_name TEXT NOT NULL,
+                name TEXT NOT NULL,
+                xs_json TEXT NOT NULL,
+                ys_json TEXT NOT NULL,
+                latitudes_json TEXT DEFAULT '[]',
+                longitudes_json TEXT DEFAULT '[]',
+                FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_survey_perimeters_project
+                ON survey_perimeters(project_id);
             """
         )
         self._conn.commit()
@@ -139,6 +155,10 @@ class Database:
             self._conn.execute(
                 "ALTER TABLE projects ADD COLUMN nav_file_cache_json TEXT DEFAULT '{}'"
             )
+        if "nav_files_explicit" not in cols:
+            self._conn.execute(
+                "ALTER TABLE projects ADD COLUMN nav_files_explicit INTEGER DEFAULT 0"
+            )
 
         seg_cols = {row[1] for row in self._conn.execute("PRAGMA table_info(segments)")}
         if "sequence_id" not in seg_cols:
@@ -149,6 +169,28 @@ class Database:
             self._conn.execute("ALTER TABLE segments ADD COLUMN sequence_no TEXT DEFAULT ''")
         if "line_direction" not in seg_cols:
             self._conn.execute("ALTER TABLE segments ADD COLUMN line_direction TEXT DEFAULT ''")
+
+        self._conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS survey_perimeters (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                project_id INTEGER NOT NULL,
+                file_name TEXT NOT NULL,
+                name TEXT NOT NULL,
+                xs_json TEXT NOT NULL,
+                ys_json TEXT NOT NULL,
+                latitudes_json TEXT DEFAULT '[]',
+                longitudes_json TEXT DEFAULT '[]',
+                FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE
+            )
+            """
+        )
+        self._conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_survey_perimeters_project
+                ON survey_perimeters(project_id)
+            """
+        )
 
         self._conn.commit()
 
@@ -186,7 +228,7 @@ class Database:
                     postmap_info_json=?, bounds_json=?, geo_bounds_json=?,
                     stats_json=?, source_files_json=?, nav_files_json=?,
                     preplot_files_json=?, nav_file_cache_json=?, logo_path=?,
-                    legend_config_json=?, updated_at=?
+                    legend_config_json=?, nav_files_explicit=?, updated_at=?
                 WHERE id=?
                 """,
                 (
@@ -208,6 +250,7 @@ class Database:
                     nav_cache_json,
                     settings.logo_path,
                     legend_json,
+                    int(settings.nav_files_explicit),
                     now,
                     project_id,
                 ),
@@ -215,6 +258,7 @@ class Database:
             self._conn.execute("DELETE FROM segments WHERE project_id=?", (project_id,))
             self._conn.execute("DELETE FROM line_sequences WHERE project_id=?", (project_id,))
             self._conn.execute("DELETE FROM positions WHERE project_id=?", (project_id,))
+            self._conn.execute("DELETE FROM survey_perimeters WHERE project_id=?", (project_id,))
         else:
             cursor = self._conn.execute(
                 """
@@ -224,8 +268,8 @@ class Database:
                     postmap_info_json, bounds_json, geo_bounds_json, stats_json,
                     source_files_json, nav_files_json, preplot_files_json,
                     nav_file_cache_json, logo_path, legend_config_json,
-                    created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    nav_files_explicit, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     settings.name,
@@ -247,6 +291,7 @@ class Database:
                     nav_cache_json,
                     settings.logo_path,
                     legend_json,
+                    int(settings.nav_files_explicit),
                     now,
                     now,
                 ),
@@ -258,6 +303,7 @@ class Database:
         self._save_segments(project_id, "preplot", map_data.preplot_segments)
         self._save_sequences(project_id, map_data.sequences)
         self._save_positions(project_id, map_data.positions)
+        self._save_survey_perimeters(project_id, map_data.survey_perimeters)
         self._conn.commit()
         return int(project_id)
 
@@ -351,6 +397,32 @@ class Database:
                 rows,
             )
 
+    def _save_survey_perimeters(
+        self, project_id: int, perimeters: list[SurveyPerimeter]
+    ) -> None:
+        rows = [
+            (
+                project_id,
+                perimeter.file_name,
+                perimeter.name,
+                json.dumps(perimeter.xs),
+                json.dumps(perimeter.ys),
+                json.dumps(perimeter.latitudes),
+                json.dumps(perimeter.longitudes),
+            )
+            for perimeter in perimeters
+        ]
+        if rows:
+            self._conn.executemany(
+                """
+                INSERT INTO survey_perimeters (
+                    project_id, file_name, name, xs_json, ys_json,
+                    latitudes_json, longitudes_json
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                rows,
+            )
+
     def load_project(self, name: str) -> tuple[ProjectSettings, MapData] | None:
         row = self._conn.execute(
             "SELECT * FROM projects WHERE name = ?", (name,)
@@ -365,10 +437,15 @@ class Database:
         if "preplot_files_json" in row.keys():
             preplot_files = json.loads(row["preplot_files_json"] or "[]")
 
+        nav_files_explicit = False
+        if "nav_files_explicit" in row.keys():
+            nav_files_explicit = bool(row["nav_files_explicit"])
+
         settings = ProjectSettings(
             name=row["name"],
             p111_p190_dir=row["p111_p190_dir"] or "",
             nav_files=nav_files,
+            nav_files_explicit=nav_files_explicit or bool(nav_files),
             preplot_files=preplot_files,
             preplots_dir=row["preplots_dir"] or "",
             overlay_dir=row["overlay_dir"] or "",
@@ -415,6 +492,7 @@ class Database:
                 if "nav_file_cache_json" in row.keys()
                 else {}
             ),
+            survey_perimeters=self._load_survey_perimeters(project_id),
             stats=json.loads(row["stats_json"] or "{}"),
         )
         return settings, map_data
@@ -546,6 +624,29 @@ class Database:
             )
             for row in rows
         ]
+
+    def _load_survey_perimeters(self, project_id: int) -> list[SurveyPerimeter]:
+        rows = self._conn.execute(
+            """
+            SELECT file_name, name, xs_json, ys_json, latitudes_json, longitudes_json
+            FROM survey_perimeters WHERE project_id=?
+            ORDER BY id
+            """,
+            (project_id,),
+        ).fetchall()
+        perimeters: list[SurveyPerimeter] = []
+        for row in rows:
+            perimeters.append(
+                SurveyPerimeter(
+                    file_name=row["file_name"],
+                    name=row["name"],
+                    xs=json.loads(row["xs_json"] or "[]"),
+                    ys=json.loads(row["ys_json"] or "[]"),
+                    latitudes=json.loads(row["latitudes_json"] or "[]"),
+                    longitudes=json.loads(row["longitudes_json"] or "[]"),
+                )
+            )
+        return perimeters
 
     def list_projects(self) -> list[str]:
         rows = self._conn.execute(

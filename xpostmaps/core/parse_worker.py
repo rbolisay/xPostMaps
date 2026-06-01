@@ -5,7 +5,7 @@ from __future__ import annotations
 from PySide6.QtCore import QThread, Signal
 
 from xpostmaps.core.models import MapData, PostmapInfo, ProjectSettings
-from xpostmaps.parsers.directory_parser import parse_navigation_directory
+from xpostmaps.parsers.directory_parser import parse_navigation_directory, resolve_nav_files
 
 
 class ParseWorker(QThread):
@@ -27,7 +27,7 @@ class ParseWorker(QThread):
 
     def run(self) -> None:
         try:
-            has_nav = bool(self._settings.nav_files or self._settings.p111_p190_dir)
+            has_nav = bool(resolve_nav_files(self._settings))
             has_preplot = bool(
                 self._settings.preplot_files
                 or self._settings.preplots_dir

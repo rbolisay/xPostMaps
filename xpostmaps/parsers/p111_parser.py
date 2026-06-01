@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+from dataclasses import dataclass
 from pathlib import Path
 
 from xpostmaps.core.models import PositionRecord, RecordType
@@ -38,12 +39,18 @@ LEGACY_Y_IDX = 12
 LEGACY_LAT_IDX = 14
 LEGACY_LON_IDX = 15
 
-P111_RECORD_MAP: dict[str, RecordType] = {
-    "S1": RecordType.SOURCE,
-    "S2": RecordType.SOURCE,
-    "V1": RecordType.VESSEL,
-    "V2": RecordType.VESSEL,
-}
+P111_VESSEL_LEGACY_IDS = frozenset({"V1", "V2"})
+
+
+@dataclass
+class _PendingFiringShot:
+    point_num: int
+    firing_code: str
+    x: float
+    y: float
+    latitude: str
+    longitude: str
+    line_name: str
 
 
 def _parse_float(value: str) -> float:
@@ -70,6 +77,39 @@ def _format_line_direction(value: float | None) -> str:
     if value is None:
         return ""
     return f"{value:.1f}°"
+
+
+def _fallback_gun_code(code: str) -> bool:
+    return code.startswith("G") and len(code) == 3 and code[1:].isdigit()
+
+
+def scan_gun_array_codes(path: Path, scan_limit: int = 5000) -> frozenset[str]:
+    """Return air-gun array codes (G01, G02, ...) from HC header definitions."""
+    codes: set[str] = set()
+    try:
+        with path.open("r", encoding="utf-8", errors="replace") as handle:
+            for i, line in enumerate(handle):
+                if i >= scan_limit:
+                    break
+                line = line.strip()
+                if not line:
+                    continue
+                if line.startswith(("S1,", "P1,", "R1,")):
+                    break
+                if not line.startswith("HC,2,3,0,"):
+                    continue
+                fields = line.split(",")
+                if len(fields) <= 8:
+                    continue
+                code = _field(fields, 6)
+                object_type = _field(fields, 8).lower()
+                if not code:
+                    continue
+                if object_type == "air gun array" or _fallback_gun_code(code):
+                    codes.add(code)
+    except OSError:
+        return frozenset()
+    return frozenset(codes)
 
 
 def scan_vessel_id(path: Path, scan_limit: int = 2000) -> str | None:
@@ -131,18 +171,48 @@ def _parse_legacy_line(
 
 
 def parse_p111_file(path: Path, vessel_id: str | None = None) -> list[PositionRecord]:
-    """Parse vessel (P1) and source (S1) positions per shotpoint with sequence context."""
+    """Parse vessel (P1) and firing-source positions (S1 + matching P1 only).
+
+    Matches xSeisView shot-block logic: S1 identifies which gun fired at each
+    shotpoint; coordinates prefer the matching P1 air-gun record. Other P1 gun
+    positions (G01/G02/G03 arrays) are never emitted as source records.
+    """
     records: list[PositionRecord] = []
     file_name = path.name
 
     if vessel_id is None:
         vessel_id = scan_vessel_id(path)
+    gun_codes = scan_gun_array_codes(path)
 
     current_sequence = "N/A"
     current_line_name = "N/A"
     current_subline = ""
     current_line_direction: float | None = None
     has_cc_headers = False
+    pending_firing: _PendingFiringShot | None = None
+
+    def flush_firing() -> None:
+        nonlocal pending_firing
+        if pending_firing is None:
+            return
+        records.append(
+            PositionRecord(
+                file_name=file_name,
+                record_type=RecordType.SOURCE,
+                line_name=pending_firing.line_name or "UNNAMED",
+                vessel_id="",
+                source_id=pending_firing.firing_code,
+                point_num=pending_firing.point_num,
+                x=pending_firing.x,
+                y=pending_firing.y,
+                latitude=pending_firing.latitude,
+                longitude=pending_firing.longitude,
+                sequence_no=current_sequence,
+                line_direction=_format_line_direction(current_line_direction),
+                subline=current_subline,
+            )
+        )
+        pending_firing = None
 
     with path.open("r", encoding="utf-8", errors="replace") as handle:
         for raw_line in handle:
@@ -181,6 +251,7 @@ def parse_p111_file(path: Path, vessel_id: str | None = None) -> list[PositionRe
                 fields = line.split(",")
                 min_fields = max(
                     S1_REC_SPN_IDX,
+                    S1_REC_SOURCE_FIRED_IDX,
                     S1_REC_EASTING_IDX,
                     S1_REC_NORTHING_IDX,
                     S1_REC_LATITUDE_IDX,
@@ -188,39 +259,58 @@ def parse_p111_file(path: Path, vessel_id: str | None = None) -> list[PositionRe
                 ) + 1
                 if len(fields) < min_fields:
                     continue
+
+                firing_code = _field(fields, S1_REC_SOURCE_FIRED_IDX)
+                point_num = _parse_int(_field(fields, S1_REC_SPN_IDX))
+                if not firing_code or point_num <= 0:
+                    continue
+
                 x = _parse_float(_field(fields, S1_REC_EASTING_IDX))
                 y = _parse_float(_field(fields, S1_REC_NORTHING_IDX))
                 if not (x == x and y == y):
                     continue
+
+                flush_firing()
                 line_name = current_line_name if has_cc_headers else _field(fields, LEGACY_LINE_IDX)
-                records.append(
-                    PositionRecord(
-                        file_name=file_name,
-                        record_type=RecordType.SOURCE,
-                        line_name=line_name or "UNNAMED",
-                        vessel_id="",
-                        source_id=_field(fields, S1_REC_SOURCE_FIRED_IDX),
-                        point_num=_parse_int(_field(fields, S1_REC_SPN_IDX)),
-                        x=x,
-                        y=y,
-                        latitude=_field(fields, S1_REC_LATITUDE_IDX),
-                        longitude=_field(fields, S1_REC_LONGITUDE_IDX),
-                        sequence_no=current_sequence,
-                        line_direction=_format_line_direction(current_line_direction),
-                        subline=current_subline,
-                    )
+                pending_firing = _PendingFiringShot(
+                    point_num=point_num,
+                    firing_code=firing_code,
+                    x=x,
+                    y=y,
+                    latitude=_field(fields, S1_REC_LATITUDE_IDX),
+                    longitude=_field(fields, S1_REC_LONGITUDE_IDX),
+                    line_name=line_name or "UNNAMED",
                 )
                 continue
 
-            if line.startswith("P1,") and vessel_id:
+            if line.startswith("P1,"):
                 fields = line.split(",")
-                if len(fields) <= max(P_REC_SPN_IDX, P_REC_DEVICE_ID_IDX):
+                if len(fields) <= max(P_REC_SPN_IDX, P_REC_DEVICE_ID_IDX, P_REC_NORTHING_IDX):
                     continue
+
                 device_id = _field(fields, P_REC_DEVICE_ID_IDX)
-                if device_id != vessel_id:
+                point_num = _parse_int(_field(fields, P_REC_SPN_IDX))
+
+                if (
+                    pending_firing is not None
+                    and point_num == pending_firing.point_num
+                    and device_id == pending_firing.firing_code
+                ):
+                    x = _parse_float(_field(fields, P_REC_EASTING_IDX))
+                    y = _parse_float(_field(fields, P_REC_NORTHING_IDX))
+                    if x == x and y == y:
+                        pending_firing.x = x
+                        pending_firing.y = y
+                        pending_firing.latitude = _field(fields, P_REC_LATITUDE_IDX)
+                        pending_firing.longitude = _field(fields, P_REC_LONGITUDE_IDX)
                     continue
-                if len(fields) <= max(P_REC_EASTING_IDX, P_REC_NORTHING_IDX):
+
+                if device_id in gun_codes or _fallback_gun_code(device_id):
                     continue
+
+                if not vessel_id or device_id != vessel_id:
+                    continue
+
                 x = _parse_float(_field(fields, P_REC_EASTING_IDX))
                 y = _parse_float(_field(fields, P_REC_NORTHING_IDX))
                 if not (x == x and y == y):
@@ -232,7 +322,7 @@ def parse_p111_file(path: Path, vessel_id: str | None = None) -> list[PositionRe
                         line_name=current_line_name or "UNNAMED",
                         vessel_id=device_id,
                         source_id="",
-                        point_num=_parse_int(_field(fields, P_REC_SPN_IDX)),
+                        point_num=point_num,
                         x=x,
                         y=y,
                         depth=None,
@@ -246,24 +336,18 @@ def parse_p111_file(path: Path, vessel_id: str | None = None) -> list[PositionRe
                 continue
 
             record_id = line.split(",", 1)[0].upper()
-            record_type: RecordType | None = P111_RECORD_MAP.get(record_id)
-            if record_type is None:
-                if record_id.startswith("S"):
-                    record_type = RecordType.SOURCE
-                elif record_id.startswith("V"):
-                    record_type = RecordType.VESSEL
-                else:
-                    continue
-            legacy = _parse_legacy_line(line, file_name, record_type)
-            if legacy is not None:
-                if has_cc_headers:
-                    legacy.sequence_no = current_sequence
-                    legacy.line_direction = _format_line_direction(current_line_direction)
-                    legacy.subline = current_subline
-                    if current_line_name != "N/A":
-                        legacy.line_name = current_line_name
-                records.append(legacy)
+            if record_id in P111_VESSEL_LEGACY_IDS:
+                legacy = _parse_legacy_line(line, file_name, RecordType.VESSEL)
+                if legacy is not None:
+                    if has_cc_headers:
+                        legacy.sequence_no = current_sequence
+                        legacy.line_direction = _format_line_direction(current_line_direction)
+                        legacy.subline = current_subline
+                        if current_line_name != "N/A":
+                            legacy.line_name = current_line_name
+                    records.append(legacy)
 
+    flush_firing()
     return records
 
 

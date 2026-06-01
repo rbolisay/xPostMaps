@@ -2,17 +2,9 @@
 
 from __future__ import annotations
 
-import re
 from pathlib import Path
 
 from xpostmaps.core.models import PositionRecord, RecordType
-
-
-P190_PATTERNS: dict[str, tuple[RecordType, re.Pattern[str]]] = {
-    "S": (RecordType.SOURCE, re.compile(r"^S")),
-    "V": (RecordType.VESSEL, re.compile(r"^V")),
-    "E": (RecordType.EVENT, re.compile(r"^E(?!OF)")),
-}
 
 
 def _slice_field(line: str, start: int, end: int) -> str:
@@ -36,15 +28,20 @@ def _parse_int(value: str) -> int:
 
 
 def parse_p190_line(line: str, file_name: str) -> PositionRecord | None:
+    """Parse a single P190 position record.
+
+    Source positions use the firing-source ``S`` record only.
+    Vessel positions use the ``V`` record. All other record types are ignored.
+    """
     if len(line) < 64:
         return None
 
-    record_type: RecordType | None = None
-    for _, (rtype, pattern) in P190_PATTERNS.items():
-        if pattern.match(line):
-            record_type = rtype
-            break
-    if record_type is None:
+    record_id = line[0].upper()
+    if record_id == "S":
+        record_type = RecordType.SOURCE
+    elif record_id == "V":
+        record_type = RecordType.VESSEL
+    else:
         return None
 
     x = _parse_float(_slice_field(line, 47, 55))
@@ -71,13 +68,23 @@ def parse_p190_line(line: str, file_name: str) -> PositionRecord | None:
 
 
 def parse_p190_file(path: Path) -> list[PositionRecord]:
+    """Parse P190 navigation records, keeping one firing-source S record per shotpoint."""
     records: list[PositionRecord] = []
     file_name = path.name
+    firing_by_shot: dict[tuple[str, int], PositionRecord] = {}
+
     with path.open("r", encoding="utf-8", errors="replace") as handle:
         for line in handle:
             rec = parse_p190_line(line.rstrip("\n\r"), file_name)
-            if rec is not None:
-                records.append(rec)
+            if rec is None:
+                continue
+            if rec.record_type == RecordType.SOURCE:
+                key = (rec.line_name.strip() or "UNNAMED", rec.point_num)
+                firing_by_shot[key] = rec
+                continue
+            records.append(rec)
+
+    records.extend(firing_by_shot.values())
     return records
 
 

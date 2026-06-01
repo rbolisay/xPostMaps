@@ -21,6 +21,7 @@ from xpostmaps.parsers.p111_parser import parse_p111_file, scan_vessel_id
 from xpostmaps.parsers.p190_parser import parse_p190_file
 from xpostmaps.parsers.preplot_parser import parse_preplot_files, resolve_preplot_files
 from xpostmaps.parsers.sequence_builder import build_display_sequences, records_to_segments
+from xpostmaps.parsers.survey_perimeter_parser import parse_survey_perimeters
 from xpostmaps.utils.numba_accel import compute_bounds
 
 NAV_EXTENSIONS = {".p111", ".p190", ".P111", ".P190", ".txt", ".nav"}
@@ -58,10 +59,9 @@ def _collect_files(directory: str, extensions: set[str]) -> list[Path]:
 
 
 def resolve_nav_files(settings: ProjectSettings) -> list[Path]:
-    if settings.nav_files:
+    if settings.nav_files_explicit or settings.nav_files:
         files = [Path(f) for f in settings.nav_files if Path(f).is_file()]
-        if files:
-            return sorted(files)
+        return sorted(files)
     if settings.p111_p190_dir:
         return _collect_files(settings.p111_p190_dir, NAV_EXTENSIONS)
     return []
@@ -196,7 +196,7 @@ def parse_navigation_directory(
     step = 0
     shared_vessel_id = _scan_shared_vessel_id(main_files)
 
-    nav_cache: dict[str, tuple[float, int]] = dict(
+    nav_cache: dict[str, tuple[float, int, str]] = dict(
         existing_map_data.nav_file_cache if existing_map_data else {}
     )
     active_cache_keys = {nav_file_cache_key(path) for path in main_files}
@@ -265,17 +265,23 @@ def parse_navigation_directory(
     if not map_data.segments and all_records:
         map_data.segments = _records_to_segments(all_records)
 
-    if not main_files and existing_map_data:
-        map_data.positions = list(existing_map_data.positions)
-        map_data.sequences = list(existing_map_data.sequences)
-        map_data.segments = list(existing_map_data.segments)
-        map_data.nav_file_cache = dict(existing_map_data.nav_file_cache)
-        for rec in map_data.positions:
-            all_x.append(rec.x)
-            all_y.append(rec.y)
-        for seg in map_data.segments:
-            all_x.extend(seg.xs)
-            all_y.extend(seg.ys)
+    if not main_files:
+        if settings.nav_files_explicit:
+            map_data.positions = []
+            map_data.sequences = []
+            map_data.segments = []
+            map_data.nav_file_cache = {}
+        elif existing_map_data:
+            map_data.positions = list(existing_map_data.positions)
+            map_data.sequences = list(existing_map_data.sequences)
+            map_data.segments = list(existing_map_data.segments)
+            map_data.nav_file_cache = dict(existing_map_data.nav_file_cache)
+            for rec in map_data.positions:
+                all_x.append(rec.x)
+                all_y.append(rec.y)
+            for seg in map_data.segments:
+                all_x.extend(seg.xs)
+                all_y.extend(seg.ys)
 
     preplot_stats: dict[str, int] = {}
     if settings.show_preplots and preplot_files:
@@ -283,15 +289,23 @@ def parse_navigation_directory(
             progress_callback(int(100 * step / total_steps), "Parsing preplot/navplan…")
         segments, _meta, preplot_stats = parse_preplot_files(preplot_files)
         map_data.preplot_segments = segments
+        map_data.survey_perimeters = parse_survey_perimeters(preplot_files)
         for seg in segments:
             all_x.extend(seg.xs)
             all_y.extend(seg.ys)
+        for perimeter in map_data.survey_perimeters:
+            all_x.extend(perimeter.xs)
+            all_y.extend(perimeter.ys)
         step += len(preplot_files)
     elif existing_map_data and not preplot_files:
         map_data.preplot_segments = list(existing_map_data.preplot_segments)
+        map_data.survey_perimeters = list(existing_map_data.survey_perimeters)
         for seg in map_data.preplot_segments:
             all_x.extend(seg.xs)
             all_y.extend(seg.ys)
+        for perimeter in map_data.survey_perimeters:
+            all_x.extend(perimeter.xs)
+            all_y.extend(perimeter.ys)
 
     xs_arr = np.array(all_x, dtype=np.float64)
     ys_arr = np.array(all_y, dtype=np.float64)
@@ -313,6 +327,7 @@ def parse_navigation_directory(
         "preplot_files": preplot_stats.get("preplot_files", 0),
         "preplot_lines": preplot_stats.get("preplot_lines", 0),
         "navplan_files": preplot_stats.get("navplan_files", 0),
+        "survey_perimeters": len(map_data.survey_perimeters),
     }
     if progress_callback:
         progress_callback(100, "Parse complete")

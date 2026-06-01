@@ -13,10 +13,13 @@ from xpostmaps.core.models import (
     sequence_id_matches,
 )
 
+# Bump when navigation parsing logic changes (invalidates incremental nav cache).
+NAV_PARSE_VERSION = "firing-source-v2"
 
-def nav_file_signature(path: Path) -> tuple[float, int]:
+
+def nav_file_signature(path: Path) -> tuple[float, int, str]:
     stat = path.stat()
-    return stat.st_mtime, stat.st_size
+    return stat.st_mtime, stat.st_size, NAV_PARSE_VERSION
 
 
 def nav_file_cache_key(path: Path) -> str:
@@ -75,15 +78,21 @@ def positions_for_file_name(
     return [p for p in positions if p.file_name == file_name]
 
 
-def nav_cache_to_json(cache: dict[str, tuple[float, int]]) -> dict[str, list[float | int]]:
-    return {path: [mtime, size] for path, (mtime, size) in cache.items()}
+def nav_cache_to_json(cache: dict[str, tuple[float, int, str]]) -> dict[str, list[float | int | str]]:
+    return {path: [mtime, size, version] for path, (mtime, size, version) in cache.items()}
 
 
-def nav_cache_from_json(data: dict | None) -> dict[str, tuple[float, int]]:
+def nav_cache_from_json(data: dict | None) -> dict[str, tuple[float, int, str]]:
     if not data:
         return {}
-    result: dict[str, tuple[float, int]] = {}
+    result: dict[str, tuple[float, int, str]] = {}
     for path, values in data.items():
-        if isinstance(values, (list, tuple)) and len(values) >= 2:
-            result[path] = (float(values[0]), int(values[1]))
+        if not isinstance(values, (list, tuple)) or len(values) < 2:
+            continue
+        mtime = float(values[0])
+        size = int(values[1])
+        version = str(values[2]) if len(values) >= 3 else ""
+        if version != NAV_PARSE_VERSION:
+            continue
+        result[path] = (mtime, size, version)
     return result

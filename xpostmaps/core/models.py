@@ -18,16 +18,43 @@ class LineStyle(str, Enum):
     DASH = "dash"      # dashed line segments
 
 
-class NavDataType(str, Enum):
-    VESSEL = "vessel"
-    SOURCE = "source"
+class AreaCoordinateMode(str, Enum):
+    SURVEY_PERIMETER = "survey_perimeter"
+    CUSTOM = "custom"
+
+
+@dataclass
+class PolygonPoint:
+    x: float = 0.0
+    y: float = 0.0
+    latitude: str = ""
+    longitude: str = ""
+
+
+@dataclass
+class SurveyPerimeter:
+    file_name: str = ""
+    name: str = ""
+    xs: list[float] = field(default_factory=list)
+    ys: list[float] = field(default_factory=list)
+    latitudes: list[str] = field(default_factory=list)
+    longitudes: list[str] = field(default_factory=list)
 
 
 @dataclass
 class AreaLegendEntry:
     name: str = ""
+    border_style: LineStyle = LineStyle.SOLID
     color: str = "#60a5fa"
     opacity: float = 1.0
+    coordinate_mode: AreaCoordinateMode = AreaCoordinateMode.SURVEY_PERIMETER
+    survey_perimeter_index: int = 0
+    custom_points: list[PolygonPoint] = field(default_factory=list)
+
+
+class NavDataType(str, Enum):
+    VESSEL = "vessel"
+    SOURCE = "source"
 
 
 @dataclass
@@ -49,7 +76,12 @@ class LegendConfig:
     def default() -> LegendConfig:
         return LegendConfig(
             areas=[
-                AreaLegendEntry(name="Full Fold Area", color="#22c55e"),
+                AreaLegendEntry(
+                    name="Full Fold Area",
+                    border_style=LineStyle.SOLID,
+                    color="#22c55e",
+                    coordinate_mode=AreaCoordinateMode.SURVEY_PERIMETER,
+                ),
             ],
             postplot_lines=[
                 PostplotLegendEntry(name="Up Line", line_style=LineStyle.SOLID, color="#ef4444"),
@@ -149,6 +181,7 @@ class ProjectSettings:
     name: str = ""
     p111_p190_dir: str = ""
     nav_files: list[str] = field(default_factory=list)
+    nav_files_explicit: bool = False
     preplot_files: list[str] = field(default_factory=list)
     preplots_dir: str = ""
     overlay_dir: str = ""  # legacy; migrated to preplot_files
@@ -219,5 +252,6 @@ class MapData:
     geo_bounds: GeoBounds = field(default_factory=GeoBounds)
     postmap_info: PostmapInfo = field(default_factory=PostmapInfo)
     source_files: list[str] = field(default_factory=list)
-    nav_file_cache: dict[str, tuple[float, int]] = field(default_factory=dict)
+    nav_file_cache: dict[str, tuple[float, int, str]] = field(default_factory=dict)
+    survey_perimeters: list[SurveyPerimeter] = field(default_factory=list)
     stats: dict[str, Any] = field(default_factory=dict)

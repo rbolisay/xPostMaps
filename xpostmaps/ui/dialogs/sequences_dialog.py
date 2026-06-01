@@ -8,7 +8,6 @@ from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
     QHBoxLayout,
     QHeaderView,
-    QMessageBox,
     QPushButton,
     QTableWidget,
     QTableWidgetItem,
@@ -30,7 +29,6 @@ class SequencesDialog:
         sequences: list[LineSequence],
         selected_ids: list[str],
         on_changed,
-        on_delete: Callable[[list[str]], None] | None = None,
         on_refresh: Callable[[], list[LineSequence]] | None = None,
         row_key: str = "",
     ) -> None:
@@ -90,17 +88,6 @@ class SequencesDialog:
                         ids.append(seq_id)
                 return ids
 
-            def _collect_selected_ids() -> list[str]:
-                table = table_holder["table"]
-                if table is None:
-                    return []
-                ids: list[str] = []
-                for index in table.selectionModel().selectedRows():
-                    seq_id = id_by_row.get(index.row())
-                    if seq_id:
-                        ids.append(seq_id)
-                return ids
-
             table = QTableWidget(0, 5)
             table.setHorizontalHeaderLabels(
                 ["Sequence No.", "Line Name", "Line Direction", "First SP", "Last SP"]
@@ -128,49 +115,18 @@ class SequencesDialog:
                 on_changed(list(pending_ids))
                 dialog.close()
 
-            def delete_selected() -> None:
-                if not on_delete:
-                    return
-                to_delete = _collect_selected_ids()
-                if not to_delete:
-                    QMessageBox.information(
-                        dialog,
-                        "Delete Sequences",
-                        "Select one or more sequences to delete.",
-                    )
-                    return
-                answer = QMessageBox.question(
-                    dialog,
-                    "Delete Sequences",
-                    f"Delete {len(to_delete)} selected sequence(s) and all related "
-                    "navigation data from the project?",
-                    QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-                    QMessageBox.StandardButton.No,
-                )
-                if answer != QMessageBox.StandardButton.Yes:
-                    return
-                on_delete(to_delete)
-                for seq_id in to_delete:
-                    selected_set.discard(seq_id)
-                refreshed = on_refresh() if on_refresh else []
-                _populate_table(refreshed)
-
             btn_row = QHBoxLayout()
             all_btn = QPushButton("Select All")
             none_btn = QPushButton("Clear Selection")
-            delete_btn = QPushButton("Delete Selected")
-            delete_btn.setEnabled(on_delete is not None)
             ok_btn = QPushButton("OK")
             ok_btn.setObjectName("primaryBtn")
             close_btn = QPushButton("Close")
             all_btn.clicked.connect(select_all)
             none_btn.clicked.connect(clear_selection)
-            delete_btn.clicked.connect(delete_selected)
             ok_btn.clicked.connect(commit_and_close)
             close_btn.clicked.connect(dialog.close)
             btn_row.addWidget(all_btn)
             btn_row.addWidget(none_btn)
-            btn_row.addWidget(delete_btn)
             btn_row.addStretch()
             btn_row.addWidget(ok_btn)
             btn_row.addWidget(close_btn)

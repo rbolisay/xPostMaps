@@ -75,6 +75,34 @@ def app_stylesheet() -> str:
         padding: 4px 6px;
         min-height: 24px;
     }}
+    QTableWidget QLineEdit {{
+        background: #1e293b;
+        color: {TEXT_PRIMARY};
+        border: 1px solid {GLASS_BORDER};
+        border-radius: 6px;
+        padding: 4px 8px;
+        min-height: 24px;
+        font-size: 12px;
+    }}
+    QPushButton#tableCellBtn {{
+        background: rgba(59, 130, 246, 0.18);
+        border: 1px solid rgba(59, 130, 246, 0.45);
+        border-radius: 6px;
+        padding: 4px 10px;
+        color: {TEXT_PRIMARY};
+        font-size: 11px;
+        font-weight: 500;
+        min-height: 26px;
+    }}
+    QPushButton#tableCellBtn:hover {{
+        background: rgba(59, 130, 246, 0.32);
+        border-color: {ACCENT};
+    }}
+    QPushButton#tableCellBtn:disabled {{
+        color: {TEXT_SECONDARY};
+        background: rgba(255, 255, 255, 0.04);
+        border-color: {GLASS_BORDER};
+    }}
     QPushButton {{
         background: rgba(59, 130, 246, 0.18);
         border: 1px solid rgba(59, 130, 246, 0.45);
@@ -140,6 +168,35 @@ def app_stylesheet() -> str:
         background-color: #1e293b;
         color: {TEXT_PRIMARY};
     }}
+    QListWidget {{
+        background-color: #1e293b;
+        color: {TEXT_PRIMARY};
+        border: 1px solid {GLASS_BORDER};
+        border-radius: 8px;
+        padding: 4px;
+        outline: none;
+    }}
+    QListWidget::item {{
+        padding: 6px 8px;
+        border-radius: 4px;
+        color: {TEXT_PRIMARY};
+    }}
+    QListWidget::item:selected {{
+        background-color: {ACCENT};
+        color: {TEXT_PRIMARY};
+    }}
+    QListWidget::item:hover:!selected {{
+        background: rgba(59, 130, 246, 0.18);
+    }}
+    QScrollBar:horizontal {{
+        background: transparent;
+        height: 8px;
+    }}
+    QScrollBar::handle:horizontal {{
+        background: rgba(255,255,255,0.15);
+        border-radius: 4px;
+        min-width: 24px;
+    }}
     QScrollBar:vertical {{
         background: transparent;
         width: 8px;
@@ -148,6 +205,20 @@ def app_stylesheet() -> str:
         background: rgba(255,255,255,0.15);
         border-radius: 4px;
         min-height: 24px;
+    }}
+    QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical,
+    QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal {{
+        background: none;
+        border: none;
+        width: 0;
+        height: 0;
+    }}
+    QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical,
+    QScrollBar::add-page:horizontal, QScrollBar::sub-page:horizontal {{
+        background: none;
+    }}
+    QListWidget#fileList {{
+        alternate-background-color: rgba(255, 255, 255, 0.03);
     }}
     QCheckBox::indicator {{
         width: 16px;

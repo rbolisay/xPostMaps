@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import Callable
 
+from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
     QComboBox,
     QHBoxLayout,
@@ -11,20 +12,29 @@ from PySide6.QtWidgets import (
     QLabel,
     QLineEdit,
     QPushButton,
+    QSizePolicy,
     QTableWidget,
     QVBoxLayout,
 )
 
+from xpostmaps.core.area_utils import (
+    coord_index_from_selection,
+    coord_selection_from_index,
+    coordinate_dropdown_labels,
+    custom_coordinate_index,
+)
 from xpostmaps.core.models import (
     AreaLegendEntry,
     LegendConfig,
     LineSequence,
     LineStyle,
     NavDataType,
+    PolygonPoint,
     PostplotLegendEntry,
-    sequence_id_matches,
+    SurveyPerimeter,
 )
 from xpostmaps.ui.dialogs.base_dialog import SingleInstanceDialog
+from xpostmaps.ui.dialogs.custom_polygon_dialog import CustomPolygonDialog
 from xpostmaps.ui.dialogs.sequences_dialog import SequencesDialog
 from xpostmaps.ui.widgets.color_button import ColorButton
 
@@ -41,11 +51,59 @@ def _clear_layout(layout) -> None:
             _clear_layout(child)
 
 
+def _table_cell_button(text: str) -> QPushButton:
+    btn = QPushButton(text)
+    btn.setObjectName("tableCellBtn")
+    btn.setSizePolicy(QSizePolicy.Policy.Minimum, QSizePolicy.Policy.Fixed)
+    return btn
+
+
+def _fit_table_row(table: QTableWidget, row: int) -> None:
+    table.resizeRowToContents(row)
+    table.setRowHeight(row, max(table.rowHeight(row), 34))
+    for col in range(table.columnCount()):
+        table.resizeColumnToContents(col)
+
+
+def _configure_legend_table(table: QTableWidget) -> None:
+    table.verticalHeader().setVisible(False)
+    table.verticalHeader().setMinimumSectionSize(34)
+    table.verticalHeader().setDefaultSectionSize(34)
+    table.horizontalHeader().setSectionResizeMode(
+        QHeaderView.ResizeMode.ResizeToContents
+    )
+    table.setWordWrap(False)
+    table.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+    table.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+
+
+def _set_table_viewport_rows(table: QTableWidget, visible_rows: int = 5) -> None:
+    """Size table to show *visible_rows* before vertical scrolling."""
+    table.resizeRowsToContents()
+    header_h = table.horizontalHeader().sizeHint().height()
+    row_h = table.verticalHeader().defaultSectionSize()
+    if table.rowCount() > 0:
+        row_h = max(row_h, max(table.rowHeight(r) for r in range(table.rowCount())))
+    frame = table.frameWidth() * 2
+    viewport_h = header_h + row_h * visible_rows + frame
+    table.setMinimumHeight(viewport_h)
+    table.setMaximumHeight(viewport_h)
+
+
 class LegendDialog:
     KEY = "legend"
 
     _STYLE_LABELS = ("Solid", "Dotted", "Dash")
+    _AREA_STYLE_LABELS = ("Solid", "Dash")
     _DATA_TYPE_LABELS = ("Vessel", "Source")
+
+    @staticmethod
+    def _area_style_from_index(index: int) -> LineStyle:
+        return LineStyle.SOLID if index == 0 else LineStyle.DASH
+
+    @staticmethod
+    def _index_from_area_style(style: LineStyle) -> int:
+        return 0 if style == LineStyle.SOLID else 1
 
     @staticmethod
     def _data_type_from_index(index: int) -> NavDataType:
@@ -85,11 +143,13 @@ class LegendDialog:
         legend: LegendConfig,
         on_apply,
         sequences: list[LineSequence] | None = None,
-        on_delete_sequences: Callable[[list[str]], None] | None = None,
         sequences_provider: Callable[[], list[LineSequence]] | None = None,
+        survey_perimeters: list[SurveyPerimeter] | None = None,
     ) -> None:
         seq_list: list[LineSequence] = list(sequences or [])
         row_sequence_ids: list[list[str]] = []
+        row_custom_points: list[list[PolygonPoint]] = []
+        perimeter_count = len(survey_perimeters or [])
 
         def build(dialog: SingleInstanceDialog) -> None:
             layout = dialog.content_layout
@@ -103,12 +163,11 @@ class LegendDialog:
             area_lbl.setStyleSheet("font-weight: 600;")
             layout.addWidget(area_lbl)
 
-            area_table = QTableWidget(0, 2)
-            area_table.setHorizontalHeaderLabels(["Area Name", "Border Color"])
-            area_table.verticalHeader().setVisible(False)
-            area_table.horizontalHeader().setSectionResizeMode(
-                QHeaderView.ResizeMode.ResizeToContents
+            area_table = QTableWidget(0, 5)
+            area_table.setHorizontalHeaderLabels(
+                ["Area Name", "Border Style", "Border Color", "Coordinates", "Custom Points"]
             )
+            _configure_legend_table(area_table)
 
             post_lbl = QLabel("PostPlot")
             post_lbl.setStyleSheet("font-weight: 600; margin-top: 8px;")
@@ -117,24 +176,42 @@ class LegendDialog:
             post_table.setHorizontalHeaderLabels(
                 ["Name", "Line Style", "Color", "P111/P190 Data", "Select Sequences"]
             )
-            post_table.verticalHeader().setVisible(False)
-            post_table.horizontalHeader().setSectionResizeMode(
-                QHeaderView.ResizeMode.ResizeToContents
-            )
+            _configure_legend_table(post_table)
 
             def _collect() -> LegendConfig:
                 areas: list[AreaLegendEntry] = []
                 for row in range(area_table.rowCount()):
                     name_w = area_table.cellWidget(row, 0)
-                    color_w = area_table.cellWidget(row, 1)
-                    if isinstance(name_w, QLineEdit) and isinstance(color_w, ColorButton):
+                    style_w = area_table.cellWidget(row, 1)
+                    color_w = area_table.cellWidget(row, 2)
+                    coord_w = area_table.cellWidget(row, 3)
+                    if (
+                        isinstance(name_w, QLineEdit)
+                        and isinstance(style_w, QComboBox)
+                        and isinstance(color_w, ColorButton)
+                        and isinstance(coord_w, QComboBox)
+                    ):
                         name = name_w.text().strip()
                         if name:
+                            custom_points = (
+                                row_custom_points[row]
+                                if row < len(row_custom_points)
+                                else []
+                            )
+                            coord_mode, perimeter_index = coord_selection_from_index(
+                                coord_w.currentIndex(), perimeter_count
+                            )
                             areas.append(
                                 AreaLegendEntry(
                                     name=name,
+                                    border_style=cls._area_style_from_index(
+                                        style_w.currentIndex()
+                                    ),
                                     color=color_w.color,
                                     opacity=color_w.opacity,
+                                    coordinate_mode=coord_mode,
+                                    survey_perimeter_index=perimeter_index,
+                                    custom_points=custom_points,
                                 )
                             )
 
@@ -167,18 +244,93 @@ class LegendDialog:
                             )
                 return LegendConfig(areas=areas, postplot_lines=lines)
 
+            def _update_custom_button(row: int) -> None:
+                coord_w = area_table.cellWidget(row, 3)
+                custom_btn = area_table.cellWidget(row, 4)
+                if not isinstance(coord_w, QComboBox) or not isinstance(custom_btn, QPushButton):
+                    return
+                is_custom = coord_w.currentIndex() == custom_coordinate_index(perimeter_count)
+                count = len(row_custom_points[row]) if row < len(row_custom_points) else 0
+                custom_btn.setEnabled(is_custom)
+                custom_btn.setText(
+                    f"Edit Points ({count})" if count else "Edit Points"
+                )
+                _fit_table_row(area_table, row)
+
+            def _open_custom_polygon(row: int) -> None:
+                name_w = area_table.cellWidget(row, 0)
+                area_name = name_w.text().strip() if isinstance(name_w, QLineEdit) else ""
+
+                def on_changed(points: list[PolygonPoint]) -> None:
+                    if row < len(row_custom_points):
+                        row_custom_points[row] = points
+                    else:
+                        while len(row_custom_points) <= row:
+                            row_custom_points.append([])
+                        row_custom_points[row] = points
+                    _update_custom_button(row)
+
+                existing = row_custom_points[row] if row < len(row_custom_points) else []
+                CustomPolygonDialog.open(
+                    parent=dialog,
+                    area_name=area_name,
+                    points=existing,
+                    on_changed=on_changed,
+                    row_key=str(row),
+                )
+
             def add_area_row(entry: AreaLegendEntry | None = None) -> None:
                 row = area_table.rowCount()
                 area_table.insertRow(row)
                 area_table.setCellWidget(row, 0, QLineEdit(entry.name if entry else ""))
+
+                style_combo = QComboBox()
+                style_combo.addItems(list(cls._AREA_STYLE_LABELS))
+                if entry:
+                    style_combo.setCurrentIndex(cls._index_from_area_style(entry.border_style))
+                area_table.setCellWidget(row, 1, style_combo)
+
                 area_table.setCellWidget(
-                    row, 1, ColorButton(entry.color if entry else "#22c55e", entry.opacity if entry else 1.0)
+                    row,
+                    2,
+                    ColorButton(
+                        entry.color if entry else "#22c55e",
+                        entry.opacity if entry else 1.0,
+                    ),
                 )
+
+                coord_combo = QComboBox()
+                coord_combo.addItems(coordinate_dropdown_labels(perimeter_count))
+                if entry:
+                    coord_combo.setCurrentIndex(
+                        coord_index_from_selection(
+                            entry.coordinate_mode,
+                            entry.survey_perimeter_index,
+                            perimeter_count,
+                        )
+                    )
+                coord_combo.currentIndexChanged.connect(
+                    lambda _idx, r=row: _update_custom_button(r)
+                )
+                area_table.setCellWidget(row, 3, coord_combo)
+
+                row_custom_points.append(
+                    list(entry.custom_points) if entry else []
+                )
+                custom_btn = _table_cell_button("Edit Points")
+                custom_btn.clicked.connect(
+                    lambda _checked=False, r=row: _open_custom_polygon(r)
+                )
+                area_table.setCellWidget(row, 4, custom_btn)
+                _update_custom_button(row)
+                _fit_table_row(area_table, row)
 
             def remove_area_row() -> None:
                 row = area_table.currentRow()
                 if row >= 0:
                     area_table.removeRow(row)
+                    if row < len(row_custom_points):
+                        del row_custom_points[row]
 
             def _open_sequences(row: int, name: str) -> None:
                 if not seq_list:
@@ -194,6 +346,7 @@ class LegendDialog:
                             if ids
                             else "Select Sequences"
                         )
+                        _fit_table_row(post_table, row)
 
                 def refresh_sequences() -> list[LineSequence]:
                     if sequences_provider:
@@ -201,31 +354,12 @@ class LegendDialog:
                         seq_list.extend(sequences_provider())
                     return list(seq_list)
 
-                def delete_sequences(ids: list[str]) -> None:
-                    if on_delete_sequences:
-                        on_delete_sequences(ids)
-                    for idx in range(len(row_sequence_ids)):
-                        row_sequence_ids[idx] = [
-                            seq_id
-                            for seq_id in row_sequence_ids[idx]
-                            if not sequence_id_matches(seq_id, ids)
-                        ]
-                        btn = post_table.cellWidget(idx, 4)
-                        if isinstance(btn, QPushButton):
-                            count = len(row_sequence_ids[idx])
-                            btn.setText(
-                                f"Select Sequences ({count})"
-                                if count
-                                else "Select Sequences"
-                            )
-
                 SequencesDialog.open(
                     parent=dialog,
                     legend_row_name=name,
                     sequences=seq_list,
                     selected_ids=row_sequence_ids[row] if row < len(row_sequence_ids) else [],
                     on_changed=on_changed,
-                    on_delete=delete_sequences if on_delete_sequences else None,
                     on_refresh=refresh_sequences,
                     row_key=str(row),
                 )
@@ -258,7 +392,7 @@ class LegendDialog:
 
                 seq_ids = list(entry.sequence_ids) if entry else []
                 row_sequence_ids.append(seq_ids)
-                seq_btn = QPushButton(
+                seq_btn = _table_cell_button(
                     f"Select Sequences ({len(seq_ids)})" if seq_ids else "Select Sequences"
                 )
                 seq_btn.setEnabled(bool(seq_list))
@@ -269,6 +403,7 @@ class LegendDialog:
                     ) else n,
                 ))
                 post_table.setCellWidget(row, 4, seq_btn)
+                _fit_table_row(post_table, row)
 
             def remove_post_row() -> None:
                 row = post_table.currentRow()
@@ -290,8 +425,8 @@ class LegendDialog:
             area_btns.addWidget(add_area_btn)
             area_btns.addWidget(rem_area_btn)
 
-            layout.addWidget(area_table)
             layout.addLayout(area_btns)
+            layout.addWidget(area_table)
             layout.addWidget(post_lbl)
 
             for entry in legend.postplot_lines:
@@ -308,8 +443,11 @@ class LegendDialog:
             post_btns.addWidget(add_post_btn)
             post_btns.addWidget(rem_post_btn)
 
-            layout.addWidget(post_table)
             layout.addLayout(post_btns)
+            layout.addWidget(post_table)
+
+            _set_table_viewport_rows(area_table, 5)
+            _set_table_viewport_rows(post_table, 5)
 
             if not seq_list:
                 note = QLabel("Load P111/P190 files to enable sequence selection.")
@@ -330,4 +468,4 @@ class LegendDialog:
             action_row.addWidget(close_btn)
             layout.addLayout(action_row)
 
-        SingleInstanceDialog.show_dialog(cls.KEY, "Legend", build, parent, width=760)
+        SingleInstanceDialog.show_dialog(cls.KEY, "Legend", build, parent, width=920, height=780)

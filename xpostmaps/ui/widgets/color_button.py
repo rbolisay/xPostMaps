@@ -12,62 +12,58 @@ from PySide6.QtWidgets import (
     QLabel,
     QPushButton,
     QSlider,
-    QVBoxLayout,
+    QWidget,
 )
 
 from xpostmaps.ui.theme import color_dialog_stylesheet
 
 
-class ColorPickerDialog(QDialog):
-    """Dark-themed color picker with opacity slider below the palette."""
+def pick_color_with_opacity(
+    color: str,
+    opacity: float,
+    parent=None,
+) -> tuple[str, float] | None:
+    """Show the standard color palette with an opacity slider below it."""
+    initial = QColor(color)
+    initial.setAlphaF(max(0.0, min(1.0, opacity)))
 
-    def __init__(self, color: str, opacity: float, parent=None) -> None:
-        super().__init__(parent)
-        self.setWindowTitle("Choose Color")
-        self.setStyleSheet(color_dialog_stylesheet())
-        self.setMinimumWidth(420)
+    dialog = QColorDialog(initial, parent)
+    dialog.setWindowTitle("Choose Color")
+    dialog.setOption(QColorDialog.ColorDialogOption.DontUseNativeDialog, True)
+    dialog.setOption(QColorDialog.ColorDialogOption.NoButtons, True)
+    dialog.setStyleSheet(color_dialog_stylesheet())
 
-        layout = QVBoxLayout(self)
+    opacity_row = QWidget()
+    opacity_layout = QHBoxLayout(opacity_row)
+    opacity_layout.setContentsMargins(8, 4, 8, 4)
+    opacity_lbl = QLabel("Opacity")
+    opacity_slider = QSlider(Qt.Orientation.Horizontal)
+    opacity_slider.setRange(0, 100)
+    opacity_slider.setValue(int(max(0.0, min(1.0, opacity)) * 100))
+    opacity_value = QLabel(f"{opacity_slider.value()}%")
+    opacity_slider.valueChanged.connect(
+        lambda value: opacity_value.setText(f"{value}%")
+    )
+    opacity_layout.addWidget(opacity_lbl)
+    opacity_layout.addWidget(opacity_slider, stretch=1)
+    opacity_layout.addWidget(opacity_value)
 
-        self._color_dialog = QColorDialog(QColor(color), self)
-        self._color_dialog.setOption(QColorDialog.ColorDialogOption.DontUseNativeDialog, True)
-        self._color_dialog.setOption(QColorDialog.ColorDialogOption.NoButtons, True)
-        self._color_dialog.setStyleSheet(color_dialog_stylesheet())
-        layout.addWidget(self._color_dialog)
+    buttons = QDialogButtonBox(
+        QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
+    )
+    buttons.accepted.connect(dialog.accept)
+    buttons.rejected.connect(dialog.reject)
 
-        opacity_row = QHBoxLayout()
-        opacity_lbl = QLabel("Opacity")
-        self._opacity_slider = QSlider(Qt.Orientation.Horizontal)
-        self._opacity_slider.setRange(0, 100)
-        self._opacity_slider.setValue(int(max(0.0, min(1.0, opacity)) * 100))
-        self._opacity_value = QLabel(f"{self._opacity_slider.value()}%")
-        self._opacity_slider.valueChanged.connect(
-            lambda value: self._opacity_value.setText(f"{value}%")
-        )
-        opacity_row.addWidget(opacity_lbl)
-        opacity_row.addWidget(self._opacity_slider, stretch=1)
-        opacity_row.addWidget(self._opacity_value)
-        layout.addLayout(opacity_row)
+    dialog.layout().addWidget(opacity_row)
+    dialog.layout().addWidget(buttons)
 
-        buttons = QDialogButtonBox(
-            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
-        )
-        buttons.accepted.connect(self.accept)
-        buttons.rejected.connect(self.reject)
-        layout.addWidget(buttons)
+    if dialog.exec() != QDialog.DialogCode.Accepted:
+        return None
 
-        self._chosen_color = QColor(color)
-        self._color_dialog.currentColorChanged.connect(self._on_color_changed)
-
-    def _on_color_changed(self, color: QColor) -> None:
-        if color.isValid():
-            self._chosen_color = color
-
-    def selected_color(self) -> str:
-        return self._chosen_color.name(QColor.NameFormat.HexRgb)
-
-    def selected_opacity(self) -> float:
-        return self._opacity_slider.value() / 100.0
+    chosen = dialog.selectedColor()
+    if not chosen.isValid():
+        return None
+    return chosen.name(QColor.NameFormat.HexRgb), opacity_slider.value() / 100.0
 
 
 class ColorButton(QPushButton):
@@ -111,14 +107,12 @@ class ColorButton(QPushButton):
         )
 
     def _pick_color(self) -> None:
-        dialog = ColorPickerDialog(self._color, self._opacity, self.window())
-        if dialog.exec() != QDialog.DialogCode.Accepted:
+        result = pick_color_with_opacity(self._color, self._opacity, self.window())
+        if result is None:
             return
-        chosen = dialog.selected_color()
-        if not chosen:
-            return
+        chosen, opacity = result
         self._color = chosen
-        self._opacity = dialog.selected_opacity()
+        self._opacity = opacity
         self._apply_style()
         self.color_changed.emit(self._color)
         self.opacity_changed.emit(self._opacity)

@@ -14,7 +14,7 @@ class SingleInstanceDialog(QDialog):
 
     _instances: dict[str, SingleInstanceDialog] = {}
 
-    def __init__(self, key: str, title: str, parent=None, width: int = 420) -> None:
+    def __init__(self, key: str, title: str, parent=None, width: int = 420, height: int = 520) -> None:
         super().__init__(parent)
         self._key = key
         self.setWindowTitle(title)
@@ -24,7 +24,7 @@ class SingleInstanceDialog(QDialog):
             | Qt.WindowType.WindowMinMaxButtonsHint
         )
         self.setModal(False)
-        self.resize(width, 520)
+        self.resize(width, height)
         self.setStyleSheet(app_stylesheet())
 
         outer = QVBoxLayout(self)
@@ -51,6 +51,7 @@ class SingleInstanceDialog(QDialog):
         builder,
         parent=None,
         width: int = 420,
+        height: int = 520,
     ) -> SingleInstanceDialog:
         existing = cls._instances.get(key)
         if existing is not None:
@@ -60,7 +61,7 @@ class SingleInstanceDialog(QDialog):
             existing.activateWindow()
             return existing
 
-        dialog = cls(key, title, parent, width)
+        dialog = cls(key, title, parent, width, height)
         builder(dialog)
         dialog.show()
         return dialog
