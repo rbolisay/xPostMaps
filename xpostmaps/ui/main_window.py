@@ -18,7 +18,9 @@ from PySide6.QtWidgets import (
 from xpostmaps.core.autosave import AutosaveController
 from xpostmaps.core.database import Database
 from xpostmaps.core.legend_utils import legend_from_dict, legend_to_dict
+from xpostmaps.core.local_settings import load_db_directory, save_db_directory
 from xpostmaps.core.mediator import Mediator
+from xpostmaps.core.project_db_utils import project_db_path
 from xpostmaps.core.models import (
     DisplayMode,
     LegendConfig,
@@ -28,12 +30,22 @@ from xpostmaps.core.models import (
     ProjectSettings,
 )
 from xpostmaps.core.parse_worker import ParseWorker
+from xpostmaps.core.crs_utils import normalize_epsg
+from xpostmaps.core.preplot_catalog_utils import (
+    build_preplot_catalog_from_segments,
+    resolve_preplot_file_order,
+    sync_preplot_legend_entries,
+)
 from xpostmaps.core.sequence_utils import sequence_id_matches
+from xpostmaps.ui.dialogs.import_polygons_dialog import ImportPolygonsDialog
 from xpostmaps.ui.dialogs.legend_dialog import LegendDialog
 from xpostmaps.parsers.directory_parser import NAV_EXTENSIONS, resolve_nav_files
-from xpostmaps.parsers.preplot_parser import PREPLOT_EXTENSIONS
+from xpostmaps.parsers.preplot_parser import resolve_preplot_files
+from xpostmaps.core.polygon_import_service import imported_polygon_entries
 from xpostmaps.ui.dialogs.nav_picker_dialog import NavFilePickerDialog
 from xpostmaps.ui.dialogs.postmap_info_dialog import PostmapInfoDialog
+from xpostmaps.ui.dialogs.preplot_navplan_dialog import PreplotNavplanDialog
+from xpostmaps.ui.dialogs.project_browser_dialog import ProjectBrowserDialog
 from xpostmaps.ui.left_panel import LeftPanel
 from xpostmaps.ui.map_widget import PostplotMapWidget
 from xpostmaps.ui.right_pane import RightPane
@@ -44,7 +56,9 @@ class MainWindow(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
         self._mediator = Mediator.instance()
-        self._db = Database()
+        default_db_dir = Path(__file__).resolve().parents[2] / "data"
+        self._db_directory = load_db_directory(default_db_dir)
+        self._db = Database(self._db_directory / "xpostmaps.db")
         self._settings = ProjectSettings()
         self._map_data: MapData | None = None
         self._worker: ParseWorker | None = None
@@ -90,11 +104,11 @@ class MainWindow(QMainWindow):
 
     def _connect_signals(self) -> None:
         self._left.project_name_changed.connect(self._on_project_name_changed)
-        self._left.browse_project.connect(self._load_project)
-        self._left.load_project.connect(self._load_project)
+        self._left.browse_load_project.connect(self._open_project_browser)
         self._left.save_project.connect(lambda: self._save_project(silent=False))
         self._left.select_preplot_navplan.connect(self._select_preplot_navplan)
         self._left.select_p111_p190_dir.connect(self._select_p111_dir)
+        self._left.open_import_polygons.connect(self._open_import_polygons)
         self._left.select_logo.connect(self._select_logo)
         self._left.open_postmap_info.connect(self._open_postmap_info)
         self._left.open_legend.connect(self._open_legend)
@@ -134,11 +148,80 @@ class MainWindow(QMainWindow):
             self._map_data = MapData(postmap_info=PostmapInfo())
         return self._map_data
 
+    def _sync_map_data_preplot_order(self) -> None:
+        if not self._map_data:
+            return
+        order = resolve_preplot_file_order(self._map_data, self._settings)
+        if order:
+            self._map_data.preplot_file_order = order
+
+    def _apply_map_crs_from_preplot(self, map_data: MapData) -> None:
+        info = map_data.postmap_info
+        if info.epsg_code:
+            info.epsg_code = normalize_epsg(info.epsg_code)
+            return
+        for entry in self._settings.preplot_catalog:
+            if entry.crs_code:
+                info.epsg_code = normalize_epsg(entry.crs_code)
+                return
+
+    def _current_map_epsg(self) -> str:
+        map_data = self._ensure_map_data()
+        self._apply_map_crs_from_preplot(map_data)
+        return normalize_epsg(map_data.postmap_info.epsg_code)
+
+    def _merge_preserved_postmap_info(
+        self,
+        parsed: PostmapInfo,
+        preserved: PostmapInfo | None,
+    ) -> PostmapInfo:
+        if preserved is None:
+            return parsed
+        for field in PostmapInfo.__dataclass_fields__:
+            if field == "extra":
+                continue
+            preserved_val = getattr(preserved, field)
+            parsed_val = getattr(parsed, field)
+            if field == "company_name" and preserved_val:
+                setattr(parsed, field, preserved_val)
+            elif preserved_val and not parsed_val:
+                setattr(parsed, field, preserved_val)
+        if parsed.epsg_code:
+            parsed.epsg_code = normalize_epsg(parsed.epsg_code)
+        return parsed
+
     def _refresh_ui(self) -> None:
+        if self._map_data:
+            self._apply_map_crs_from_preplot(self._map_data)
+        self._sync_map_data_preplot_order()
         self._map.set_legend(self._settings.legend_config)
         self._map.set_display_mode(self._settings.display_mode)
         self._map.render(self._map_data)
         self._right.update_from_project(self._settings, self._map_data)
+        self._refresh_import_polygons_summary()
+        self._refresh_preplot_summary()
+
+    def _refresh_import_polygons_summary(self) -> None:
+        imported = imported_polygon_entries(self._settings.legend_config.areas)
+        if not imported:
+            self._left.set_import_polygons("Not set")
+            return
+        if len(imported) == 1:
+            self._left.set_import_polygons(imported[0].name or "1 polygon")
+        else:
+            self._left.set_import_polygons(f"{len(imported)} polygon(s)")
+
+    def _refresh_preplot_summary(self) -> None:
+        catalog = self._settings.preplot_catalog
+        has_preplot = bool(catalog)
+        self._left.set_preplot_dependent_controls_enabled(has_preplot)
+        if not catalog:
+            self._left.set_preplot_navplan("Not set")
+            return
+        if len(catalog) == 1:
+            self._left.set_preplot_navplan(Path(catalog[0].file_path).name)
+        else:
+            self._left.set_preplot_navplan(f"{len(catalog)} preplot file(s)")
 
     def _on_project_name_changed(self, name: str) -> None:
         self._settings.name = name.strip()
@@ -147,7 +230,7 @@ class MainWindow(QMainWindow):
     def _on_logo_changed(self, path: str) -> None:
         self._settings.logo_path = path
         self._right.set_logo(path)
-        self._schedule_autosave()
+        self._persist_project()
 
     def _select_logo(self) -> None:
         path, _ = QFileDialog.getOpenFileName(
@@ -168,7 +251,30 @@ class MainWindow(QMainWindow):
             sequences=self._map_data.sequences if self._map_data else [],
             sequences_provider=self._current_sequences,
             survey_perimeters=perimeters,
+            preplot_count=len(self._settings.preplot_catalog),
+            map_epsg=self._current_map_epsg(),
+            on_map_epsg_changed=self._on_import_map_epsg_changed,
         )
+
+    def _open_import_polygons(self) -> None:
+        ImportPolygonsDialog.open(
+            self,
+            self._settings.legend_config,
+            self._current_map_epsg(),
+            on_apply=self._on_import_polygons_apply,
+            on_map_epsg_changed=self._on_import_map_epsg_changed,
+        )
+
+    def _on_import_polygons_apply(self, legend: LegendConfig) -> None:
+        self._on_legend_apply(legend)
+        self._refresh_import_polygons_summary()
+
+    def _on_import_map_epsg_changed(self, epsg_code: str) -> None:
+        if not self._map_data:
+            return
+        self._map_data.postmap_info.epsg_code = normalize_epsg(epsg_code)
+        self._right.update_from_project(self._settings, self._map_data)
+        self._persist_project()
 
     def _current_sequences(self) -> list[LineSequence]:
         return list(self._map_data.sequences) if self._map_data else []
@@ -186,11 +292,23 @@ class MainWindow(QMainWindow):
 
     def _on_legend_apply(self, legend: LegendConfig) -> None:
         self._settings.legend_config = legend_from_dict(legend_to_dict(legend))
+        self._sync_map_data_preplot_order()
         self._map.set_legend(self._settings.legend_config)
-        self._map.render(self._map_data)
+        self._map.render(self._map_data, force=True)
         self._right.update_from_project(self._settings, self._map_data)
+        self._ensure_project_name()
+        if self._autosave.save_now():
+            self.statusBar().showMessage("Legend saved")
+        else:
+            self.statusBar().showMessage(
+                "Legend updated — enter a project name to save to database",
+                5000,
+            )
+
+    def _persist_project(self) -> None:
+        """Save project immediately when possible."""
+        self._ensure_project_name()
         self._autosave.save_now()
-        self.statusBar().showMessage("Legend applied")
 
     def _open_postmap_info(self) -> None:
         info = self._map_data.postmap_info if self._map_data else PostmapInfo()
@@ -200,35 +318,26 @@ class MainWindow(QMainWindow):
         map_data = self._ensure_map_data()
         map_data.postmap_info = info
         self._right.update_from_project(self._settings, map_data)
-        self._schedule_autosave()
+        self._persist_project()
 
     def _select_preplot_navplan(self) -> None:
-        result = NavFilePickerDialog.pick(
+        PreplotNavplanDialog.open(
             self,
-            title="Select Preplot / Navplan Files",
-            hint=(
-                "Select preplot (.p111/.p190 start/end lines, doglegs) or "
-                "navplan files (shotpoints along each line)."
-            ),
-            extensions=PREPLOT_EXTENSIONS,
-            file_filter=(
-                "Preplot / Navplan (*.p111 *.p190 *.nav *.navplan *.plan *.txt);;"
-                "All Files (*)"
-            ),
+            self._settings,
+            on_apply=self._on_preplot_settings_changed,
             initial_dir=self._settings.preplots_dir or self._settings.p111_p190_dir or "",
-            initial_files=self._settings.preplot_files or None,
         )
-        if not result:
-            return
-        files, folder = result
-        self._settings.preplot_files = files
-        self._settings.preplots_dir = folder
-        display = (
-            f"{len(files)} file(s)"
-            if len(files) != 1
-            else files[0]
+
+    def _on_preplot_settings_changed(self, settings: ProjectSettings) -> None:
+        self._settings.preplot_files = settings.preplot_files
+        self._settings.preplot_files_explicit = settings.preplot_files_explicit
+        self._settings.preplots_dir = settings.preplots_dir
+        self._settings.preplot_catalog = list(settings.preplot_catalog)
+        sync_preplot_legend_entries(
+            self._settings.legend_config,
+            self._settings.preplot_catalog,
         )
-        self._left.set_preplot_navplan(display)
+        self._refresh_preplot_summary()
         self._ensure_project_name()
         self._start_parse()
 
@@ -264,12 +373,12 @@ class MainWindow(QMainWindow):
         if self._worker and self._worker.isRunning():
             return
         has_nav = bool(resolve_nav_files(self._settings))
-        has_preplot = bool(
-            self._settings.preplot_files
-            or self._settings.preplots_dir
-            or self._settings.overlay_dir
+        has_preplot = bool(resolve_preplot_files(self._settings))
+        explicit_sources = (
+            self._settings.nav_files_explicit
+            or self._settings.preplot_files_explicit
         )
-        if not has_nav and not has_preplot:
+        if not has_nav and not has_preplot and not explicit_sources:
             return
 
         self._parsing = True
@@ -293,17 +402,29 @@ class MainWindow(QMainWindow):
         self._left.set_status(msg)
 
     def _on_parse_finished(self, map_data: MapData) -> None:
-        if self._map_data and self._map_data.postmap_info:
-            preserved = self._map_data.postmap_info
-            for field in PostmapInfo.__dataclass_fields__:
-                if field == "extra":
-                    continue
-                edited = getattr(preserved, field)
-                if edited:
-                    setattr(map_data.postmap_info, field, edited)
+        preserved = self._map_data.postmap_info if self._map_data else None
+        map_data.postmap_info = self._merge_preserved_postmap_info(
+            map_data.postmap_info,
+            preserved,
+        )
 
         self._map_data = map_data
         self._prune_legend_sequence_refs()
+        if self._settings.preplot_files:
+            self._settings.preplot_catalog = build_preplot_catalog_from_segments(
+                self._settings.preplot_files,
+                map_data.preplot_segments,
+                map_data.postmap_info.epsg_code,
+            )
+        elif self._settings.preplot_files_explicit:
+            self._settings.preplot_catalog = []
+        sync_preplot_legend_entries(
+            self._settings.legend_config,
+            self._settings.preplot_catalog,
+        )
+        self._apply_map_crs_from_preplot(map_data)
+        self._sync_map_data_preplot_order()
+        self._refresh_preplot_summary()
         self._left.set_progress(100, False)
         skipped = map_data.stats.get("nav_files_skipped", 0)
         parsed = map_data.stats.get("nav_files_parsed", 0)
@@ -314,7 +435,10 @@ class MainWindow(QMainWindow):
             f"{parsed or map_data.stats.get('source_files', 0)} parsed nav + "
             f"{map_data.stats.get('preplot_files', 0)} preplot file(s){skip_note}"
         )
-        self._refresh_ui()
+        self._map.set_legend(self._settings.legend_config)
+        self._map.set_display_mode(self._settings.display_mode)
+        self._map.render(self._map_data, force=True)
+        self._right.update_from_project(self._settings, self._map_data)
         self._mediator.map_data_updated.emit(map_data)
         self._parsing = False
         self._autosave.set_enabled(True)
@@ -331,26 +455,114 @@ class MainWindow(QMainWindow):
     def _on_map_data_updated(self, map_data: MapData) -> None:
         self._map_data = map_data
 
-    def _load_project(self) -> None:
+    def _open_project_browser(self) -> None:
+        ProjectBrowserDialog.open(
+            self,
+            str(self._db_directory),
+            on_load=self._load_database_project,
+            on_delete=self._delete_database_project,
+            on_directory_changed=self._on_db_directory_changed,
+        )
+
+    def _on_db_directory_changed(self, directory: str) -> None:
+        self._db_directory = Path(directory)
+        save_db_directory(self._db_directory)
+
+    def _switch_database(self, db_path: Path) -> None:
+        if self._db.db_path.resolve() == db_path.resolve():
+            return
+        self._db.close()
+        self._db = Database(db_path)
+
+    def _load_database_project(self, db_path: str, project_name: str) -> None:
+        path = Path(db_path)
+        if not path.is_file():
+            QMessageBox.warning(self, "Load Project", f"Database not found:\n{db_path}")
+            return
+        self._switch_database(path)
+        self._load_project_by_name(project_name)
+
+    def _delete_database_project(self, db_path: str, project_name: str) -> None:
+        path = Path(db_path)
+        if not path.is_file():
+            raise FileNotFoundError(path.name)
+
+        owns_temp = self._db.db_path.resolve() != path.resolve()
+        db = Database(path) if owns_temp else self._db
+        try:
+            if not db.delete_project(project_name):
+                raise ValueError(f"Project '{project_name}' was not found.")
+            remaining = db.list_projects()
+        finally:
+            if owns_temp:
+                db.close()
+
+        if self._settings.name.strip() == project_name.strip():
+            self._settings = ProjectSettings()
+            self._map_data = None
+            self._left.set_project_name("")
+            self._left.set_p111_p190_dir("")
+            self._left.set_preplot_navplan("")
+            self._refresh_ui()
+
+        if not remaining and path.is_file():
+            path.unlink()
+
+    def _load_database_file(self, db_path: str) -> None:
+        path = Path(db_path)
+        if not path.is_file():
+            QMessageBox.warning(self, "Load Project", f"Database not found:\n{db_path}")
+            return
+
+        self._switch_database(path)
         projects = self._db.list_projects()
         if not projects:
-            QMessageBox.information(self, "Load Project", "No saved projects found.")
+            QMessageBox.information(
+                self,
+                "Load Project",
+                f"No projects found in '{path.name}'.",
+            )
             return
+
+        if len(projects) == 1:
+            self._load_project_by_name(projects[0])
+            return
+
         name, ok = QInputDialog.getItem(
-            self, "Load Project", "Select project:", projects, 0, False
+            self,
+            "Load Project",
+            f"Select project in {path.name}:",
+            projects,
+            0,
+            False,
         )
         if ok and name:
-            loaded = self._db.load_project(name)
-            if loaded:
-                self._apply_loaded_project(*loaded)
-            else:
-                QMessageBox.warning(self, "Load Project", f"Could not load '{name}'.")
+            self._load_project_by_name(name)
+
+    def _load_project_by_name(self, name: str) -> None:
+        loaded = self._db.load_project(name)
+        if loaded:
+            self._apply_loaded_project(*loaded)
+        else:
+            QMessageBox.warning(self, "Load Project", f"Could not load '{name}'.")
 
     def _apply_loaded_project(self, settings: ProjectSettings, map_data: MapData) -> None:
         self._loading_project = True
         try:
             self._settings = settings
             self._map_data = map_data
+            if settings.preplot_files and not settings.preplot_catalog:
+                settings.preplot_catalog = build_preplot_catalog_from_segments(
+                    settings.preplot_files,
+                    map_data.preplot_segments,
+                    map_data.postmap_info.epsg_code,
+                )
+                sync_preplot_legend_entries(
+                    settings.legend_config,
+                    settings.preplot_catalog,
+                )
+            self._apply_map_crs_from_preplot(map_data)
+            self._sync_map_data_preplot_order()
             self._left.set_project_name(settings.name)
             if settings.nav_files:
                 nav_display = (
@@ -361,12 +573,7 @@ class MainWindow(QMainWindow):
             else:
                 nav_display = settings.p111_p190_dir
             self._left.set_p111_p190_dir(nav_display)
-            preplot_display = (
-                f"{len(settings.preplot_files)} file(s)"
-                if settings.preplot_files
-                else settings.preplots_dir or settings.overlay_dir
-            )
-            self._left.set_preplot_navplan(preplot_display)
+            self._refresh_preplot_summary()
             if settings.logo_path:
                 self._right.set_logo(settings.logo_path)
             self._refresh_ui()
@@ -384,7 +591,15 @@ class MainWindow(QMainWindow):
 
     def _save_project(self, silent: bool = False) -> bool:
         if self._parsing:
+            if not silent:
+                QMessageBox.warning(
+                    self,
+                    "Save Project",
+                    "Cannot save while navigation files are still parsing.",
+                )
             return False
+
+        self._settings.name = self._left.project_name() or self._settings.name.strip()
         name = self._settings.name.strip()
         if not name and not self._ensure_project_name():
             if not silent:
@@ -392,8 +607,11 @@ class MainWindow(QMainWindow):
             return False
 
         name = self._settings.name.strip()
-
         self._settings.name = name
+        target_db = project_db_path(self._db_directory, name)
+        self._db_directory.mkdir(parents=True, exist_ok=True)
+        self._switch_database(target_db)
+
         map_data = self._ensure_map_data()
 
         try:
@@ -405,10 +623,16 @@ class MainWindow(QMainWindow):
                 self.statusBar().showMessage(f"Auto-save failed: {exc}")
             return False
 
+        save_note = f"{name} → {target_db.name}"
         if silent:
-            self.statusBar().showMessage(f"Auto-saved: {name}", 3000)
+            self.statusBar().showMessage(f"Auto-saved: {save_note}", 3000)
         else:
-            self.statusBar().showMessage(f"Saved project: {name}")
+            self.statusBar().showMessage(f"Saved project: {save_note}")
+            QMessageBox.information(
+                self,
+                "Save Project",
+                f"Project '{name}' saved to:\n{target_db}",
+            )
         self._mediator.project_saved.emit(name)
         return True
 

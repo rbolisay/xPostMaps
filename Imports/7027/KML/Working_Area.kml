@@ -1,0 +1,101 @@
+<?xml version="1.0" encoding="utf-8" ?>
+<kml xmlns="http://www.opengis.net/kml/2.2">
+<Document id="root_doc">
+<Schema name="Working_Area" id="Working_Area">
+	<SimpleField name="N" type="float"></SimpleField>
+	<SimpleField name="begin" type="float"></SimpleField>
+	<SimpleField name="end" type="float"></SimpleField>
+</Schema>
+<Folder><name>Working_Area</name>
+  <Placemark>
+	<Style><LineStyle><color>ff0000ff</color></LineStyle><PolyStyle><fill>0</fill></PolyStyle></Style>
+	<ExtendedData><SchemaData schemaUrl="#Working_Area">
+		<SimpleData name="N">1</SimpleData>
+		<SimpleData name="begin">1</SimpleData>
+		<SimpleData name="end">1</SimpleData>
+	</SchemaData></ExtendedData>
+      <MultiGeometry><LineString><coordinates>-56.8333333300993,8.50000000418395 -56.750000001496,8.50000000053824</coordinates></LineString></MultiGeometry>
+  </Placemark>
+  <Placemark>
+	<Style><LineStyle><color>ff0000ff</color></LineStyle><PolyStyle><fill>0</fill></PolyStyle></Style>
+	<ExtendedData><SchemaData schemaUrl="#Working_Area">
+		<SimpleData name="N">3</SimpleData>
+		<SimpleData name="begin">3</SimpleData>
+		<SimpleData name="end">3</SimpleData>
+	</SchemaData></ExtendedData>
+      <MultiGeometry><LineString><coordinates>-56.750000001293,8.33333300231696 -56.6671195655293,8.33333333014054</coordinates></LineString></MultiGeometry>
+  </Placemark>
+  <Placemark>
+	<Style><LineStyle><color>ff0000ff</color></LineStyle><PolyStyle><fill>0</fill></PolyStyle></Style>
+	<ExtendedData><SchemaData schemaUrl="#Working_Area">
+		<SimpleData name="N">2</SimpleData>
+		<SimpleData name="begin">2</SimpleData>
+		<SimpleData name="end">2</SimpleData>
+	</SchemaData></ExtendedData>
+      <MultiGeometry><LineString><coordinates>-56.750000001496,8.50000000053824 -56.750000001293,8.33333300231696</coordinates></LineString></MultiGeometry>
+  </Placemark>
+  <Placemark>
+	<Style><LineStyle><color>ff0000ff</color></LineStyle><PolyStyle><fill>0</fill></PolyStyle></Style>
+	<ExtendedData><SchemaData schemaUrl="#Working_Area">
+		<SimpleData name="N">5</SimpleData>
+		<SimpleData name="begin">5</SimpleData>
+		<SimpleData name="end">5</SimpleData>
+	</SchemaData></ExtendedData>
+      <MultiGeometry><LineString><coordinates>-56.6764825993079,7.66413664330962 -57.1653079705567,7.66666666808405</coordinates></LineString></MultiGeometry>
+  </Placemark>
+  <Placemark>
+	<Style><LineStyle><color>ff0000ff</color></LineStyle><PolyStyle><fill>0</fill></PolyStyle></Style>
+	<ExtendedData><SchemaData schemaUrl="#Working_Area">
+		<SimpleData name="N">4</SimpleData>
+		<SimpleData name="begin">4</SimpleData>
+		<SimpleData name="end">4</SimpleData>
+	</SchemaData></ExtendedData>
+      <MultiGeometry><LineString><coordinates>-56.6671195655293,8.33333333014054 -56.6764825993079,7.66413664330962</coordinates></LineString></MultiGeometry>
+  </Placemark>
+  <Placemark>
+	<Style><LineStyle><color>ff0000ff</color></LineStyle><PolyStyle><fill>0</fill></PolyStyle></Style>
+	<ExtendedData><SchemaData schemaUrl="#Working_Area">
+		<SimpleData name="N">7</SimpleData>
+		<SimpleData name="begin">7</SimpleData>
+		<SimpleData name="end">7</SimpleData>
+	</SchemaData></ExtendedData>
+      <MultiGeometry><LineString><coordinates>-57.1666666711575,8.08107377941051 -57.2500000000961,8.08333300268397</coordinates></LineString></MultiGeometry>
+  </Placemark>
+  <Placemark>
+	<Style><LineStyle><color>ff0000ff</color></LineStyle><PolyStyle><fill>0</fill></PolyStyle></Style>
+	<ExtendedData><SchemaData schemaUrl="#Working_Area">
+		<SimpleData name="N">6</SimpleData>
+		<SimpleData name="begin">6</SimpleData>
+		<SimpleData name="end">6</SimpleData>
+	</SchemaData></ExtendedData>
+      <MultiGeometry><LineString><coordinates>-57.1653079705567,7.66666666808405 -57.1666666711575,8.08107377941051</coordinates></LineString></MultiGeometry>
+  </Placemark>
+  <Placemark>
+	<Style><LineStyle><color>ff0000ff</color></LineStyle><PolyStyle><fill>0</fill></PolyStyle></Style>
+	<ExtendedData><SchemaData schemaUrl="#Working_Area">
+		<SimpleData name="N">9</SimpleData>
+		<SimpleData name="begin">9</SimpleData>
+		<SimpleData name="end">9</SimpleData>
+	</SchemaData></ExtendedData>
+      <MultiGeometry><LineString><coordinates>-57.2500000040406,8.16666699829113 -57.2474336966151,8.49841732843024</coordinates></LineString></MultiGeometry>
+  </Placemark>
+  <Placemark>
+	<Style><LineStyle><color>ff0000ff</color></LineStyle><PolyStyle><fill>0</fill></PolyStyle></Style>
+	<ExtendedData><SchemaData schemaUrl="#Working_Area">
+		<SimpleData name="N">8</SimpleData>
+		<SimpleData name="begin">8</SimpleData>
+		<SimpleData name="end">8</SimpleData>
+	</SchemaData></ExtendedData>
+      <MultiGeometry><LineString><coordinates>-57.2500000000961,8.08333300268397 -57.2500000040406,8.16666699829113</coordinates></LineString></MultiGeometry>
+  </Placemark>
+  <Placemark>
+	<Style><LineStyle><color>ff0000ff</color></LineStyle><PolyStyle><fill>0</fill></PolyStyle></Style>
+	<ExtendedData><SchemaData schemaUrl="#Working_Area">
+		<SimpleData name="N">10</SimpleData>
+		<SimpleData name="begin">10</SimpleData>
+		<SimpleData name="end">10</SimpleData>
+	</SchemaData></ExtendedData>
+      <MultiGeometry><LineString><coordinates>-57.2474336966151,8.49841732843024 -56.8333333300993,8.50000000418395</coordinates></LineString></MultiGeometry>
+  </Placemark>
+</Folder>
+</Document></kml>

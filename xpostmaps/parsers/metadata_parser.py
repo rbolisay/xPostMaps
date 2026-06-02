@@ -6,6 +6,7 @@ import csv
 import re
 from pathlib import Path
 
+from xpostmaps.core.crs_utils import normalize_epsg
 from xpostmaps.core.models import PostmapInfo, ProjectSettings
 
 EPSG_RE = re.compile(r"EPSG\s*[:\s]?\s*(\d+)", re.IGNORECASE)
@@ -223,12 +224,11 @@ def metadata_to_postmap(
     if not epsg:
         epsg = _extract_epsg(crs, projection)
 
-    def pick(field_value: str, *meta_keys: str) -> str:
-        if field_value:
-            return field_value
-        return _lookup(info, *meta_keys)
+    def pick(base_value: str, *meta_keys: str) -> str:
+        from_meta = _lookup(info, *meta_keys)
+        return from_meta or base_value
 
-    return PostmapInfo(
+    result = PostmapInfo(
         company_name=base.company_name,
         title=pick(base.title, "title", "survey title", "job title"),
         job_number=pick(base.job_number, "job number", "job no", "job_number"),
@@ -276,6 +276,9 @@ def metadata_to_postmap(
         eccentricity=pick(base.eccentricity, "eccentricity"),
         extra={**base.extra, **info},
     )
+    if result.epsg_code:
+        result.epsg_code = normalize_epsg(result.epsg_code)
+    return result
 
 
 def collect_postmap_metadata(

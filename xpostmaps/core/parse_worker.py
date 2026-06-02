@@ -6,6 +6,7 @@ from PySide6.QtCore import QThread, Signal
 
 from xpostmaps.core.models import MapData, PostmapInfo, ProjectSettings
 from xpostmaps.parsers.directory_parser import parse_navigation_directory, resolve_nav_files
+from xpostmaps.parsers.preplot_parser import resolve_preplot_files
 
 
 class ParseWorker(QThread):
@@ -28,12 +29,12 @@ class ParseWorker(QThread):
     def run(self) -> None:
         try:
             has_nav = bool(resolve_nav_files(self._settings))
-            has_preplot = bool(
-                self._settings.preplot_files
-                or self._settings.preplots_dir
-                or self._settings.overlay_dir
+            has_preplot = bool(resolve_preplot_files(self._settings))
+            explicit = (
+                self._settings.nav_files_explicit
+                or self._settings.preplot_files_explicit
             )
-            if not has_nav and not has_preplot:
+            if not has_nav and not has_preplot and not explicit:
                 self.failed.emit("Select P111/P190 or Preplot/Navplan files first.")
                 return
 
@@ -46,7 +47,11 @@ class ParseWorker(QThread):
                 existing_postmap=self._existing_postmap,
                 existing_map_data=self._existing_map_data,
             )
-            if not map_data.segments and not map_data.preplot_segments:
+            if (
+                not map_data.segments
+                and not map_data.preplot_segments
+                and not explicit
+            ):
                 self.failed.emit("No navigation or preplot records found in selected files.")
                 return
             self.finished_ok.emit(map_data)

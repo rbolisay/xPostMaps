@@ -6,6 +6,7 @@ from PySide6.QtCore import Qt
 from PySide6.QtGui import QFont, QColor, QPainter, QPen
 from PySide6.QtWidgets import QGridLayout, QHBoxLayout, QLabel, QVBoxLayout, QWidget
 
+from xpostmaps.core.crs_utils import epsg_label
 from xpostmaps.core.models import LegendConfig, LineStyle, PostmapInfo, SurveyBounds
 from xpostmaps.ui.theme import BG_PRINT, TEXT_PRINT, TEXT_PRINT_SECONDARY
 from xpostmaps.ui.widgets.scale_bar import ScaleBarWidget
@@ -109,8 +110,10 @@ class PostmapInfoCard(QWidget):
         layout.addWidget(self._legend_title)
 
         self._legend_area = QVBoxLayout()
+        self._legend_preplot = QVBoxLayout()
         self._legend_postplot = QVBoxLayout()
         layout.addLayout(self._legend_area)
+        layout.addLayout(self._legend_preplot)
         layout.addLayout(self._legend_postplot)
 
         osm = QLabel("OpenStreetMap")
@@ -160,37 +163,56 @@ class PostmapInfoCard(QWidget):
             self._scale.set_km(40)
 
         left_rows = [
-            f"Title: {info.title or '—'}",
             f"Job Number: {info.job_number or '—'}",
             f"Client Project Reference: {info.client_ref or '—'}",
             f"File Name: {info.file_name or '—'}",
             f"User Name: {info.user_name or '—'}",
             f"Date: {info.date or '—'}",
         ]
+        authority = epsg_label(info.epsg_code) if info.epsg_code else "—"
         right_rows = [
             "Coordinate Reference System",
             f"Name: {info.crs_name or '—'}",
             f"Projection: {info.projection or info.crs_name or '—'}",
-            f"Authority: {info.epsg_code or '—'}",
+            f"Authority: {authority}",
             f"Geographic Datum: {info.geographic_datum or '—'}",
             f"Spheroid: {info.spheroid or '—'}",
         ]
         for i, text in enumerate(left_rows):
             self._left_labels[i].setText(text)
+        for i in range(len(left_rows), len(self._left_labels)):
+            self._left_labels[i].setText("")
         for i, text in enumerate(right_rows):
             self._right_labels[i].setText(text)
 
         self._clear_layout(self._legend_area)
+        self._clear_layout(self._legend_preplot)
         self._clear_layout(self._legend_postplot)
 
         area_hdr = QLabel("Area")
         area_hdr.setStyleSheet(f"font-size: 10px; font-weight: 600; color: {TEXT_PRINT};")
         self._legend_area.addWidget(area_hdr)
         for entry in legend.areas:
-            if entry.name:
+            if entry.name and not entry.hidden:
                 self._add_legend_row(
                     self._legend_area,
                     _BoxSwatch(entry.color),
+                    entry.name,
+                )
+
+        visible_preplot = [
+            entry for entry in legend.preplot_lines if entry.name and not entry.hidden
+        ]
+        if visible_preplot:
+            preplot_hdr = QLabel("Preplot")
+            preplot_hdr.setStyleSheet(
+                f"font-size: 10px; font-weight: 600; margin-top: 4px; color: {TEXT_PRINT};"
+            )
+            self._legend_preplot.addWidget(preplot_hdr)
+            for entry in visible_preplot:
+                self._add_legend_row(
+                    self._legend_preplot,
+                    _LineSwatch(entry.color, line_style=entry.line_style),
                     entry.name,
                 )
 
@@ -200,7 +222,7 @@ class PostmapInfoCard(QWidget):
         )
         self._legend_postplot.addWidget(post_hdr)
         for entry in legend.postplot_lines:
-            if entry.name:
+            if entry.name and not entry.hidden:
                 self._add_legend_row(
                     self._legend_postplot,
                     _LineSwatch(entry.color, line_style=entry.line_style),

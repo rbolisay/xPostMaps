@@ -20,6 +20,7 @@ class LineStyle(str, Enum):
 
 class AreaCoordinateMode(str, Enum):
     SURVEY_PERIMETER = "survey_perimeter"
+    IMPORTED = "imported"
     CUSTOM = "custom"
 
 
@@ -47,9 +48,15 @@ class AreaLegendEntry:
     border_style: LineStyle = LineStyle.SOLID
     color: str = "#60a5fa"
     opacity: float = 1.0
+    border_width: float = 2.0
+    hidden: bool = False
     coordinate_mode: AreaCoordinateMode = AreaCoordinateMode.SURVEY_PERIMETER
     survey_perimeter_index: int = 0
+    imported_polygon_index: int = 0
     custom_points: list[PolygonPoint] = field(default_factory=list)
+    source_file: str = ""
+    source_epsg: str = ""
+    import_polygon_number: int = 0
 
 
 class NavDataType(str, Enum):
@@ -58,31 +65,52 @@ class NavDataType(str, Enum):
 
 
 @dataclass
+class PreplotCatalogEntry:
+    preplot_number: int = 0
+    file_path: str = ""
+    crs_code: str = ""
+    total_lines: int = 0
+
+
+@dataclass
+class PreplotLegendEntry:
+    name: str = ""
+    preplot_source_index: int = 0
+    line_style: LineStyle = LineStyle.SOLID
+    color: str = "#f59e0b"
+    opacity: float = 1.0
+    line_width: float = 0.9
+    dot_radius: float = 3.0
+    hidden: bool = False
+
+
+@dataclass
 class PostplotLegendEntry:
     name: str = ""
     line_style: LineStyle = LineStyle.SOLID
     color: str = "#ef4444"
     opacity: float = 1.0
+    line_width: float = 1.2
+    dot_radius: float = 3.0
+    hidden: bool = False
     data_type: NavDataType = NavDataType.SOURCE
     sequence_ids: list[str] = field(default_factory=list)
+    sequence_filter_active: bool = False
 
 
 @dataclass
 class LegendConfig:
     areas: list[AreaLegendEntry] = field(default_factory=list)
+    preplot_lines: list[PreplotLegendEntry] = field(default_factory=list)
     postplot_lines: list[PostplotLegendEntry] = field(default_factory=list)
 
     @staticmethod
     def default() -> LegendConfig:
+        # Area rows are not auto-populated; the user adds them explicitly.
+        # Imported polygons, preplots and survey perimeters are never added
+        # to the Area table automatically.
         return LegendConfig(
-            areas=[
-                AreaLegendEntry(
-                    name="Full Fold Area",
-                    border_style=LineStyle.SOLID,
-                    color="#22c55e",
-                    coordinate_mode=AreaCoordinateMode.SURVEY_PERIMETER,
-                ),
-            ],
+            areas=[],
             postplot_lines=[
                 PostplotLegendEntry(name="Up Line", line_style=LineStyle.SOLID, color="#ef4444"),
                 PostplotLegendEntry(name="Down Line", line_style=LineStyle.SOLID, color="#3b82f6"),
@@ -183,7 +211,9 @@ class ProjectSettings:
     nav_files: list[str] = field(default_factory=list)
     nav_files_explicit: bool = False
     preplot_files: list[str] = field(default_factory=list)
+    preplot_files_explicit: bool = False
     preplots_dir: str = ""
+    preplot_catalog: list[PreplotCatalogEntry] = field(default_factory=list)
     overlay_dir: str = ""  # legacy; migrated to preplot_files
     display_mode: DisplayMode = DisplayMode.LINES
     show_source: bool = True
@@ -254,4 +284,5 @@ class MapData:
     source_files: list[str] = field(default_factory=list)
     nav_file_cache: dict[str, tuple[float, int, str]] = field(default_factory=dict)
     survey_perimeters: list[SurveyPerimeter] = field(default_factory=list)
+    preplot_file_order: list[str] = field(default_factory=list)
     stats: dict[str, Any] = field(default_factory=dict)

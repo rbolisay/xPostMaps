@@ -10,6 +10,7 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
 )
 
+from xpostmaps.core.crs_utils import normalize_epsg
 from xpostmaps.core.models import PostmapInfo
 from xpostmaps.ui.dialogs.base_dialog import SingleInstanceDialog
 
@@ -26,7 +27,7 @@ class PostmapInfoDialog:
                 if item.widget():
                     item.widget().deleteLater()
 
-            title = QLabel("Postmap Information")
+            title = QLabel("Project Information")
             title.setObjectName("sectionTitle")
             layout.addWidget(title)
 
@@ -38,7 +39,6 @@ class PostmapInfoDialog:
                 ("client", "Client Name"),
                 ("area", "Area"),
                 ("project", "Project Name"),
-                ("title", "Title"),
                 ("job_number", "Job Number"),
                 ("client_ref", "Client Project Reference"),
                 ("crs_name", "Coordinate Reference System"),
@@ -63,7 +63,7 @@ class PostmapInfoDialog:
             def apply() -> None:
                 updated = PostmapInfo(
                     company_name=info.company_name,
-                    title=fields["title"].text().strip(),
+                    title=info.title,
                     job_number=fields["job_number"].text().strip(),
                     client=fields["client"].text().strip(),
                     area=fields["area"].text().strip(),
@@ -74,7 +74,7 @@ class PostmapInfoDialog:
                     date=fields["date"].text().strip(),
                     crs_name=fields["crs_name"].text().strip(),
                     projection=fields["projection"].text().strip(),
-                    epsg_code=fields["epsg_code"].text().strip(),
+                    epsg_code=normalize_epsg(fields["epsg_code"].text().strip()),
                     geographic_datum=info.geographic_datum,
                     spheroid=info.spheroid,
                     semi_major_axis=info.semi_major_axis,
@@ -94,5 +94,5 @@ class PostmapInfoDialog:
             layout.addWidget(close_btn)
 
         SingleInstanceDialog.show_dialog(
-            cls.KEY, "Postmap Information", build, parent, width=480
+            cls.KEY, "Project Information", build, parent, width=480
         )

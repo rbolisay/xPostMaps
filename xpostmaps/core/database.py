@@ -8,6 +8,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from xpostmaps.core.legend_utils import legend_from_dict, legend_to_dict
+from xpostmaps.core.preplot_catalog_utils import catalog_from_json, catalog_to_json
 from xpostmaps.core.sequence_utils import nav_cache_from_json, nav_cache_to_json
 from xpostmaps.core.models import (
     DisplayMode,
@@ -159,6 +160,14 @@ class Database:
             self._conn.execute(
                 "ALTER TABLE projects ADD COLUMN nav_files_explicit INTEGER DEFAULT 0"
             )
+        if "preplot_files_explicit" not in cols:
+            self._conn.execute(
+                "ALTER TABLE projects ADD COLUMN preplot_files_explicit INTEGER DEFAULT 0"
+            )
+        if "preplot_catalog_json" not in cols:
+            self._conn.execute(
+                "ALTER TABLE projects ADD COLUMN preplot_catalog_json TEXT DEFAULT '[]'"
+            )
 
         seg_cols = {row[1] for row in self._conn.execute("PRAGMA table_info(segments)")}
         if "sequence_id" not in seg_cols:
@@ -197,6 +206,14 @@ class Database:
     def close(self) -> None:
         self._conn.close()
 
+    def delete_project(self, name: str) -> bool:
+        cursor = self._conn.execute(
+            "DELETE FROM projects WHERE name = ?",
+            (name.strip(),),
+        )
+        self._conn.commit()
+        return cursor.rowcount > 0
+
     @staticmethod
     def _now() -> str:
         return datetime.now(timezone.utc).isoformat()
@@ -210,6 +227,7 @@ class Database:
         files_json = json.dumps(map_data.source_files)
         nav_files_json = json.dumps(settings.nav_files)
         preplot_files_json = json.dumps(settings.preplot_files)
+        preplot_catalog_json = json.dumps(catalog_to_json(settings.preplot_catalog))
         legend_json = json.dumps(legend_to_dict(settings.legend_config))
         nav_cache_json = json.dumps(nav_cache_to_json(map_data.nav_file_cache))
 
@@ -228,7 +246,8 @@ class Database:
                     postmap_info_json=?, bounds_json=?, geo_bounds_json=?,
                     stats_json=?, source_files_json=?, nav_files_json=?,
                     preplot_files_json=?, nav_file_cache_json=?, logo_path=?,
-                    legend_config_json=?, nav_files_explicit=?, updated_at=?
+                    legend_config_json=?, nav_files_explicit=?, preplot_files_explicit=?,
+                    preplot_catalog_json=?, updated_at=?
                 WHERE id=?
                 """,
                 (
@@ -251,6 +270,8 @@ class Database:
                     settings.logo_path,
                     legend_json,
                     int(settings.nav_files_explicit),
+                    int(settings.preplot_files_explicit),
+                    preplot_catalog_json,
                     now,
                     project_id,
                 ),
@@ -268,8 +289,9 @@ class Database:
                     postmap_info_json, bounds_json, geo_bounds_json, stats_json,
                     source_files_json, nav_files_json, preplot_files_json,
                     nav_file_cache_json, logo_path, legend_config_json,
-                    nav_files_explicit, created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    nav_files_explicit, preplot_files_explicit, preplot_catalog_json,
+                    created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     settings.name,
@@ -292,6 +314,8 @@ class Database:
                     settings.logo_path,
                     legend_json,
                     int(settings.nav_files_explicit),
+                    int(settings.preplot_files_explicit),
+                    preplot_catalog_json,
                     now,
                     now,
                 ),
@@ -440,6 +464,14 @@ class Database:
         nav_files_explicit = False
         if "nav_files_explicit" in row.keys():
             nav_files_explicit = bool(row["nav_files_explicit"])
+        preplot_files_explicit = False
+        if "preplot_files_explicit" in row.keys():
+            preplot_files_explicit = bool(row["preplot_files_explicit"])
+        preplot_catalog = []
+        if "preplot_catalog_json" in row.keys():
+            preplot_catalog = catalog_from_json(
+                json.loads(row["preplot_catalog_json"] or "[]")
+            )
 
         settings = ProjectSettings(
             name=row["name"],
@@ -447,7 +479,9 @@ class Database:
             nav_files=nav_files,
             nav_files_explicit=nav_files_explicit or bool(nav_files),
             preplot_files=preplot_files,
+            preplot_files_explicit=preplot_files_explicit or bool(preplot_files),
             preplots_dir=row["preplots_dir"] or "",
+            preplot_catalog=preplot_catalog,
             overlay_dir=row["overlay_dir"] or "",
             display_mode=DisplayMode(row["display_mode"]),
             show_source=bool(row["show_source"]),

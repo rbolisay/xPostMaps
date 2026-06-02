@@ -290,6 +290,7 @@ def parse_navigation_directory(
         segments, _meta, preplot_stats = parse_preplot_files(preplot_files)
         map_data.preplot_segments = segments
         map_data.survey_perimeters = parse_survey_perimeters(preplot_files)
+        map_data.preplot_file_order = [str(path) for path in preplot_files]
         for seg in segments:
             all_x.extend(seg.xs)
             all_y.extend(seg.ys)
@@ -297,15 +298,26 @@ def parse_navigation_directory(
             all_x.extend(perimeter.xs)
             all_y.extend(perimeter.ys)
         step += len(preplot_files)
-    elif existing_map_data and not preplot_files:
+    elif existing_map_data and not settings.preplot_files_explicit:
         map_data.preplot_segments = list(existing_map_data.preplot_segments)
         map_data.survey_perimeters = list(existing_map_data.survey_perimeters)
+        map_data.preplot_file_order = list(existing_map_data.preplot_file_order)
+        if not map_data.preplot_file_order and map_data.preplot_segments:
+            seen: list[str] = []
+            for segment in map_data.preplot_segments:
+                if segment.file_name and segment.file_name not in seen:
+                    seen.append(segment.file_name)
+            map_data.preplot_file_order = seen
         for seg in map_data.preplot_segments:
             all_x.extend(seg.xs)
             all_y.extend(seg.ys)
         for perimeter in map_data.survey_perimeters:
             all_x.extend(perimeter.xs)
             all_y.extend(perimeter.ys)
+    else:
+        map_data.preplot_segments = []
+        map_data.survey_perimeters = []
+        map_data.preplot_file_order = []
 
     xs_arr = np.array(all_x, dtype=np.float64)
     ys_arr = np.array(all_y, dtype=np.float64)

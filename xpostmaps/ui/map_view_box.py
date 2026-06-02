@@ -1,4 +1,4 @@
-"""Map ViewBox — right-drag pan, zoom window, zoom extent, context menu."""
+"""Map ViewBox — right-drag pan, left-drag zoom window, zoom extent, context menu."""
 
 from __future__ import annotations
 
@@ -9,20 +9,21 @@ from pyqtgraph.Point import Point
 from PySide6.QtCore import QTimer, Qt
 from PySide6.QtWidgets import QMenu
 
+from xpostmaps.ui.theme import apply_menu_theme
+
 
 class MapViewBox(pg.ViewBox):
-    """ViewBox with GIS-style navigation: right-drag pan, zoom window/extent."""
+    """ViewBox with GIS-style navigation: right-drag pan, left-drag zoom window."""
 
     _DRAG_THRESHOLD = 4
 
     def __init__(self, *args, **kwargs) -> None:
         kwargs.setdefault("enableMenu", False)
         super().__init__(*args, **kwargs)
-        self.setMouseMode(pg.ViewBox.PanMode)
+        self.setMouseMode(pg.ViewBox.RectMode)
 
         self._extent_x: tuple[float, float] | None = None
         self._extent_y: tuple[float, float] | None = None
-        self._zoom_window_mode = False
         self._right_press_pos = None
         self._right_drag_moved = False
         self._pending_menu_pos = None
@@ -43,10 +44,10 @@ class MapViewBox(pg.ViewBox):
     def zoom_to_extent(self) -> None:
         if self._extent_x is None or self._extent_y is None:
             return
-        self.setRange(xRange=self._extent_x, yRange=self._extent_y, padding=0)
+        self.disableAutoRange()
+        self.setRange(xRange=self._extent_x, yRange=self._extent_y, padding=0, update=True)
 
     def start_zoom_window(self) -> None:
-        self._zoom_window_mode = True
         self.setMouseMode(pg.ViewBox.RectMode)
 
     def _translate_from_drag(self, ev, axis=None) -> None:
@@ -89,18 +90,8 @@ class MapViewBox(pg.ViewBox):
                 self._translate_from_drag(ev, axis)
             return
 
-        if (
-            ev.button() == Qt.MouseButton.LeftButton
-            and self._zoom_window_mode
-            and self.state["mouseMode"] == pg.ViewBox.RectMode
-        ):
-            super().mouseDragEvent(ev, axis)
-            if ev.isFinish():
-                self._zoom_window_mode = False
-                self.setMouseMode(pg.ViewBox.PanMode)
-            return
-
         if ev.button() == Qt.MouseButton.LeftButton:
+            ev.accept()
             super().mouseDragEvent(ev, axis)
             return
 
@@ -125,6 +116,7 @@ class MapViewBox(pg.ViewBox):
         if self._pending_menu_pos is None:
             return
         menu = QMenu()
+        apply_menu_theme(menu)
         zoom_window = menu.addAction("Zoom Window")
         zoom_extent = menu.addAction("Zoom Extent")
         chosen = menu.exec(self._pending_menu_pos)

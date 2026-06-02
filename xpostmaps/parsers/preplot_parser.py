@@ -391,7 +391,10 @@ def parse_preplot_files(paths: list[Path]) -> tuple[list[LineSegment], dict[str,
 
 
 def resolve_preplot_files(settings) -> list[Path]:
-    if getattr(settings, "preplot_files", None):
+    allowed_suffixes = {ext.lower() for ext in PREPLOT_EXTENSIONS}
+    if getattr(settings, "preplot_files_explicit", False):
+        return sorted(Path(f) for f in settings.preplot_files if Path(f).is_file())
+    if settings.preplot_files:
         files = [Path(f) for f in settings.preplot_files if Path(f).is_file()]
         if files:
             return sorted(files)
@@ -403,7 +406,7 @@ def resolve_preplot_files(settings) -> list[Path]:
         if root.is_dir():
             found = sorted(
                 p for p in root.rglob("*")
-                if p.is_file() and p.suffix in PREPLOT_EXTENSIONS
+                if p.is_file() and p.suffix.lower() in allowed_suffixes
             )
             if found:
                 return found

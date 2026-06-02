@@ -11,38 +11,81 @@ from xpostmaps.core.models import (
 )
 
 
-def coordinate_dropdown_labels(perimeter_count: int) -> list[str]:
-    """Build Coordinates column options for the legend area table."""
+def perimeter_label_count(perimeter_count: int) -> int:
     if perimeter_count >= 2:
-        labels = [f"Survey Perimeter {index}" for index in range(1, perimeter_count + 1)]
-    else:
-        labels = ["Survey Perimeter"]
+        return perimeter_count
+    if perimeter_count == 1:
+        return 1
+    return 0
+
+
+def polygon_source_dropdown_labels(
+    perimeter_count: int,
+    imported_count: int,
+) -> list[str]:
+    """Build Polygon Source column options for the legend area table."""
+    labels: list[str] = []
+    if perimeter_count >= 2:
+        labels.extend(
+            f"Survey Perimeter {index}" for index in range(1, perimeter_count + 1)
+        )
+    elif perimeter_count == 1:
+        labels.append("Survey Perimeter")
+
+    for index in range(1, imported_count + 1):
+        labels.append(f"Imported Polygon {index}")
+
     labels.append("Custom")
     return labels
 
 
-def custom_coordinate_index(perimeter_count: int) -> int:
-    return len(coordinate_dropdown_labels(perimeter_count)) - 1
+def custom_source_index(perimeter_count: int, imported_count: int) -> int:
+    return len(polygon_source_dropdown_labels(perimeter_count, imported_count)) - 1
 
 
-def coord_selection_from_index(
-    index: int, perimeter_count: int
-) -> tuple[AreaCoordinateMode, int]:
-    if index >= custom_coordinate_index(perimeter_count):
-        return AreaCoordinateMode.CUSTOM, 0
-    return AreaCoordinateMode.SURVEY_PERIMETER, index
+def polygon_source_from_index(
+    index: int,
+    perimeter_count: int,
+    imported_count: int,
+) -> tuple[AreaCoordinateMode, int, int]:
+    """Map dropdown index to coordinate mode and perimeter/import indices."""
+    if index >= custom_source_index(perimeter_count, imported_count):
+        return AreaCoordinateMode.CUSTOM, 0, 0
+
+    perimeter_labels = perimeter_label_count(perimeter_count)
+    if index < perimeter_labels:
+        if perimeter_count >= 2:
+            return AreaCoordinateMode.SURVEY_PERIMETER, index, 0
+        return AreaCoordinateMode.SURVEY_PERIMETER, 0, 0
+
+    imported_index = index - perimeter_labels
+    if imported_index < imported_count:
+        return AreaCoordinateMode.IMPORTED, 0, imported_index
+
+    return AreaCoordinateMode.CUSTOM, 0, 0
 
 
-def coord_index_from_selection(
+def polygon_source_index_from_selection(
     mode: AreaCoordinateMode,
     perimeter_index: int,
+    imported_index: int,
     perimeter_count: int,
+    imported_count: int,
 ) -> int:
     if mode == AreaCoordinateMode.CUSTOM:
-        return custom_coordinate_index(perimeter_count)
+        return custom_source_index(perimeter_count, imported_count)
+    if mode == AreaCoordinateMode.IMPORTED:
+        return perimeter_label_count(perimeter_count) + imported_index
     if perimeter_count >= 2:
         return min(max(perimeter_index, 0), perimeter_count - 1)
     return 0
+
+
+# Legacy aliases used during migration
+coordinate_dropdown_labels = polygon_source_dropdown_labels
+custom_coordinate_index = custom_source_index
+coord_selection_from_index = polygon_source_from_index
+coord_index_from_selection = polygon_source_index_from_selection
 
 
 def _normalize_name(value: str) -> str:
@@ -96,12 +139,33 @@ def custom_polygon_xy(points: list[PolygonPoint]) -> tuple[list[float], list[flo
     return xs, ys
 
 
+def imported_polygon_by_index(
+    legend_areas: list[AreaLegendEntry] | None,
+    imported_index: int,
+) -> AreaLegendEntry | None:
+    if legend_areas is None:
+        return None
+    from xpostmaps.core.polygon_import_service import imported_polygon_entries
+
+    imported = imported_polygon_entries(legend_areas)
+    if 0 <= imported_index < len(imported):
+        return imported[imported_index]
+    return None
+
+
 def resolve_area_polygon(
     entry: AreaLegendEntry,
     map_data: MapData | None,
+    legend_areas: list[AreaLegendEntry] | None = None,
 ) -> tuple[list[float], list[float]]:
     if entry.coordinate_mode == AreaCoordinateMode.CUSTOM:
         return custom_polygon_xy(entry.custom_points)
+
+    if entry.coordinate_mode == AreaCoordinateMode.IMPORTED:
+        imported = imported_polygon_by_index(legend_areas, entry.imported_polygon_index)
+        if imported is None:
+            return [], []
+        return custom_polygon_xy(imported.custom_points)
 
     perimeter = survey_perimeter_by_index(map_data, entry.survey_perimeter_index)
     if perimeter is None and map_data is not None and len(map_data.survey_perimeters) == 1:

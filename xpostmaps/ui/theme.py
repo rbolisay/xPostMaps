@@ -118,6 +118,11 @@ def app_stylesheet() -> str:
     QPushButton:pressed {{
         background: rgba(37, 99, 235, 0.45);
     }}
+    QPushButton:disabled {{
+        color: #6b7280;
+        background: rgba(255, 255, 255, 0.04);
+        border: 1px solid rgba(255, 255, 255, 0.06);
+    }}
     QPushButton#primaryBtn {{
         background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
             stop:0 {ACCENT}, stop:1 #6366f1);
@@ -129,8 +134,7 @@ def app_stylesheet() -> str:
             stop:0 {ACCENT_HOVER}, stop:1 #4f46e5);
     }}
     QPushButton#dirBtn {{
-        text-align: left;
-        padding-left: 14px;
+        text-align: center;
     }}
     QLabel#sectionTitle {{
         font-size: 11px;
@@ -152,10 +156,23 @@ def app_stylesheet() -> str:
         border-radius: 4px;
     }}
     QTableWidget {{
-        background: transparent;
+        background: #1e293b;
         border: 1px solid {GLASS_BORDER};
         border-radius: 8px;
         gridline-color: rgba(255,255,255,0.06);
+        alternate-background-color: rgba(255, 255, 255, 0.03);
+    }}
+    QTableWidget::item {{
+        background-color: #1e293b;
+        color: {TEXT_PRIMARY};
+        padding: 4px 8px;
+    }}
+    QTableWidget::item:alternate {{
+        background-color: rgba(255, 255, 255, 0.03);
+    }}
+    QTableWidget::item:selected {{
+        background-color: {ACCENT};
+        color: {TEXT_PRIMARY};
     }}
     QHeaderView::section {{
         background-color: #1e293b;
@@ -236,6 +253,32 @@ def app_stylesheet() -> str:
         color: {TEXT_SECONDARY};
         border-top: 1px solid {GLASS_BORDER};
     }}
+    QMenu {{
+        background-color: #1e293b;
+        color: {TEXT_PRIMARY};
+        border: 1px solid {GLASS_BORDER};
+        padding: 4px 0;
+    }}
+    QMenu::item {{
+        padding: 8px 28px;
+        background-color: transparent;
+    }}
+    QMenu::item:selected {{
+        background-color: {ACCENT};
+        color: {TEXT_PRIMARY};
+    }}
+    QMenu::separator {{
+        height: 1px;
+        background: {GLASS_BORDER};
+        margin: 4px 10px;
+    }}
+    QHeaderView {{
+        background-color: #1e293b;
+    }}
+    QTableCornerButton::section {{
+        background-color: #1e293b;
+        border: 1px solid {GLASS_BORDER};
+    }}
     """
 
 
@@ -275,3 +318,137 @@ def color_dialog_stylesheet() -> str:
         min-width: 72px;
     }}
     """
+
+
+def file_dialog_stylesheet() -> str:
+    """Dark theme for non-native QFileDialog (folder/file pickers)."""
+    return f"""
+    QFileDialog {{
+        background-color: {BG_DARK};
+        color: {TEXT_PRIMARY};
+    }}
+    QFileDialog QWidget {{
+        background-color: {BG_DARK};
+        color: {TEXT_PRIMARY};
+    }}
+    QFileDialog QLabel {{
+        background-color: transparent;
+        color: {TEXT_PRIMARY};
+    }}
+    QFileDialog QLineEdit {{
+        background: rgba(255, 255, 255, 0.06);
+        border: 1px solid {GLASS_BORDER};
+        border-radius: 6px;
+        padding: 6px 10px;
+        color: {TEXT_PRIMARY};
+        selection-background-color: {ACCENT};
+    }}
+    QFileDialog QComboBox {{
+        background: rgba(255, 255, 255, 0.06);
+        border: 1px solid {GLASS_BORDER};
+        border-radius: 6px;
+        padding: 4px 8px;
+        color: {TEXT_PRIMARY};
+    }}
+    QFileDialog QComboBox QAbstractItemView {{
+        background-color: #1e293b;
+        color: {TEXT_PRIMARY};
+        border: 1px solid {GLASS_BORDER};
+        selection-background-color: {ACCENT};
+    }}
+    QFileDialog QTreeView,
+    QFileDialog QListView,
+    QFileDialog QTableView {{
+        background-color: #1e293b;
+        color: {TEXT_PRIMARY};
+        border: 1px solid {GLASS_BORDER};
+        border-radius: 6px;
+        alternate-background-color: rgba(255, 255, 255, 0.03);
+        selection-background-color: {ACCENT};
+        selection-color: {TEXT_PRIMARY};
+        outline: none;
+    }}
+    QFileDialog QTreeView::item,
+    QFileDialog QListView::item {{
+        padding: 4px 6px;
+        color: {TEXT_PRIMARY};
+    }}
+    QFileDialog QTreeView::item:hover,
+    QFileDialog QListView::item:hover {{
+        background: rgba(59, 130, 246, 0.18);
+    }}
+    QFileDialog QTreeView::item:selected,
+    QFileDialog QListView::item:selected {{
+        background-color: {ACCENT};
+        color: {TEXT_PRIMARY};
+    }}
+    QFileDialog QHeaderView::section {{
+        background-color: #161b22;
+        color: {TEXT_PRIMARY};
+        border: 1px solid {GLASS_BORDER};
+        padding: 4px 8px;
+    }}
+    QFileDialog QPushButton {{
+        background: rgba(59, 130, 246, 0.18);
+        border: 1px solid rgba(59, 130, 246, 0.45);
+        border-radius: 6px;
+        padding: 6px 12px;
+        color: {TEXT_PRIMARY};
+    }}
+    QFileDialog QPushButton:hover {{
+        background: rgba(59, 130, 246, 0.32);
+        border-color: {ACCENT};
+    }}
+    QFileDialog QToolButton {{
+        background: transparent;
+        color: {TEXT_PRIMARY};
+        border: none;
+        padding: 4px;
+    }}
+    QFileDialog QToolButton:hover {{
+        background: rgba(59, 130, 246, 0.18);
+        border-radius: 4px;
+    }}
+    QFileDialog QSplitter::handle {{
+        background: {GLASS_BORDER};
+    }}
+    """
+
+
+def apply_file_dialog_theme(dialog) -> None:
+    """Apply dark styling to a non-native QFileDialog."""
+    dialog.setStyleSheet(app_stylesheet() + file_dialog_stylesheet())
+
+
+def apply_menu_theme(menu) -> None:
+    """Apply dark styling to a popup menu."""
+    menu.setStyleSheet(app_stylesheet())
+
+
+def themed_open_files(parent, title: str, file_filter: str) -> list[str]:
+    """Show a dark-themed multi-file picker."""
+    from PySide6.QtWidgets import QFileDialog
+
+    picker = QFileDialog(parent, title)
+    picker.setFileMode(QFileDialog.FileMode.ExistingFiles)
+    picker.setNameFilter(file_filter)
+    picker.setOption(QFileDialog.Option.DontUseNativeDialog, True)
+    apply_file_dialog_theme(picker)
+    if picker.exec() != QFileDialog.DialogCode.Accepted:
+        return []
+    return picker.selectedFiles()
+
+
+def themed_open_directory(parent, title: str) -> str:
+    """Show a dark-themed folder picker."""
+    from PySide6.QtWidgets import QFileDialog
+
+    picker = QFileDialog(parent, title)
+    picker.setFileMode(QFileDialog.FileMode.Directory)
+    picker.setOption(QFileDialog.Option.ShowDirsOnly, True)
+    picker.setOption(QFileDialog.Option.DontUseNativeDialog, True)
+    apply_file_dialog_theme(picker)
+    if picker.exec() != QFileDialog.DialogCode.Accepted:
+        return ""
+    selected = picker.selectedFiles()
+    return selected[0] if selected else ""
