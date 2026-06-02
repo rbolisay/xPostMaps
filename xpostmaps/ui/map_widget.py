@@ -438,20 +438,72 @@ class PostplotMapWidget(QWidget):
         if isinstance(vb, MapViewBox):
             vb.zoom_to_extent()
 
-    def _update_extent(self, map_data: MapData) -> None:
+    def _visible_extent_ranges(
+        self,
+        map_data: MapData,
+        nav_segments: list[LineSegment] | None = None,
+    ) -> tuple[tuple[float, float], tuple[float, float]] | None:
+        all_x: list[float] = []
+        all_y: list[float] = []
+
+        for segment in nav_segments if nav_segments is not None else []:
+            all_x.extend(segment.xs)
+            all_y.extend(segment.ys)
+
+        file_paths = resolve_preplot_file_order(map_data)
+        for entry in self._legend.preplot_lines:
+            if entry.hidden:
+                continue
+            for segment in segments_for_preplot_source(
+                map_data.preplot_segments,
+                file_paths,
+                entry.preplot_source_index,
+            ):
+                all_x.extend(segment.xs)
+                all_y.extend(segment.ys)
+
+        for entry in self._legend.areas:
+            if entry.hidden or is_imported_polygon(entry):
+                continue
+            xs, ys = resolve_area_polygon(entry, map_data, self._legend.areas)
+            all_x.extend(xs)
+            all_y.extend(ys)
+
+        if not all_x or not all_y:
+            return None
+
+        xs_arr = np.asarray(all_x, dtype=np.float64)
+        ys_arr = np.asarray(all_y, dtype=np.float64)
+        valid = np.isfinite(xs_arr) & np.isfinite(ys_arr)
+        if not np.any(valid):
+            return None
+
+        xmin = float(np.min(xs_arr[valid]))
+        xmax = float(np.max(xs_arr[valid]))
+        ymin = float(np.min(ys_arr[valid]))
+        ymax = float(np.max(ys_arr[valid]))
+        margin_x = (xmax - xmin) * 0.05 or 500
+        margin_y = (ymax - ymin) * 0.05 or 500
+        return (
+            (xmin - margin_x, xmax + margin_x),
+            (ymin - margin_y, ymax + margin_y),
+        )
+
+    def _update_extent(
+        self,
+        map_data: MapData,
+        nav_segments: list[LineSegment] | None = None,
+    ) -> None:
         vb = self._plot.getViewBox()
-        if not map_data.bounds.is_valid:
+        ranges = self._visible_extent_ranges(map_data, nav_segments)
+        if ranges is None:
             self._extent_x = None
             self._extent_y = None
             if isinstance(vb, MapViewBox):
                 vb.set_extent_range(None, None)
             return
 
-        b = map_data.bounds
-        margin_x = (b.xmax - b.xmin) * 0.05 or 500
-        margin_y = (b.ymax - b.ymin) * 0.05 or 500
-        self._extent_x = (b.xmin - margin_x, b.xmax + margin_x)
-        self._extent_y = (b.ymin - margin_y, b.ymax + margin_y)
+        self._extent_x, self._extent_y = ranges
         if isinstance(vb, MapViewBox):
             vb.set_extent_range(self._extent_x, self._extent_y)
 
@@ -567,16 +619,19 @@ class PostplotMapWidget(QWidget):
         has_nav = bool(nav_segments)
 
         if not has_nav and not visible_preplot and not visible_areas:
+            self._extent_x = None
+            self._extent_y = None
+            if isinstance(vb, MapViewBox):
+                vb.set_extent_range(None, None)
             self._cached_signature = signature
             return
 
-        if current_range is None and map_data.bounds.is_valid:
-            b = map_data.bounds
-            margin_x = (b.xmax - b.xmin) * 0.05 or 500
-            margin_y = (b.ymax - b.ymin) * 0.05 or 500
+        extent_ranges = self._visible_extent_ranges(map_data, nav_segments)
+        if current_range is None and extent_ranges is not None:
+            x_range, y_range = extent_ranges
             self._plot.setRange(
-                xRange=(b.xmin - margin_x, b.xmax + margin_x),
-                yRange=(b.ymin - margin_y, b.ymax + margin_y),
+                xRange=x_range,
+                yRange=y_range,
                 padding=0,
             )
 
@@ -585,7 +640,7 @@ class PostplotMapWidget(QWidget):
 
         self._add_area_polygons(map_data)
 
-        self._update_extent(map_data)
+        self._update_extent(map_data, nav_segments)
 
         if current_range is not None:
             self._plot.setRange(

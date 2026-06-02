@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from datetime import date
+
 from PySide6.QtWidgets import (
     QFormLayout,
     QLabel,
@@ -13,6 +15,10 @@ from PySide6.QtWidgets import (
 from xpostmaps.core.crs_utils import normalize_epsg
 from xpostmaps.core.models import PostmapInfo
 from xpostmaps.ui.dialogs.base_dialog import SingleInstanceDialog
+
+
+def _default_project_date(value: str = "") -> str:
+    return value.strip() or date.today().isoformat()
 
 
 class PostmapInfoDialog:
@@ -48,7 +54,10 @@ class PostmapInfoDialog:
             ]
 
             for key, label in field_defs:
-                edit = QLineEdit(getattr(info, key, "") or "")
+                value = getattr(info, key, "") or ""
+                if key == "date":
+                    value = _default_project_date(value)
+                edit = QLineEdit(value)
                 fields[key] = edit
                 form.addRow(label, edit)
 
@@ -71,7 +80,7 @@ class PostmapInfoDialog:
                     client_ref=fields["client_ref"].text().strip(),
                     file_name=info.file_name,
                     user_name=info.user_name,
-                    date=fields["date"].text().strip(),
+                    date=_default_project_date(fields["date"].text()),
                     crs_name=fields["crs_name"].text().strip(),
                     projection=fields["projection"].text().strip(),
                     epsg_code=normalize_epsg(fields["epsg_code"].text().strip()),

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from datetime import date
 from enum import Enum
 from typing import Any
 
@@ -235,7 +236,7 @@ class PostmapInfo:
     client_ref: str = ""
     file_name: str = ""
     user_name: str = ""
-    date: str = ""
+    date: str = field(default_factory=lambda: date.today().isoformat())
     crs_name: str = ""
     projection: str = ""
     epsg_code: str = ""

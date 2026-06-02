@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import date
 from pathlib import Path
 
 from PySide6.QtCore import Qt
@@ -165,6 +166,11 @@ class MainWindow(QMainWindow):
                 info.epsg_code = normalize_epsg(entry.crs_code)
                 return
 
+    def _ensure_project_info_date(self, map_data: MapData | None = None) -> None:
+        target = map_data or self._map_data
+        if target and target.postmap_info and not target.postmap_info.date.strip():
+            target.postmap_info.date = date.today().isoformat()
+
     def _current_map_epsg(self) -> str:
         map_data = self._ensure_map_data()
         self._apply_map_crs_from_preplot(map_data)
@@ -192,6 +198,7 @@ class MainWindow(QMainWindow):
 
     def _refresh_ui(self) -> None:
         if self._map_data:
+            self._ensure_project_info_date(self._map_data)
             self._apply_map_crs_from_preplot(self._map_data)
         self._sync_map_data_preplot_order()
         self._map.set_legend(self._settings.legend_config)
@@ -311,12 +318,15 @@ class MainWindow(QMainWindow):
         self._autosave.save_now()
 
     def _open_postmap_info(self) -> None:
+        if self._map_data:
+            self._ensure_project_info_date(self._map_data)
         info = self._map_data.postmap_info if self._map_data else PostmapInfo()
         PostmapInfoDialog.open(self, info, on_changed=self._on_postmap_info_changed)
 
     def _on_postmap_info_changed(self, info: PostmapInfo) -> None:
         map_data = self._ensure_map_data()
         map_data.postmap_info = info
+        self._ensure_project_info_date(map_data)
         self._right.update_from_project(self._settings, map_data)
         self._persist_project()
 
@@ -409,6 +419,7 @@ class MainWindow(QMainWindow):
         )
 
         self._map_data = map_data
+        self._ensure_project_info_date(map_data)
         self._prune_legend_sequence_refs()
         if self._settings.preplot_files:
             self._settings.preplot_catalog = build_preplot_catalog_from_segments(
