@@ -129,6 +129,7 @@ class MainWindow(QMainWindow):
         self._left.open_legend.connect(self._open_legend)
         self._left.open_pdf_export.connect(self._open_pdf_export)
         self._right.minimap_view_changed.connect(self._on_minimap_view_changed)
+        self._map.view_changed.connect(self._on_map_view_changed)
 
         self._mediator.map_data_updated.connect(self._on_map_data_updated)
         self._mediator.status_message.connect(self.statusBar().showMessage)
@@ -284,6 +285,12 @@ class MainWindow(QMainWindow):
 
     def _on_minimap_view_changed(self, view: dict) -> None:
         self._settings.minimap_view = dict(view)
+        self._schedule_metadata_autosave()
+
+    def _on_map_view_changed(self, view: dict) -> None:
+        if self._loading_project:
+            return
+        self._settings.map_view = dict(view)
         self._schedule_metadata_autosave()
 
     def _on_logo_changed(self, path: str) -> None:
@@ -777,6 +784,7 @@ class MainWindow(QMainWindow):
             if settings.logo_path:
                 self._right.set_logo(settings.logo_path)
             self._refresh_ui()
+            self._map.restore_view(settings.map_view)
             total_records = int(map_data.stats.get("total_records", 0))
             self.statusBar().showMessage(
                 f"Loaded project: {settings.name} "

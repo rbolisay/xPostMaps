@@ -6,7 +6,7 @@ import math
 
 import pyqtgraph as pg
 import numpy as np
-from PySide6.QtCore import Qt, QTimer, QPoint, QRectF
+from PySide6.QtCore import Qt, QTimer, QPoint, QRectF, Signal
 from PySide6.QtGui import QColor, QFont, QPainter, QPen, QPolygonF, QRegion
 from PySide6.QtWidgets import QGraphicsView, QVBoxLayout, QWidget
 
@@ -341,12 +341,15 @@ class MapFrameOverlay(QWidget):
 class PostplotMapWidget(QWidget):
     """High-performance map canvas — survey plot area only."""
 
+    view_changed = Signal(dict)
+
     _NAV_TYPES = frozenset({RecordType.SOURCE, RecordType.VESSEL})
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
         self._display_mode = DisplayMode.LINES
         self._legend = LegendConfig.default()
+        self._suppress_view_changed = False
         self._plot_items: list[pg.GraphicsItem] = []
         # Dense nav line items keep their full coordinate arrays here so the map
         # can paint only the portion inside the current view (fast pan/zoom on
@@ -426,6 +429,7 @@ class PostplotMapWidget(QWidget):
         self._clip_timer.setInterval(45)
         self._clip_timer.timeout.connect(self._apply_view_clip)
         vb.sigRangeChanged.connect(self._on_view_range_changed)
+        vb.sigRangeChangedManually.connect(self._emit_view_changed)
 
     def set_display_mode(self, mode: DisplayMode) -> None:
         self._display_mode = mode
@@ -891,6 +895,52 @@ class PostplotMapWidget(QWidget):
         vb = self._plot.getViewBox()
         if isinstance(vb, MapViewBox):
             vb.zoom_to_extent()
+
+    def _emit_view_changed(self, *_args) -> None:
+        if self._suppress_view_changed:
+            return
+        self.view_changed.emit(self.current_view())
+
+    def current_view(self) -> dict[str, float]:
+        (x0, x1), (y0, y1) = self._plot.getViewBox().viewRange()
+        return {
+            "x_min": float(x0),
+            "x_max": float(x1),
+            "y_min": float(y0),
+            "y_max": float(y1),
+        }
+
+    @staticmethod
+    def _valid_saved_view(
+        view: dict | None,
+    ) -> tuple[tuple[float, float], tuple[float, float]] | None:
+        if not isinstance(view, dict):
+            return None
+        try:
+            x_min = float(view.get("x_min", 0.0))
+            x_max = float(view.get("x_max", 0.0))
+            y_min = float(view.get("y_min", 0.0))
+            y_max = float(view.get("y_max", 0.0))
+        except (TypeError, ValueError):
+            return None
+        if x_max <= x_min or y_max <= y_min:
+            return None
+        return (x_min, x_max), (y_min, y_max)
+
+    def restore_view(self, view: dict | None) -> None:
+        """Restore a saved view, falling back to the data extent when absent."""
+        ranges = self._valid_saved_view(view)
+        self._suppress_view_changed = True
+        try:
+            if ranges is None:
+                self.zoom_to_extent()
+            else:
+                x_range, y_range = ranges
+                vb = self._plot.getViewBox()
+                vb.disableAutoRange()
+                vb.setRange(xRange=x_range, yRange=y_range, padding=0, update=True)
+        finally:
+            self._suppress_view_changed = False
 
     def _visible_extent_ranges(
         self,

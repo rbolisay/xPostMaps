@@ -192,6 +192,10 @@ class Database:
             self._conn.execute(
                 "ALTER TABLE projects ADD COLUMN navplan_catalog_json TEXT DEFAULT '[]'"
             )
+        if "map_view_json" not in cols:
+            self._conn.execute(
+                "ALTER TABLE projects ADD COLUMN map_view_json TEXT DEFAULT '{}'"
+            )
 
         seg_cols = {row[1] for row in self._conn.execute("PRAGMA table_info(segments)")}
         if "sequence_id" not in seg_cols:
@@ -263,6 +267,7 @@ class Database:
         legend_json = json.dumps(legend_to_dict(settings.legend_config))
         nav_cache_json = json.dumps(nav_cache_to_json(map_data.nav_file_cache))
         minimap_view_json = json.dumps(settings.minimap_view)
+        map_view_json = json.dumps(settings.map_view)
 
         row = self._conn.execute(
             "SELECT id FROM projects WHERE name = ?", (settings.name,)
@@ -282,7 +287,8 @@ class Database:
                     legend_config_json=?, nav_files_explicit=?, preplot_files_explicit=?,
                     preplot_catalog_json=?, minimap_view_json=?,
                     navplan_files_json=?, navplan_files_explicit=?,
-                    navplans_dir=?, navplan_catalog_json=?, updated_at=?
+                    navplans_dir=?, navplan_catalog_json=?, map_view_json=?,
+                    updated_at=?
                 WHERE id=?
                 """,
                 (
@@ -312,6 +318,7 @@ class Database:
                     int(settings.navplan_files_explicit),
                     settings.navplans_dir,
                     navplan_catalog_json,
+                    map_view_json,
                     now,
                     project_id,
                 ),
@@ -332,8 +339,9 @@ class Database:
                     nav_file_cache_json, logo_path, legend_config_json,
                     nav_files_explicit, preplot_files_explicit, preplot_catalog_json,
                     minimap_view_json, navplan_files_json, navplan_files_explicit,
-                    navplans_dir, navplan_catalog_json, created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    navplans_dir, navplan_catalog_json, map_view_json,
+                    created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     settings.name,
@@ -363,6 +371,7 @@ class Database:
                     int(settings.navplan_files_explicit),
                     settings.navplans_dir,
                     navplan_catalog_json,
+                    map_view_json,
                     now,
                     now,
                 ),
@@ -400,7 +409,8 @@ class Database:
             UPDATE projects SET
                 display_mode=?, show_source=?, show_vessel=?,
                 show_overlay=?, show_preplots=?,
-                logo_path=?, legend_config_json=?, minimap_view_json=?, updated_at=?
+                logo_path=?, legend_config_json=?, minimap_view_json=?,
+                map_view_json=?, updated_at=?
             WHERE id=?
             """,
             (
@@ -412,6 +422,7 @@ class Database:
                 settings.logo_path,
                 json.dumps(legend_to_dict(settings.legend_config)),
                 json.dumps(settings.minimap_view),
+                json.dumps(settings.map_view),
                 now,
                 project_id,
             ),
@@ -601,6 +612,9 @@ class Database:
             ),
             minimap_view=json.loads(row["minimap_view_json"] or "{}")
             if "minimap_view_json" in row.keys()
+            else {},
+            map_view=json.loads(row["map_view_json"] or "{}")
+            if "map_view_json" in row.keys()
             else {},
         )
 

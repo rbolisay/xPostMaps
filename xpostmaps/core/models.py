@@ -253,6 +253,7 @@ class ProjectSettings:
     logo_path: str = ""
     legend_config: LegendConfig = field(default_factory=LegendConfig.default)
     minimap_view: dict[str, float] = field(default_factory=dict)
+    map_view: dict[str, float] = field(default_factory=dict)
 
 
 @dataclass

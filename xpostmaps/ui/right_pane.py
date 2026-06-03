@@ -109,6 +109,17 @@ class RightPane(PrintPanel):
         vlon, vlat = zip(*valid)
         return GeoBounds(min(vlat), max(vlat), min(vlon), max(vlon))
 
+    @staticmethod
+    def _geo_bounds_from_projected(bounds: SurveyBounds, map_epsg: str) -> GeoBounds:
+        """Project the survey extent corners to WGS84 to derive lon/lat bounds."""
+        xs = [bounds.xmin, bounds.xmax, bounds.xmax, bounds.xmin]
+        ys = [bounds.ymin, bounds.ymin, bounds.ymax, bounds.ymax]
+        try:
+            lons, lats = transform_coordinates(xs, ys, map_epsg, WGS84_EPSG)
+        except Exception:
+            return GeoBounds()
+        return RightPane._geo_bounds_from_lon_lat(list(lons), list(lats))
+
     def _right_pane_focus(
         self,
         settings: ProjectSettings,
@@ -162,6 +173,11 @@ class RightPane(PrintPanel):
             projected_bounds = map_data.bounds
         if not geo_bounds.is_valid:
             geo_bounds = map_data.geo_bounds
+        # Preplot/navplan-only loads have no lat/lon nav records, so geo_bounds
+        # may be empty even when projected bounds exist. Derive lon/lat from the
+        # projected survey extent so the minimap can still frame the survey.
+        if not geo_bounds.is_valid and projected_bounds.is_valid and map_epsg:
+            geo_bounds = self._geo_bounds_from_projected(projected_bounds, map_epsg)
         return projected_bounds, geo_bounds, focus_polygons, has_fullfold
 
     def update_from_project(

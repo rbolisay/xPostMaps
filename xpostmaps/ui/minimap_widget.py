@@ -319,10 +319,11 @@ class MinimapWidget(QWidget):
             self._area_items.append(area_item)
 
         if tight_zoom:
-            # Frame the survey/main-map extent closely (small padding for a bit
-            # of coastline context), instead of the wide 4x context view.
-            pad_lon = max((geo.lon_max - geo.lon_min) * 0.25, 0.3)
-            pad_lat = max((geo.lat_max - geo.lat_min) * 0.25, 0.3)
+            # Frame the survey/main-map extent with enough surrounding context
+            # that it does not fill the whole minimap as a single square, while
+            # still staying far closer than the wide 4x context view.
+            pad_lon = max((geo.lon_max - geo.lon_min) * 0.9, 0.6)
+            pad_lat = max((geo.lat_max - geo.lat_min) * 0.9, 0.6)
             x_range = (geo.lon_min - pad_lon, geo.lon_max + pad_lon)
             y_range = (geo.lat_min - pad_lat, geo.lat_max + pad_lat)
         else:
