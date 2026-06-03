@@ -224,6 +224,10 @@ class Database:
 
     def save_project(self, settings: ProjectSettings, map_data: MapData) -> int:
         now = self._now()
+        # When positions are already persisted and were not loaded/modified in
+        # memory, leave the (potentially huge) positions table untouched. This
+        # makes saves fast and prevents accidentally wiping stored positions.
+        skip_positions = bool(map_data.positions_persisted) and not map_data.positions
         postmap_json = json.dumps(map_data.postmap_info.__dict__, default=str)
         bounds_json = json.dumps(map_data.bounds.__dict__)
         geo_bounds_json = json.dumps(map_data.geo_bounds.__dict__)
@@ -284,7 +288,8 @@ class Database:
             )
             self._conn.execute("DELETE FROM segments WHERE project_id=?", (project_id,))
             self._conn.execute("DELETE FROM line_sequences WHERE project_id=?", (project_id,))
-            self._conn.execute("DELETE FROM positions WHERE project_id=?", (project_id,))
+            if not skip_positions:
+                self._conn.execute("DELETE FROM positions WHERE project_id=?", (project_id,))
             self._conn.execute("DELETE FROM survey_perimeters WHERE project_id=?", (project_id,))
         else:
             cursor = self._conn.execute(
@@ -333,7 +338,8 @@ class Database:
         self._save_segments(project_id, "overlay", map_data.overlay_segments)
         self._save_segments(project_id, "preplot", map_data.preplot_segments)
         self._save_sequences(project_id, map_data.sequences)
-        self._save_positions(project_id, map_data.positions)
+        if not skip_positions:
+            self._save_positions(project_id, map_data.positions)
         self._save_survey_perimeters(project_id, map_data.survey_perimeters)
         self._conn.commit()
         return int(project_id)
@@ -507,7 +513,9 @@ class Database:
                 rows,
             )
 
-    def load_project(self, name: str) -> tuple[ProjectSettings, MapData] | None:
+    def load_project(
+        self, name: str, with_positions: bool = False
+    ) -> tuple[ProjectSettings, MapData] | None:
         row = self._conn.execute(
             "SELECT * FROM projects WHERE name = ?", (name,)
         ).fetchone()
@@ -574,12 +582,25 @@ class Database:
         geo_bounds = GeoBounds(**geo_dict) if geo_dict else GeoBounds()
 
         project_id = row["id"]
+        # Positions (often >1M rows) are not needed for rendering — only for
+        # incremental re-parsing. Skip building them on load for fast project
+        # open; they are fetched on demand via ``load_positions`` before a parse.
+        if with_positions:
+            positions = self._load_positions(project_id)
+            positions_persisted = False
+        else:
+            positions = []
+            has_positions = self._conn.execute(
+                "SELECT 1 FROM positions WHERE project_id=? LIMIT 1", (project_id,)
+            ).fetchone()
+            positions_persisted = has_positions is not None
         map_data = MapData(
             segments=self._load_segments(project_id, "main"),
             overlay_segments=self._load_segments(project_id, "overlay"),
             preplot_segments=self._load_segments(project_id, "preplot"),
             sequences=self._load_sequences(project_id),
-            positions=self._load_positions(project_id),
+            positions=positions,
+            positions_persisted=positions_persisted,
             bounds=bounds,
             geo_bounds=geo_bounds,
             postmap_info=postmap_info,
@@ -599,6 +620,13 @@ class Database:
             "SELECT id FROM projects WHERE name = ?", (name.strip(),)
         ).fetchone()
         return int(row["id"]) if row else None
+
+    def load_positions(self, name: str) -> list[PositionRecord]:
+        """Fetch full position records for a project on demand (re-parse only)."""
+        project_id = self.get_project_id(name)
+        if project_id is None:
+            return []
+        return self._load_positions(project_id)
 
     def delete_sequence_groups(self, project_id: int, group_ids: list[str]) -> None:
         if not group_ids:

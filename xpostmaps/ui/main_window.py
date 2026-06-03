@@ -412,6 +412,7 @@ class MainWindow(QMainWindow):
         self._metadata_autosave.set_enabled(False)
         self._left.set_progress(0, True)
         self._left.set_status("Parsing files…")
+        self._ensure_positions_loaded()
         existing = self._map_data.postmap_info if self._map_data else None
         self._worker = ParseWorker(
             self._settings,
@@ -423,6 +424,24 @@ class MainWindow(QMainWindow):
         self._worker.finished_ok.connect(self._on_parse_finished)
         self._worker.failed.connect(self._on_parse_failed)
         self._worker.start()
+
+    def _ensure_positions_loaded(self) -> None:
+        """Load persisted positions into memory before a re-parse.
+
+        Positions are skipped on project open for speed; incremental re-parsing
+        needs them to carry over records from unchanged nav files.
+        """
+        md = self._map_data
+        if md is None or md.positions or not md.positions_persisted:
+            return
+        name = self._settings.name.strip()
+        if not name:
+            return
+        try:
+            md.positions = self._db.load_positions(name)
+        except Exception:  # noqa: BLE001
+            md.positions = []
+        md.positions_persisted = False
 
     def _on_parse_progress(self, pct: int, msg: str) -> None:
         self._left.set_progress(pct)
@@ -607,11 +626,12 @@ class MainWindow(QMainWindow):
             if settings.logo_path:
                 self._right.set_logo(settings.logo_path)
             self._refresh_ui()
+            total_records = int(map_data.stats.get("total_records", 0))
             self.statusBar().showMessage(
                 f"Loaded project: {settings.name} "
                 f"({len(map_data.segments)} nav segments, "
                 f"{len(map_data.preplot_segments)} preplot segments, "
-                f"{len(map_data.positions):,} positions)"
+                f"{total_records:,} positions)"
             )
         finally:
             self._loading_project = False

@@ -47,6 +47,15 @@ _configure_pyqtgraph()
 
 _MAX_LINE_POINTS = 500_000
 _MAX_SCATTER_POINTS = 200_000
+# Only items larger than this are worth view-clipping; below it the overhead is
+# not worth the extra bookkeeping.
+_CLIP_REGISTER_MIN = 20_000
+# Fraction of the visible span added as margin on every side when clipping so a
+# short pan does not blank the line edges before the debounced reclip fires.
+_CLIP_MARGIN = 0.6
+# Max vertices kept per nav item for the current view. Above this, points are
+# sub-pixel dense so decimating is visually lossless but much faster to paint.
+_CLIP_TARGET_POINTS = 90_000
 
 
 def _color_with_opacity(color: str, opacity: float) -> tuple[int, int, int, int]:
@@ -140,6 +149,12 @@ class PostplotMapWidget(QWidget):
         self._display_mode = DisplayMode.LINES
         self._legend = LegendConfig.default()
         self._plot_items: list[pg.GraphicsItem] = []
+        # Dense nav line items keep their full coordinate arrays here so the map
+        # can paint only the portion inside the current view (fast pan/zoom on
+        # million-point surveys) without the monotonic-x assumption that breaks
+        # pyqtgraph's built-in clipToView for weaving survey lines.
+        self._clip_items: list[dict] = []
+        self._clip_bbox: tuple[float, float, float, float] | None = None
         self._extent_x: tuple[float, float] | None = None
         self._extent_y: tuple[float, float] | None = None
         self._cached_signature: tuple | None = None
@@ -179,6 +194,12 @@ class PostplotMapWidget(QWidget):
         self._overlay_timer.timeout.connect(self._reposition_overlays)
         QTimer.singleShot(0, self._reposition_overlays)
 
+        self._clip_timer = QTimer(self)
+        self._clip_timer.setSingleShot(True)
+        self._clip_timer.setInterval(45)
+        self._clip_timer.timeout.connect(self._apply_view_clip)
+        vb.sigRangeChanged.connect(self._on_view_range_changed)
+
     def set_display_mode(self, mode: DisplayMode) -> None:
         self._display_mode = mode
         self._cached_signature = None
@@ -204,6 +225,8 @@ class PostplotMapWidget(QWidget):
             except Exception:
                 pass
         self._plot_items.clear()
+        self._clip_items.clear()
+        self._clip_bbox = None
 
     @staticmethod
     def _record_type_for_data_type(data_type: NavDataType) -> RecordType:
@@ -312,12 +335,14 @@ class PostplotMapWidget(QWidget):
             batches.setdefault(key, []).append((xs, ys))
 
         for key, parts in batches.items():
-            self._add_batch_item(key, parts)
+            self._add_batch_item(key, parts, clipable=True)
 
     def _add_batch_item(
         self,
         key: LineBatchKey,
         parts: list[tuple[np.ndarray, np.ndarray]],
+        *,
+        clipable: bool = False,
     ) -> None:
         rgba = key.color
         if key.dotted:
@@ -334,6 +359,7 @@ class PostplotMapWidget(QWidget):
                 pxMode=True,
                 symbol="o",
             )
+            kind = "scatter"
         else:
             xs, ys = concat_polylines(parts)
             if xs.size == 0:
@@ -353,9 +379,18 @@ class PostplotMapWidget(QWidget):
                 clipToView=False,
                 skipFiniteCheck=True,
             )
+            kind = "line"
 
         self._plot_item.addItem(item)
         self._plot_items.append(item)
+
+        # Register dense nav items for view-dependent clipping. Worth it only
+        # above a threshold; small/sparse layers (preplot, areas) stay fully
+        # drawn so long straight segments never disappear at the view edge.
+        if clipable and xs.size > _CLIP_REGISTER_MIN:
+            self._clip_items.append(
+                {"item": item, "xs": xs, "ys": ys, "kind": kind}
+            )
 
     def _add_batched_segments_styled(
         self,
@@ -466,6 +501,64 @@ class PostplotMapWidget(QWidget):
         )
         self._plot_item.addItem(boundary)
         self._plot_items.append(boundary)
+
+    def _on_view_range_changed(self, *_args) -> None:
+        if self._clip_items:
+            self._clip_timer.start()
+
+    def _apply_view_clip(self) -> None:
+        """Limit dense nav items to the points inside the (padded) view.
+
+        Painting only what is on screen keeps pan/zoom fast on million-point
+        surveys. A boolean mask is used (not pyqtgraph's clipToView) because
+        survey lines are not monotonic in x; the padding keeps the cut off
+        screen so lines look continuous.
+        """
+        if not self._clip_items:
+            return
+        vb = self._plot.getViewBox()
+        (x0, x1), (y0, y1) = vb.viewRange()
+        mx = (x1 - x0) * _CLIP_MARGIN
+        my = (y1 - y0) * _CLIP_MARGIN
+        bx0, bx1 = x0 - mx, x1 + mx
+        by0, by1 = y0 - my, y1 + my
+
+        prev = self._clip_bbox
+        if prev is not None:
+            px0, px1, py0, py1 = prev
+            # Skip when the new padded box is essentially the same region (no
+            # wasted reclip on tiny pans / re-emitted signals).
+            if (
+                px0 <= bx0
+                and bx1 <= px1
+                and py0 <= by0
+                and by1 <= py1
+                and (bx1 - bx0) >= (px1 - px0) * 0.5
+                and (by1 - by0) >= (py1 - py0) * 0.5
+            ):
+                return
+        self._clip_bbox = (bx0, bx1, by0, by1)
+
+        for rec in self._clip_items:
+            xs = rec["xs"]
+            ys = rec["ys"]
+            mask = (xs >= bx0) & (xs <= bx1) & (ys >= by0) & (ys <= by1)
+            if rec["kind"] == "line":
+                # Keep NaN separators so segment breaks survive the mask.
+                np.logical_or(mask, np.isnan(xs), out=mask)
+                cx = xs[mask]
+                cy = ys[mask]
+                # When the visible slice still has far more vertices than the
+                # screen can resolve (e.g. fully zoomed out), decimate it. This
+                # only triggers when points-per-pixel is high, so it is visually
+                # lossless; zoomed-in slices stay below the cap and keep every
+                # vertex.
+                cx, cy = _thin_polyline_for_navigation(cx, cy, _CLIP_TARGET_POINTS)
+            else:
+                cx = xs[mask]
+                cy = ys[mask]
+                cx, cy = _thin_points_for_scatter(cx, cy, _CLIP_TARGET_POINTS)
+            rec["item"].setData(cx, cy)
 
     def _schedule_overlay_reposition(self) -> None:
         self._overlay_timer.start()
@@ -696,4 +789,6 @@ class PostplotMapWidget(QWidget):
             )
 
         self._reposition_overlays()
+        if self._clip_items:
+            self._apply_view_clip()
         self._cached_signature = signature

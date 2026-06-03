@@ -288,3 +288,7 @@ class MapData:
     survey_perimeters: list[SurveyPerimeter] = field(default_factory=list)
     preplot_file_order: list[str] = field(default_factory=list)
     stats: dict[str, Any] = field(default_factory=dict)
+    # Transient flag: positions already exist in the DB and have not been
+    # re-parsed/modified in memory. When True and ``positions`` is empty, the
+    # heavy positions table must NOT be rewritten or cleared on save.
+    positions_persisted: bool = False
