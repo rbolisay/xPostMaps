@@ -9,7 +9,7 @@ import numpy as np
 import pyqtgraph as pg
 from pyqtgraph import functions as fn
 from pyqtgraph.Point import Point
-from PySide6.QtCore import Qt, Signal
+from PySide6.QtCore import Qt, QTimer, Signal
 from PySide6.QtWidgets import QVBoxLayout, QWidget
 
 from xpostmaps.core.models import GeoBounds
@@ -90,11 +90,19 @@ class MinimapWidget(QWidget):
         self._plot.setMouseEnabled(x=True, y=True)
         layout.addWidget(self._plot)
 
+        self._coast_segments: list[tuple[list[float], list[list[float]]]] = []
         self._coast_items: list[pg.PlotDataItem] = []
+        self._coast_pen = pg.mkPen(MINIMAP_COAST, width=0.9)
+        self._coast_refresh_timer = QTimer(self)
+        self._coast_refresh_timer.setSingleShot(True)
+        self._coast_refresh_timer.setInterval(16)
+        self._coast_refresh_timer.timeout.connect(self._refresh_visible_coastlines)
         self._marker: pg.PlotDataItem | None = None
         self._area_items: list[pg.PlotDataItem] = []
+        self._view_box.sigRangeChanged.connect(self._schedule_coast_refresh)
+        self._view_box.sigRangeChangedManually.connect(self._schedule_coast_refresh)
         self._view_box.sigRangeChangedManually.connect(self._emit_view_changed)
-        self._load_coastlines()
+        self._load_coastline_data()
 
     @staticmethod
     def _valid_saved_view(view: dict | None) -> tuple[tuple[float, float], tuple[float, float]] | None:
@@ -124,21 +132,80 @@ class MinimapWidget(QWidget):
         if not self._suppress_view_changed:
             self.view_changed.emit(self.current_view())
 
-    def _load_coastlines(self) -> None:
+    def _load_coastline_data(self) -> None:
         if not _ASSETS.exists():
             return
         data = json.loads(_ASSETS.read_text(encoding="utf-8"))
-        for line in data.get("lines", []):
-            lons = [pt[0] for pt in line]
-            lats = [pt[1] for pt in line]
+        segments = data.get("segments")
+        if segments:
+            self._coast_segments = [
+                (seg["b"], seg["p"])
+                for seg in segments
+                if len(seg.get("p", [])) >= 2
+            ]
+        else:
+            self._coast_segments = []
+            for line in data.get("lines", []):
+                if len(line) < 2:
+                    continue
+                lons = [pt[0] for pt in line]
+                lats = [pt[1] for pt in line]
+                self._coast_segments.append(
+                    ([min(lons), min(lats), max(lons), max(lats)], line),
+                )
+        self._plot.setRange(xRange=(-30, 45), yRange=(50, 72), padding=0.02)
+        self._refresh_visible_coastlines()
+
+    def _schedule_coast_refresh(self, *_args) -> None:
+        if not self._coast_segments:
+            return
+        self._coast_refresh_timer.start()
+
+    @staticmethod
+    def _segment_in_view(
+        bbox: list[float],
+        x0: float,
+        x1: float,
+        y0: float,
+        y1: float,
+    ) -> bool:
+        b0, b1, b2, b3 = bbox
+        if b0 > b2:
+            return True
+        return not (b2 < x0 or b0 > x1 or b3 < y0 or b1 > y1)
+
+    def _clear_coast_items(self) -> None:
+        for item in self._coast_items:
+            self._plot.removeItem(item)
+        self._coast_items.clear()
+
+    def _refresh_visible_coastlines(self) -> None:
+        if not self._coast_segments:
+            return
+        x_range, y_range = self._view_box.viewRange()
+        x0, x1 = float(x_range[0]), float(x_range[1])
+        y0, y1 = float(y_range[0]), float(y_range[1])
+        pad_x = (x1 - x0) * 0.08
+        pad_y = (y1 - y0) * 0.08
+        x0 -= pad_x
+        x1 += pad_x
+        y0 -= pad_y
+        y1 += pad_y
+
+        self._clear_coast_items()
+        for bbox, points in self._coast_segments:
+            if not self._segment_in_view(bbox, x0, x1, y0, y1):
+                continue
+            lons = [pt[0] for pt in points]
+            lats = [pt[1] for pt in points]
             item = pg.PlotDataItem(
-                lons, lats,
-                pen=pg.mkPen(MINIMAP_COAST, width=0.9),
+                lons,
+                lats,
+                pen=self._coast_pen,
                 connect="all",
             )
             self._plot.addItem(item)
             self._coast_items.append(item)
-        self._plot.setRange(xRange=(-30, 45), yRange=(50, 72), padding=0.02)
 
     def set_location(
         self,
@@ -205,3 +272,4 @@ class MinimapWidget(QWidget):
             padding=0.05,
         )
         self._suppress_view_changed = False
+        self._refresh_visible_coastlines()
