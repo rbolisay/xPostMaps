@@ -223,6 +223,7 @@ class ProjectSettings:
     show_preplots: bool = True
     logo_path: str = ""
     legend_config: LegendConfig = field(default_factory=LegendConfig.default)
+    minimap_view: dict[str, float] = field(default_factory=dict)
 
 
 @dataclass

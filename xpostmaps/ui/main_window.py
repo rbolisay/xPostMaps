@@ -66,6 +66,11 @@ class MainWindow(QMainWindow):
         self._loading_project = False
         self._parsing = False
         self._autosave = AutosaveController(self._autosave_project, self, delay_ms=2000)
+        self._metadata_autosave = AutosaveController(
+            self._autosave_project_metadata,
+            self,
+            delay_ms=500,
+        )
 
         self.setWindowTitle("xPostMaps — Postplot Viewer")
         self.resize(1600, 900)
@@ -113,6 +118,7 @@ class MainWindow(QMainWindow):
         self._left.select_logo.connect(self._select_logo)
         self._left.open_postmap_info.connect(self._open_postmap_info)
         self._left.open_legend.connect(self._open_legend)
+        self._right.minimap_view_changed.connect(self._on_minimap_view_changed)
 
         self._mediator.map_data_updated.connect(self._on_map_data_updated)
         self._mediator.status_message.connect(self.statusBar().showMessage)
@@ -121,6 +127,11 @@ class MainWindow(QMainWindow):
         if self._loading_project or self._parsing:
             return
         self._autosave.schedule()
+
+    def _schedule_metadata_autosave(self) -> None:
+        if self._loading_project or self._parsing:
+            return
+        self._metadata_autosave.schedule()
 
     def _ensure_project_name(self) -> bool:
         """Derive a project name from loaded file paths when none was entered."""
@@ -234,6 +245,10 @@ class MainWindow(QMainWindow):
         self._settings.name = name.strip()
         self._schedule_autosave()
 
+    def _on_minimap_view_changed(self, view: dict) -> None:
+        self._settings.minimap_view = dict(view)
+        self._schedule_metadata_autosave()
+
     def _on_logo_changed(self, path: str) -> None:
         self._settings.logo_path = path
         self._right.set_logo(path)
@@ -301,11 +316,12 @@ class MainWindow(QMainWindow):
         self._settings.legend_config = legend_from_dict(legend_to_dict(legend))
         self._sync_map_data_preplot_order()
         self._map.set_legend(self._settings.legend_config)
-        self._map.render(self._map_data, force=True)
+        self._map.render(self._map_data)
         self._right.update_from_project(self._settings, self._map_data)
         self._ensure_project_name()
-        if self._autosave.save_now():
-            self.statusBar().showMessage("Legend saved")
+        if self._settings.name.strip():
+            self._schedule_metadata_autosave()
+            self.statusBar().showMessage("Legend updated")
         else:
             self.statusBar().showMessage(
                 "Legend updated — enter a project name to save to database",
@@ -393,6 +409,7 @@ class MainWindow(QMainWindow):
 
         self._parsing = True
         self._autosave.set_enabled(False)
+        self._metadata_autosave.set_enabled(False)
         self._left.set_progress(0, True)
         self._left.set_status("Parsing files…")
         existing = self._map_data.postmap_info if self._map_data else None
@@ -453,12 +470,14 @@ class MainWindow(QMainWindow):
         self._mediator.map_data_updated.emit(map_data)
         self._parsing = False
         self._autosave.set_enabled(True)
+        self._metadata_autosave.set_enabled(True)
         self._ensure_project_name()
         self._autosave.save_now()
 
     def _on_parse_failed(self, message: str) -> None:
         self._parsing = False
         self._autosave.set_enabled(True)
+        self._metadata_autosave.set_enabled(True)
         self._left.set_progress(0, False)
         self._left.set_status(message)
         QMessageBox.warning(self, "Parse Error", message)
@@ -600,6 +619,32 @@ class MainWindow(QMainWindow):
     def _autosave_project(self) -> bool:
         return self._save_project(silent=True)
 
+    def _autosave_project_metadata(self) -> bool:
+        return self._save_project_metadata(silent=True)
+
+    def _save_project_metadata(self, silent: bool = False) -> bool:
+        if self._parsing:
+            return False
+        self._settings.name = self._left.project_name() or self._settings.name.strip()
+        name = self._settings.name.strip()
+        if not name and not self._ensure_project_name():
+            return False
+        self._settings.name = self._settings.name.strip()
+        target_db = project_db_path(self._db_directory, self._settings.name)
+        self._db_directory.mkdir(parents=True, exist_ok=True)
+        self._switch_database(target_db)
+        try:
+            self._db.save_project_metadata(self._settings, self._ensure_map_data())
+        except Exception as exc:  # noqa: BLE001
+            if not silent:
+                QMessageBox.critical(self, "Save Project", f"Could not save project:\n{exc}")
+            else:
+                self.statusBar().showMessage(f"Auto-save failed: {exc}")
+            return False
+        if silent:
+            self.statusBar().showMessage(f"Auto-saved: {self._settings.name}", 3000)
+        return True
+
     def _save_project(self, silent: bool = False) -> bool:
         if self._parsing:
             if not silent:
@@ -649,6 +694,7 @@ class MainWindow(QMainWindow):
 
     def closeEvent(self, event) -> None:  # noqa: N802
         self._autosave.set_enabled(False)
+        self._metadata_autosave.set_enabled(False)
         if self._worker and self._worker.isRunning():
             self._worker.wait(120_000)
             self._parsing = False

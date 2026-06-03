@@ -2,13 +2,17 @@
 
 from __future__ import annotations
 
+import math
 from pathlib import Path
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QPixmap
 from PySide6.QtWidgets import QLabel, QScrollArea, QVBoxLayout, QWidget
 
+from xpostmaps.core.area_utils import resolve_area_polygon
+from xpostmaps.core.crs_utils import WGS84_EPSG, normalize_epsg, transform_coordinates
 from xpostmaps.core.models import GeoBounds, MapData, PostmapInfo, ProjectSettings, SurveyBounds
+from xpostmaps.core.polygon_import_service import non_imported_polygon_entries
 from xpostmaps.ui.minimap_widget import MinimapWidget
 from xpostmaps.ui.postmap_card import PostmapInfoCard
 from xpostmaps.ui.print_panel import PrintPanel
@@ -16,6 +20,8 @@ from xpostmaps.ui.theme import BG_PRINT, TEXT_PRINT
 
 
 class RightPane(PrintPanel):
+    minimap_view_changed = Signal(dict)
+
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
         self.setFixedWidth(300)
@@ -34,6 +40,7 @@ class RightPane(PrintPanel):
         layout.addWidget(self._logo_label)
 
         self._minimap = MinimapWidget()
+        self._minimap.view_changed.connect(self.minimap_view_changed.emit)
         layout.addWidget(self._minimap)
 
         scroll = QScrollArea()
@@ -64,6 +71,82 @@ class RightPane(PrintPanel):
                 return
         self._logo_label.setPixmap(QPixmap())
 
+    @staticmethod
+    def _bounds_from_xy(xs: list[float], ys: list[float]) -> SurveyBounds:
+        valid = [
+            (x, y)
+            for x, y in zip(xs, ys)
+            if math.isfinite(x) and math.isfinite(y)
+        ]
+        if not valid:
+            return SurveyBounds()
+        vx, vy = zip(*valid)
+        return SurveyBounds(min(vx), max(vx), min(vy), max(vy))
+
+    @staticmethod
+    def _geo_bounds_from_lon_lat(lons: list[float], lats: list[float]) -> GeoBounds:
+        valid = [
+            (lon, lat)
+            for lon, lat in zip(lons, lats)
+            if math.isfinite(lon) and math.isfinite(lat)
+        ]
+        if not valid:
+            return GeoBounds()
+        vlon, vlat = zip(*valid)
+        return GeoBounds(min(vlat), max(vlat), min(vlon), max(vlon))
+
+    def _right_pane_focus(
+        self,
+        settings: ProjectSettings,
+        map_data: MapData | None,
+        info: PostmapInfo,
+    ) -> tuple[SurveyBounds, GeoBounds, list[tuple[list[float], list[float]]]]:
+        if map_data is None:
+            return SurveyBounds(), GeoBounds(), []
+
+        visible_areas = [
+            entry
+            for entry in non_imported_polygon_entries(settings.legend_config.areas)
+            if entry.name and not entry.hidden
+        ]
+        fullfold_areas = [
+            entry for entry in visible_areas if "fullfold" in entry.name.lower()
+        ]
+        focus_areas = fullfold_areas or visible_areas
+
+        focus_xs: list[float] = []
+        focus_ys: list[float] = []
+        focus_lons: list[float] = []
+        focus_lats: list[float] = []
+        focus_polygons: list[tuple[list[float], list[float]]] = []
+        map_epsg = normalize_epsg(info.epsg_code)
+
+        for entry in focus_areas:
+            xs, ys = resolve_area_polygon(entry, map_data, settings.legend_config.areas)
+            if len(xs) < 2 or len(xs) != len(ys):
+                continue
+            focus_xs.extend(xs)
+            focus_ys.extend(ys)
+            if not map_epsg:
+                continue
+            try:
+                lons, lats = transform_coordinates(xs, ys, map_epsg, WGS84_EPSG)
+            except Exception:
+                continue
+            if len(lons) < 2:
+                continue
+            focus_lons.extend(lons)
+            focus_lats.extend(lats)
+            focus_polygons.append((lons, lats))
+
+        projected_bounds = self._bounds_from_xy(focus_xs, focus_ys)
+        geo_bounds = self._geo_bounds_from_lon_lat(focus_lons, focus_lats)
+        if not projected_bounds.is_valid:
+            projected_bounds = map_data.bounds
+        if not geo_bounds.is_valid:
+            geo_bounds = map_data.geo_bounds
+        return projected_bounds, geo_bounds, focus_polygons
+
     def update_from_project(
         self,
         settings: ProjectSettings,
@@ -73,11 +156,9 @@ class RightPane(PrintPanel):
             self.set_logo(settings.logo_path)
 
         info = map_data.postmap_info if map_data else PostmapInfo()
-        bounds = map_data.bounds if map_data else SurveyBounds()
-        geo = map_data.geo_bounds if map_data else GeoBounds()
+        bounds, geo, minimap_polygons = self._right_pane_focus(settings, map_data, info)
 
         self._card.update_content(info, bounds, settings.legend_config)
         self._card.updateGeometry()
         self._card.repaint()
-        if geo.is_valid:
-            self._minimap.set_location(geo)
+        self._minimap.set_location(geo, minimap_polygons, settings.minimap_view)

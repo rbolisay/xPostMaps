@@ -5,8 +5,8 @@ from __future__ import annotations
 import pyqtgraph as pg
 import numpy as np
 from PySide6.QtCore import Qt, QTimer
-from PySide6.QtGui import QColor
-from PySide6.QtWidgets import QGraphicsItem, QGraphicsView, QVBoxLayout, QWidget
+from PySide6.QtGui import QColor, QFont, QPainter, QPen, QPolygonF
+from PySide6.QtWidgets import QGraphicsView, QVBoxLayout, QWidget
 
 from xpostmaps.core.area_utils import resolve_area_polygon
 from xpostmaps.core.polygon_import_service import is_imported_polygon
@@ -45,6 +45,9 @@ def _configure_pyqtgraph() -> None:
 
 _configure_pyqtgraph()
 
+_MAX_LINE_POINTS = 500_000
+_MAX_SCATTER_POINTS = 200_000
+
 
 def _color_with_opacity(color: str, opacity: float) -> tuple[int, int, int, int]:
     c = QColor(color)
@@ -52,37 +55,79 @@ def _color_with_opacity(color: str, opacity: float) -> tuple[int, int, int, int]
     return c.red(), c.green(), c.blue(), c.alpha()
 
 
-class NorthArrow(pg.GraphicsObject):
-    def __init__(self) -> None:
-        super().__init__()
-        self._picture = None
-        self._generate()
-        self.setCacheMode(QGraphicsItem.CacheMode.DeviceCoordinateCache)
+def _thin_points_for_scatter(
+    xs: np.ndarray,
+    ys: np.ndarray,
+    max_points: int = _MAX_SCATTER_POINTS,
+) -> tuple[np.ndarray, np.ndarray]:
+    if xs.size <= max_points:
+        return xs, ys
+    stride = max(1, int(np.ceil(xs.size / max_points)))
+    return xs[::stride], ys[::stride]
 
-    def _generate(self) -> None:
+
+def _thin_polyline_for_navigation(
+    xs: np.ndarray,
+    ys: np.ndarray,
+    max_points: int = _MAX_LINE_POINTS,
+) -> tuple[np.ndarray, np.ndarray]:
+    if xs.size <= max_points:
+        return xs, ys
+    finite = np.isfinite(xs) & np.isfinite(ys)
+    finite_count = int(np.count_nonzero(finite))
+    if finite_count <= max_points:
+        return xs, ys
+    stride = max(1, int(np.ceil(finite_count / max_points)))
+    keep = ~finite
+    finite_indices = np.flatnonzero(finite)
+    keep[finite_indices[::stride]] = True
+    return xs[keep], ys[keep]
+
+
+class NorthArrow(QWidget):
+    def __init__(self, parent=None) -> None:
+        super().__init__(parent)
+        self.setFixedSize(56, 78)
+        self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+
+    def paintEvent(self, event) -> None:  # noqa: N802
         from PySide6.QtCore import QPointF
-        from PySide6.QtGui import QPainter, QPicture, QPolygonF
 
-        pic = QPicture()
-        painter = QPainter(pic)
-        painter.setPen(pg.mkPen(TEXT_PRINT, width=1.5))
-        painter.setBrush(pg.mkBrush(TEXT_PRINT))
-        arrow = QPolygonF(
-            [QPointF(0, -18), QPointF(-7, 6), QPointF(0, 2), QPointF(7, 6)]
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+
+        painter.setPen(QPen(QColor(TEXT_PRINT), 1))
+        font = QFont("Segoe UI", 14, QFont.Weight.Bold)
+        painter.setFont(font)
+        painter.drawText(0, 0, self.width(), 22, Qt.AlignmentFlag.AlignCenter, "N")
+
+        main = QPolygonF(
+            [
+                QPointF(30, 24),
+                QPointF(48, 70),
+                QPointF(30, 56),
+                QPointF(22, 70),
+            ]
         )
-        painter.drawPolygon(arrow)
-        painter.drawText(-5, 22, "N")
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(QColor("#050505"))
+        painter.drawPolygon(main)
+
+        hatch = QPolygonF(
+            [
+                QPointF(27, 26),
+                QPointF(8, 70),
+                QPointF(24, 58),
+            ]
+        )
+        painter.setBrush(QColor("#7a7a7a"))
+        painter.drawPolygon(hatch)
+
+        painter.setPen(QPen(QColor("#f5f5f5"), 1))
+        for offset in range(0, 17, 3):
+            painter.drawLine(24 - offset // 3, 31 + offset, 10 + offset // 4, 68)
         painter.end()
-        self._picture = pic
-
-    def paint(self, painter, *args) -> None:
-        if self._picture:
-            self._picture.play(painter)
-
-    def boundingRect(self):  # noqa: N802
-        from PySide6.QtCore import QRectF
-
-        return QRectF(-12, -22, 24, 30)
 
 
 class PostplotMapWidget(QWidget):
@@ -125,15 +170,14 @@ class PostplotMapWidget(QWidget):
         self._plot.setViewportUpdateMode(QGraphicsView.ViewportUpdateMode.MinimalViewportUpdate)
         layout.addWidget(self._plot)
 
-        self._north = NorthArrow()
-        self._north.setParentItem(self._plot_item)
-        self._north.setZValue(100)
+        self._north = NorthArrow(self._plot)
+        self._north.raise_()
 
         self._overlay_timer = QTimer(self)
         self._overlay_timer.setSingleShot(True)
         self._overlay_timer.setInterval(32)
         self._overlay_timer.timeout.connect(self._reposition_overlays)
-        vb.sigRangeChanged.connect(self._schedule_overlay_reposition)
+        QTimer.singleShot(0, self._reposition_overlays)
 
     def set_display_mode(self, mode: DisplayMode) -> None:
         self._display_mode = mode
@@ -280,6 +324,7 @@ class PostplotMapWidget(QWidget):
             xs, ys = concat_points(parts)
             if xs.size == 0:
                 return
+            xs, ys = _thin_points_for_scatter(xs, ys)
             item = pg.ScatterPlotItem(
                 xs,
                 ys,
@@ -293,6 +338,7 @@ class PostplotMapWidget(QWidget):
             xs, ys = concat_polylines(parts)
             if xs.size == 0:
                 return
+            xs, ys = _thin_polyline_for_navigation(xs, ys)
             qt_style = (
                 Qt.PenStyle.DashLine
                 if key.line_style == LineStyle.DASH
@@ -308,7 +354,7 @@ class PostplotMapWidget(QWidget):
                 skipFiniteCheck=True,
             )
 
-        self._plot.getViewBox().addItem(item)
+        self._plot_item.addItem(item)
         self._plot_items.append(item)
 
     def _add_batched_segments_styled(
@@ -393,7 +439,7 @@ class PostplotMapWidget(QWidget):
                 antialias=False,
                 clipToView=False,
             )
-            self._plot.getViewBox().addItem(boundary)
+            self._plot_item.addItem(boundary)
             self._plot_items.append(boundary)
 
     def _add_boundary(self, map_data: MapData) -> None:
@@ -418,20 +464,20 @@ class PostplotMapWidget(QWidget):
             antialias=False,
             clipToView=False,
         )
-        self._plot.getViewBox().addItem(boundary)
+        self._plot_item.addItem(boundary)
         self._plot_items.append(boundary)
 
     def _schedule_overlay_reposition(self) -> None:
         self._overlay_timer.start()
 
     def _reposition_overlays(self) -> None:
-        vb = self._plot.getViewBox()
-        if vb is None:
-            return
-        view_range = vb.viewRange()
-        x0, x1 = view_range[0]
-        y0, y1 = view_range[1]
-        self._north.setPos(x0 + (x1 - x0) * 0.04, y0 + (y1 - y0) * 0.06)
+        margin = 14
+        self._north.move(self._plot.width() - self._north.width() - margin, margin)
+        self._north.raise_()
+
+    def resizeEvent(self, event) -> None:  # noqa: N802
+        super().resizeEvent(event)
+        self._reposition_overlays()
 
     def zoom_to_extent(self) -> None:
         vb = self._plot.getViewBox()

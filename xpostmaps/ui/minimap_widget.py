@@ -5,7 +5,11 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import numpy as np
 import pyqtgraph as pg
+from pyqtgraph import functions as fn
+from pyqtgraph.Point import Point
+from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import QVBoxLayout, QWidget
 
 from xpostmaps.core.models import GeoBounds
@@ -15,24 +19,110 @@ from xpostmaps.ui.theme import MINIMAP_COAST, MINIMAP_OCEAN
 _ASSETS = Path(__file__).resolve().parents[1] / "assets" / "world_coastlines.json"
 
 
+class MinimapViewBox(pg.ViewBox):
+    """Interactive minimap view: wheel zoom, right-drag pan, right-double-click extent."""
+
+    def __init__(self, *args, **kwargs) -> None:
+        kwargs.setdefault("enableMenu", False)
+        super().__init__(*args, **kwargs)
+        self._extent_x: tuple[float, float] | None = None
+        self._extent_y: tuple[float, float] | None = None
+
+    def set_extent_range(
+        self,
+        x_range: tuple[float, float] | None,
+        y_range: tuple[float, float] | None,
+    ) -> None:
+        self._extent_x = x_range
+        self._extent_y = y_range
+
+    def zoom_to_extent(self) -> None:
+        if self._extent_x is None or self._extent_y is None:
+            return
+        self.setRange(xRange=self._extent_x, yRange=self._extent_y, padding=0, update=True)
+        self.sigRangeChangedManually.emit(self.state["mouseEnabled"])
+
+    def mouseClickEvent(self, ev) -> None:
+        if ev.button() == Qt.MouseButton.RightButton and ev.double():
+            ev.accept()
+            self.zoom_to_extent()
+            return
+        super().mouseClickEvent(ev)
+
+    def mouseDragEvent(self, ev, axis=None) -> None:
+        if ev.button() == Qt.MouseButton.RightButton:
+            ev.accept()
+            if ev.isStart() or ev.isFinish():
+                return
+            mouse_enabled = np.array(self.state["mouseEnabled"], dtype=np.float64)
+            mask = mouse_enabled.copy()
+            if axis is not None:
+                mask[1 - axis] = 0.0
+            tr = fn.invertQTransform(self.childGroup.transform())
+            delta = tr.map((ev.pos() - ev.lastPos()) * -1 * mask) - tr.map(Point(0, 0))
+            self._resetTarget()
+            self.translateBy(
+                x=delta.x() if mask[0] == 1 else None,
+                y=delta.y() if mask[1] == 1 else None,
+            )
+            self.sigRangeChangedManually.emit(self.state["mouseEnabled"])
+            return
+        super().mouseDragEvent(ev, axis)
+
+
 class MinimapWidget(QWidget):
+    view_changed = Signal(dict)
+
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
         self.setFixedHeight(150)
+        self._suppress_view_changed = False
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
 
-        self._plot = pg.PlotWidget(background=MINIMAP_OCEAN)
+        self._view_box = MinimapViewBox()
+        self._plot = pg.PlotWidget(background=MINIMAP_OCEAN, viewBox=self._view_box)
+        self._plot.setStyleSheet("border: 1px solid #111111;")
         self._plot.setMenuEnabled(False)
         self._plot.hideAxis("bottom")
         self._plot.hideAxis("left")
         self._plot.setAspectLocked(True)
-        self._plot.setMouseEnabled(x=False, y=False)
+        self._plot.setMouseEnabled(x=True, y=True)
         layout.addWidget(self._plot)
 
         self._coast_items: list[pg.PlotDataItem] = []
         self._marker: pg.PlotDataItem | None = None
+        self._area_items: list[pg.PlotDataItem] = []
+        self._view_box.sigRangeChangedManually.connect(self._emit_view_changed)
         self._load_coastlines()
+
+    @staticmethod
+    def _valid_saved_view(view: dict | None) -> tuple[tuple[float, float], tuple[float, float]] | None:
+        if not isinstance(view, dict):
+            return None
+        try:
+            lon_min = float(view.get("lon_min", 0.0))
+            lon_max = float(view.get("lon_max", 0.0))
+            lat_min = float(view.get("lat_min", 0.0))
+            lat_max = float(view.get("lat_max", 0.0))
+        except (TypeError, ValueError):
+            return None
+        if lon_max <= lon_min or lat_max <= lat_min:
+            return None
+        return (lon_min, lon_max), (lat_min, lat_max)
+
+    def current_view(self) -> dict[str, float]:
+        x_range, y_range = self._view_box.viewRange()
+        return {
+            "lon_min": float(x_range[0]),
+            "lon_max": float(x_range[1]),
+            "lat_min": float(y_range[0]),
+            "lat_max": float(y_range[1]),
+        }
+
+    def _emit_view_changed(self, *_args) -> None:
+        if not self._suppress_view_changed:
+            self.view_changed.emit(self.current_view())
 
     def _load_coastlines(self) -> None:
         if not _ASSETS.exists():
@@ -50,11 +140,20 @@ class MinimapWidget(QWidget):
             self._coast_items.append(item)
         self._plot.setRange(xRange=(-30, 45), yRange=(50, 72), padding=0.02)
 
-    def set_location(self, geo: GeoBounds) -> None:
+    def set_location(
+        self,
+        geo: GeoBounds,
+        area_polygons: list[tuple[list[float], list[float]]] | None = None,
+        saved_view: dict | None = None,
+    ) -> None:
         if self._marker:
             self._plot.removeItem(self._marker)
             self._marker = None
+        for item in self._area_items:
+            self._plot.removeItem(item)
+        self._area_items.clear()
         if not geo.is_valid:
+            self._view_box.set_extent_range(None, None)
             return
 
         pad_lat = max((geo.lat_max - geo.lat_min) * 0.15, 0.2)
@@ -79,12 +178,30 @@ class MinimapWidget(QWidget):
             connect="all",
         )
         self._plot.addItem(self._marker)
+        for lons, lats in area_polygons or []:
+            if len(lons) < 2 or len(lons) != len(lats):
+                continue
+            area_item = pg.PlotDataItem(
+                lons,
+                lats,
+                pen=pg.mkPen("#00a651", width=1.6),
+                connect="all",
+            )
+            self._plot.addItem(area_item)
+            self._area_items.append(area_item)
 
         cx = (geo.lon_min + geo.lon_max) / 2
         cy = (geo.lat_min + geo.lat_max) / 2
-        span = max(geo.lon_max - geo.lon_min, geo.lat_max - geo.lat_min, 2.0) * 8
+        span = max(geo.lon_max - geo.lon_min, geo.lat_max - geo.lat_min, 0.5) * 4.0
+        x_range = (cx - span, cx + span)
+        y_range = (cy - span * 0.6, cy + span * 0.6)
+        self._view_box.set_extent_range(x_range, y_range)
+        saved_ranges = self._valid_saved_view(saved_view)
+        target_x, target_y = saved_ranges if saved_ranges is not None else (x_range, y_range)
+        self._suppress_view_changed = True
         self._plot.setRange(
-            xRange=(cx - span, cx + span),
-            yRange=(cy - span * 0.6, cy + span * 0.6),
+            xRange=target_x,
+            yRange=target_y,
             padding=0.05,
         )
+        self._suppress_view_changed = False

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Callable
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, QTimer
 from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
@@ -193,6 +193,9 @@ class LegendDialog:
             imported_storage.extend(imported_polygon_entries(legend.areas))
             imported_count = len(imported_storage)
             active_map_epsg = map_epsg
+            live_apply_timer = QTimer(dialog)
+            live_apply_timer.setSingleShot(True)
+            live_apply_timer.setInterval(120)
 
             title = QLabel("Legend")
             title.setObjectName("sectionTitle")
@@ -367,11 +370,14 @@ class LegendDialog:
                 _fit_table_row(area_table, row)
 
             def apply_legend() -> None:
+                live_apply_timer.stop()
                 on_apply(_collect())
 
             def live_apply(*_args) -> None:
                 if live["on"]:
-                    apply_legend()
+                    live_apply_timer.start()
+
+            live_apply_timer.timeout.connect(lambda: on_apply(_collect()))
 
             def _open_custom_polygon(row: int) -> None:
                 name_w = area_table.cellWidget(row, 0)

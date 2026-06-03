@@ -168,6 +168,10 @@ class Database:
             self._conn.execute(
                 "ALTER TABLE projects ADD COLUMN preplot_catalog_json TEXT DEFAULT '[]'"
             )
+        if "minimap_view_json" not in cols:
+            self._conn.execute(
+                "ALTER TABLE projects ADD COLUMN minimap_view_json TEXT DEFAULT '{}'"
+            )
 
         seg_cols = {row[1] for row in self._conn.execute("PRAGMA table_info(segments)")}
         if "sequence_id" not in seg_cols:
@@ -230,6 +234,7 @@ class Database:
         preplot_catalog_json = json.dumps(catalog_to_json(settings.preplot_catalog))
         legend_json = json.dumps(legend_to_dict(settings.legend_config))
         nav_cache_json = json.dumps(nav_cache_to_json(map_data.nav_file_cache))
+        minimap_view_json = json.dumps(settings.minimap_view)
 
         row = self._conn.execute(
             "SELECT id FROM projects WHERE name = ?", (settings.name,)
@@ -247,7 +252,7 @@ class Database:
                     stats_json=?, source_files_json=?, nav_files_json=?,
                     preplot_files_json=?, nav_file_cache_json=?, logo_path=?,
                     legend_config_json=?, nav_files_explicit=?, preplot_files_explicit=?,
-                    preplot_catalog_json=?, updated_at=?
+                    preplot_catalog_json=?, minimap_view_json=?, updated_at=?
                 WHERE id=?
                 """,
                 (
@@ -272,6 +277,7 @@ class Database:
                     int(settings.nav_files_explicit),
                     int(settings.preplot_files_explicit),
                     preplot_catalog_json,
+                    minimap_view_json,
                     now,
                     project_id,
                 ),
@@ -290,8 +296,8 @@ class Database:
                     source_files_json, nav_files_json, preplot_files_json,
                     nav_file_cache_json, logo_path, legend_config_json,
                     nav_files_explicit, preplot_files_explicit, preplot_catalog_json,
-                    created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    minimap_view_json, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     settings.name,
@@ -316,6 +322,7 @@ class Database:
                     int(settings.nav_files_explicit),
                     int(settings.preplot_files_explicit),
                     preplot_catalog_json,
+                    minimap_view_json,
                     now,
                     now,
                 ),
@@ -330,6 +337,59 @@ class Database:
         self._save_survey_perimeters(project_id, map_data.survey_perimeters)
         self._conn.commit()
         return int(project_id)
+
+    def save_project_metadata(self, settings: ProjectSettings, map_data: MapData) -> int:
+        """Update project-level settings without rewriting heavy geometry tables."""
+        row = self._conn.execute(
+            "SELECT id FROM projects WHERE name = ?", (settings.name,)
+        ).fetchone()
+        if row is None:
+            return self.save_project(settings, map_data)
+
+        project_id = int(row["id"])
+        now = self._now()
+        self._conn.execute(
+            """
+            UPDATE projects SET
+                p111_p190_dir=?, overlay_dir=?, preplots_dir=?,
+                display_mode=?, show_source=?, show_vessel=?,
+                show_overlay=?, show_preplots=?,
+                postmap_info_json=?, bounds_json=?, geo_bounds_json=?,
+                stats_json=?, source_files_json=?, nav_files_json=?,
+                preplot_files_json=?, nav_file_cache_json=?, logo_path=?,
+                legend_config_json=?, nav_files_explicit=?, preplot_files_explicit=?,
+                preplot_catalog_json=?, minimap_view_json=?, updated_at=?
+            WHERE id=?
+            """,
+            (
+                settings.p111_p190_dir,
+                settings.overlay_dir,
+                settings.preplots_dir,
+                settings.display_mode.value,
+                int(settings.show_source),
+                int(settings.show_vessel),
+                int(settings.show_overlay),
+                int(settings.show_preplots),
+                json.dumps(map_data.postmap_info.__dict__, default=str),
+                json.dumps(map_data.bounds.__dict__),
+                json.dumps(map_data.geo_bounds.__dict__),
+                json.dumps(map_data.stats),
+                json.dumps(map_data.source_files),
+                json.dumps(settings.nav_files),
+                json.dumps(settings.preplot_files),
+                json.dumps(nav_cache_to_json(map_data.nav_file_cache)),
+                settings.logo_path,
+                json.dumps(legend_to_dict(settings.legend_config)),
+                int(settings.nav_files_explicit),
+                int(settings.preplot_files_explicit),
+                json.dumps(catalog_to_json(settings.preplot_catalog)),
+                json.dumps(settings.minimap_view),
+                now,
+                project_id,
+            ),
+        )
+        self._conn.commit()
+        return project_id
 
     def _save_segments(
         self, project_id: int, category: str, segments: list[LineSegment]
@@ -494,6 +554,9 @@ class Database:
                 if "legend_config_json" in row.keys()
                 else {}
             ),
+            minimap_view=json.loads(row["minimap_view_json"] or "{}")
+            if "minimap_view_json" in row.keys()
+            else {},
         )
 
         postmap_dict = json.loads(row["postmap_info_json"] or "{}")

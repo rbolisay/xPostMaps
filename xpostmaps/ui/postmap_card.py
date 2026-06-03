@@ -8,6 +8,7 @@ from PySide6.QtWidgets import QGridLayout, QHBoxLayout, QLabel, QVBoxLayout, QWi
 
 from xpostmaps.core.crs_utils import epsg_label
 from xpostmaps.core.models import LegendConfig, LineStyle, PostmapInfo, SurveyBounds
+from xpostmaps.core.polygon_import_service import non_imported_polygon_entries
 from xpostmaps.ui.theme import BG_PRINT, TEXT_PRINT, TEXT_PRINT_SECONDARY
 from xpostmaps.ui.widgets.scale_bar import ScaleBarWidget
 
@@ -112,6 +113,13 @@ class PostmapInfoCard(QWidget):
         self._legend_area = QVBoxLayout()
         self._legend_preplot = QVBoxLayout()
         self._legend_postplot = QVBoxLayout()
+        for legend_layout in (
+            self._legend_area,
+            self._legend_preplot,
+            self._legend_postplot,
+        ):
+            legend_layout.setSpacing(1)
+            legend_layout.setContentsMargins(0, 0, 0, 0)
         layout.addLayout(self._legend_area)
         layout.addLayout(self._legend_preplot)
         layout.addLayout(self._legend_postplot)
@@ -135,15 +143,38 @@ class PostmapInfoCard(QWidget):
                     if sub.widget():
                         sub.widget().deleteLater()
 
-    def _add_legend_row(self, lay: QVBoxLayout, swatch: QWidget, text: str) -> None:
+    def _legend_row_widget(self, swatch: QWidget, text: str) -> QWidget:
         row = QHBoxLayout()
+        row.setContentsMargins(0, 0, 0, 0)
+        row.setSpacing(3)
         row.addWidget(swatch)
         lbl = QLabel(text)
         lbl.setWordWrap(True)
-        lbl.setStyleSheet(f"font-size: 10px; color: {TEXT_PRINT};")
+        lbl.setStyleSheet(
+            f"font-size: 9px; color: {TEXT_PRINT}; margin: 0; padding: 0;"
+        )
         row.addWidget(lbl, stretch=1)
         w = QWidget()
         w.setLayout(row)
+        return w
+
+    def _add_legend_row(self, lay: QVBoxLayout, swatch: QWidget, text: str) -> None:
+        w = self._legend_row_widget(swatch, text)
+        lay.addWidget(w)
+
+    def _add_legend_grid(
+        self,
+        lay: QVBoxLayout,
+        rows: list[tuple[QWidget, str]],
+    ) -> None:
+        grid = QGridLayout()
+        grid.setContentsMargins(0, 0, 0, 0)
+        grid.setHorizontalSpacing(6)
+        grid.setVerticalSpacing(1)
+        for index, (swatch, text) in enumerate(rows):
+            grid.addWidget(self._legend_row_widget(swatch, text), index // 2, index % 2)
+        w = QWidget()
+        w.setLayout(grid)
         lay.addWidget(w)
 
     def update_content(
@@ -192,13 +223,15 @@ class PostmapInfoCard(QWidget):
         area_hdr = QLabel("Area")
         area_hdr.setStyleSheet(f"font-size: 10px; font-weight: 600; color: {TEXT_PRINT};")
         self._legend_area.addWidget(area_hdr)
-        for entry in legend.areas:
-            if entry.name and not entry.hidden:
-                self._add_legend_row(
-                    self._legend_area,
-                    _BoxSwatch(entry.color),
-                    entry.name,
-                )
+        visible_areas = [
+            entry
+            for entry in non_imported_polygon_entries(legend.areas)
+            if entry.name and not entry.hidden
+        ]
+        self._add_legend_grid(
+            self._legend_area,
+            [(_BoxSwatch(entry.color), entry.name) for entry in visible_areas],
+        )
 
         visible_preplot = [
             entry for entry in legend.preplot_lines if entry.name and not entry.hidden
@@ -221,13 +254,16 @@ class PostmapInfoCard(QWidget):
             f"font-size: 10px; font-weight: 600; margin-top: 4px; color: {TEXT_PRINT};"
         )
         self._legend_postplot.addWidget(post_hdr)
-        for entry in legend.postplot_lines:
-            if entry.name and not entry.hidden:
-                self._add_legend_row(
-                    self._legend_postplot,
-                    _LineSwatch(entry.color, line_style=entry.line_style),
-                    entry.name,
-                )
+        visible_postplot = [
+            entry for entry in legend.postplot_lines if entry.name and not entry.hidden
+        ]
+        self._add_legend_grid(
+            self._legend_postplot,
+            [
+                (_LineSwatch(entry.color, line_style=entry.line_style), entry.name)
+                for entry in visible_postplot
+            ],
+        )
 
         self.updateGeometry()
         self.adjustSize()

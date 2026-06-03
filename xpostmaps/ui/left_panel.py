@@ -117,7 +117,7 @@ class LeftPanel(GlassPanel):
         self._info_btn = QPushButton("Project Information")
         self._info_btn.setObjectName("dirBtn")
 
-        for btn in (self._legend_btn, self._info_btn):
+        for btn in (self._info_btn, self._legend_btn):
             layout.addWidget(btn)
 
         self._legend_btn.clicked.connect(self.open_legend.emit)

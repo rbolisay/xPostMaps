@@ -40,7 +40,8 @@ class ScaleBarWidget(QWidget):
         for label, frac in (("0", 0.0), (f"{mid_km:.0f}", 0.5), (f"{self._km:.0f} km", 1.0)):
             x = x0 + bar_w * frac
             tw = painter.fontMetrics().horizontalAdvance(label)
-            painter.drawText(int(x - tw / 2), 14, label)
+            label_x = max(margin, min(x - tw / 2, w - margin - tw))
+            painter.drawText(int(label_x), 14, label)
 
         segments = 4
         seg_w = bar_w / segments
