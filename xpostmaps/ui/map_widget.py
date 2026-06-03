@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import math
+import types
+
 import pyqtgraph as pg
 import numpy as np
 from PySide6.QtCore import Qt, QTimer
@@ -139,6 +142,176 @@ class NorthArrow(QWidget):
         painter.end()
 
 
+_FRAME_BAND = 8
+_FRAME_BLACK = QColor("#000000")
+_FRAME_WHITE = QColor("#ffffff")
+# Reserved margin (px) for the rotated Northing labels on the left/right edges.
+_FRAME_SIDE_MARGIN = 66
+
+
+def _format_full_value(value: float, spacing: float) -> str:
+    """Full coordinate value (e.g. 6990000) — never scientific notation."""
+    places = 0
+    if spacing and spacing > 0:
+        places = max(0, int(math.ceil(-math.log10(spacing))))
+    return f"{value:.{places}f}"
+
+
+def _full_tick_strings(self, values, scale, spacing):  # noqa: ANN001
+    sp = spacing * scale
+    return [_format_full_value(v * scale, sp) for v in values]
+
+
+class MapFrameOverlay(QWidget):
+    """QGIS-style zebra neatline drawn on top of the plot edges.
+
+    Alternating black/white blocks switch colour at every major grid tick, so
+    the frame stays aligned with the coordinate grid as the map is panned and
+    zoomed. It is a transparent, mouse-through child of the plot widget.
+    """
+
+    def __init__(self, plot_widget: pg.PlotWidget, plot_item, parent=None) -> None:
+        super().__init__(parent or plot_widget)
+        self._plot = plot_widget
+        self._plot_item = plot_item
+        self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+
+    @staticmethod
+    def _major_ticks(axis, lo: float, hi: float, size: float) -> list[float]:
+        try:
+            levels = axis.tickValues(lo, hi, size)
+        except Exception:  # noqa: BLE001
+            return []
+        if not levels:
+            return []
+        return [float(v) for v in levels[0][1]]
+
+    def _plot_rect(self):
+        vb = self._plot.getViewBox()
+        if vb is None:
+            return None
+        scene_rect = vb.sceneBoundingRect()
+        if scene_rect.width() <= 4 or scene_rect.height() <= 4:
+            return None
+        top_left = self._plot.mapFromScene(scene_rect.topLeft())
+        bottom_right = self._plot.mapFromScene(scene_rect.bottomRight())
+        return (
+            float(top_left.x()),
+            float(top_left.y()),
+            float(bottom_right.x()),
+            float(bottom_right.y()),
+            vb,
+        )
+
+    def paintEvent(self, event) -> None:  # noqa: N802
+        from PySide6.QtCore import QRectF
+
+        info = self._plot_rect()
+        if info is None:
+            return
+        left, top, right, bottom, vb = info
+        try:
+            (x0, x1), (y0, y1) = vb.viewRange()
+        except Exception:  # noqa: BLE001
+            return
+        if x1 <= x0 or y1 <= y0 or right <= left or bottom <= top:
+            return
+
+        width = right - left
+        height = bottom - top
+        x_ticks = self._major_ticks(
+            self._plot_item.getAxis("bottom"), x0, x1, width
+        )
+        y_ticks = self._major_ticks(
+            self._plot_item.getAxis("left"), y0, y1, height
+        )
+
+        def px(value: float) -> float:
+            return left + (value - x0) / (x1 - x0) * width
+
+        def py(value: float) -> float:
+            return bottom - (value - y0) / (y1 - y0) * height
+
+        x_bounds = [left]
+        x_bounds += sorted(p for v in x_ticks if left < (p := px(v)) < right)
+        x_bounds.append(right)
+        y_bounds = [top]
+        y_bounds += sorted(p for v in y_ticks if top < (p := py(v)) < bottom)
+        y_bounds.append(bottom)
+
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, False)
+        painter.setPen(Qt.PenStyle.NoPen)
+
+        band = float(_FRAME_BAND)
+        # Horizontal edges (top + bottom) span the full width.
+        for i in range(len(x_bounds) - 1):
+            colour = _FRAME_BLACK if i % 2 == 0 else _FRAME_WHITE
+            x_a = x_bounds[i]
+            seg_w = x_bounds[i + 1] - x_a
+            painter.fillRect(QRectF(x_a, top, seg_w, band), colour)
+            painter.fillRect(QRectF(x_a, bottom - band, seg_w, band), colour)
+
+        # Vertical edges (left + right) fill only the middle so the corners
+        # belong cleanly to the horizontal bands.
+        inner_top = top + band
+        inner_bottom = bottom - band
+        v_bounds = [inner_top]
+        v_bounds += [p for p in y_bounds if inner_top < p < inner_bottom]
+        v_bounds.append(inner_bottom)
+        for i in range(len(v_bounds) - 1):
+            colour = _FRAME_BLACK if i % 2 == 0 else _FRAME_WHITE
+            y_a = v_bounds[i]
+            seg_h = v_bounds[i + 1] - y_a
+            painter.fillRect(QRectF(left, y_a, band, seg_h), colour)
+            painter.fillRect(QRectF(right - band, y_a, band, seg_h), colour)
+
+        pen = QPen(_FRAME_BLACK, 1)
+        painter.setPen(pen)
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        painter.drawRect(QRectF(left, top, width, height))
+        painter.drawRect(
+            QRectF(left + band, top + band, width - 2 * band, height - 2 * band)
+        )
+
+        self._draw_side_labels(painter, left, right, top, bottom, y_ticks, py)
+        painter.end()
+
+    def _draw_side_labels(self, painter, left, right, top, bottom, y_ticks, py):
+        """Northing labels rotated 90° (parallel to the side borders)."""
+        if not y_ticks:
+            return
+        ordered = sorted(y_ticks)
+        spacing = abs(ordered[1] - ordered[0]) if len(ordered) >= 2 else 0.0
+
+        painter.setPen(QPen(QColor(TEXT_PRINT), 1))
+        painter.setFont(QFont("Segoe UI", 8))
+        left_cx = left / 2.0
+        right_cx = (right + self.width()) / 2.0
+        for value in y_ticks:
+            cy = py(value)
+            if not (top < cy < bottom):
+                continue
+            text = _format_full_value(value, spacing)
+            self._draw_vertical_text(painter, left_cx, cy, text)
+            self._draw_vertical_text(painter, right_cx, cy, text)
+
+    @staticmethod
+    def _draw_vertical_text(painter, cx: float, cy: float, text: str) -> None:
+        from PySide6.QtCore import QRectF
+
+        painter.save()
+        painter.translate(cx, cy)
+        painter.rotate(-90)
+        painter.drawText(
+            QRectF(-60, -10, 120, 20),
+            Qt.AlignmentFlag.AlignCenter,
+            text,
+        )
+        painter.restore()
+
+
 class PostplotMapWidget(QWidget):
     """High-performance map canvas — survey plot area only."""
 
@@ -170,13 +343,30 @@ class PostplotMapWidget(QWidget):
         self._plot.setAspectLocked(True)
         self._plot.showGrid(x=False, y=False)
         self._plot_item.hideButtons()
-        self._plot.setLabel("bottom", "Easting", color=TEXT_PRINT)
-        self._plot.setLabel("left", "Northing", color=TEXT_PRINT)
 
-        for axis in ("bottom", "left"):
+        # Coordinate labels on all four sides (full values, no grid), matching a
+        # printed survey map. The zebra neatline and the rotated Northing labels
+        # are drawn by MapFrameOverlay.
+        for axis in ("bottom", "left", "top", "right"):
+            self._plot.showAxis(axis)
             ax = self._plot_item.getAxis(axis)
             ax.setPen(pg.mkPen(TEXT_PRINT))
             ax.setTextPen(pg.mkPen(TEXT_PRINT))
+            ax.setZValue(0.5)
+            ax.enableAutoSIPrefix(False)
+
+        # Easting (horizontal) labels: pyqtgraph draws them, full value format.
+        for axis in ("bottom", "top"):
+            ax = self._plot_item.getAxis(axis)
+            ax.setStyle(showValues=True)
+            ax.tickStrings = types.MethodType(_full_tick_strings, ax)
+
+        # Northing (vertical) labels: hidden here and redrawn rotated by the
+        # overlay; reserve margin width so they sit outside the frame.
+        for axis in ("left", "right"):
+            ax = self._plot_item.getAxis(axis)
+            ax.setStyle(showValues=False)
+            ax.setWidth(_FRAME_SIDE_MARGIN)
 
         vb = self._plot.getViewBox()
         vb.setBackgroundColor(BG_MAP_PRINT)
@@ -184,6 +374,9 @@ class PostplotMapWidget(QWidget):
         vb.setMouseEnabled(x=True, y=True)
         self._plot.setViewportUpdateMode(QGraphicsView.ViewportUpdateMode.MinimalViewportUpdate)
         layout.addWidget(self._plot)
+
+        self._frame = MapFrameOverlay(self._plot, self._plot_item)
+        vb.sigRangeChanged.connect(lambda *_a: self._frame.update())
 
         self._north = NorthArrow(self._plot)
         self._north.raise_()
@@ -564,8 +757,21 @@ class PostplotMapWidget(QWidget):
         self._overlay_timer.start()
 
     def _reposition_overlays(self) -> None:
-        margin = 14
-        self._north.move(self._plot.width() - self._north.width() - margin, margin)
+        self._frame.setGeometry(0, 0, self._plot.width(), self._plot.height())
+        self._frame.raise_()
+        self._frame.update()
+
+        inset = _FRAME_BAND + 8
+        info = self._frame._plot_rect()
+        if info is not None:
+            left, top, right, bottom, _vb = info
+            x = int(right - inset - self._north.width())
+            y = int(top + inset)
+        else:
+            margin = 14
+            x = self._plot.width() - self._north.width() - margin
+            y = margin
+        self._north.move(x, y)
         self._north.raise_()
 
     def resizeEvent(self, event) -> None:  # noqa: N802
