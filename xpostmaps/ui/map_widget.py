@@ -3,12 +3,11 @@
 from __future__ import annotations
 
 import math
-import types
 
 import pyqtgraph as pg
 import numpy as np
-from PySide6.QtCore import Qt, QTimer
-from PySide6.QtGui import QColor, QFont, QPainter, QPen, QPolygonF
+from PySide6.QtCore import Qt, QTimer, QPoint, QRectF
+from PySide6.QtGui import QColor, QFont, QPainter, QPen, QPolygonF, QRegion
 from PySide6.QtWidgets import QGraphicsView, QVBoxLayout, QWidget
 
 from xpostmaps.core.area_utils import resolve_area_polygon
@@ -147,6 +146,8 @@ _FRAME_BLACK = QColor("#000000")
 _FRAME_WHITE = QColor("#ffffff")
 # Reserved margin (px) for the rotated Northing labels on the left/right edges.
 _FRAME_SIDE_MARGIN = 66
+# Reserved margin (px) for the Easting labels on the top/bottom edges.
+_FRAME_TOPBOT_MARGIN = 30
 
 
 def _format_full_value(value: float, spacing: float) -> str:
@@ -155,11 +156,6 @@ def _format_full_value(value: float, spacing: float) -> str:
     if spacing and spacing > 0:
         places = max(0, int(math.ceil(-math.log10(spacing))))
     return f"{value:.{places}f}"
-
-
-def _full_tick_strings(self, values, scale, spacing):  # noqa: ANN001
-    sp = spacing * scale
-    return [_format_full_value(v * scale, sp) for v in values]
 
 
 class MapFrameOverlay(QWidget):
@@ -276,7 +272,32 @@ class MapFrameOverlay(QWidget):
         )
 
         self._draw_side_labels(painter, left, right, top, bottom, y_ticks, py)
+        self._draw_easting_labels(painter, left, right, top, bottom, x_ticks, px)
         painter.end()
+
+    def _draw_easting_labels(self, painter, left, right, top, bottom, x_ticks, px):
+        """Easting labels drawn horizontally in the top/bottom margins."""
+        if not x_ticks:
+            return
+        from PySide6.QtCore import QRectF
+
+        ordered = sorted(x_ticks)
+        spacing = abs(ordered[1] - ordered[0]) if len(ordered) >= 2 else 0.0
+        painter.setPen(QPen(QColor(TEXT_PRINT), 1))
+        painter.setFont(QFont("Segoe UI", 8))
+        top_cy = top / 2.0
+        bottom_cy = (bottom + self.height()) / 2.0
+        for value in x_ticks:
+            cx = px(value)
+            if not (left < cx < right):
+                continue
+            text = _format_full_value(value, spacing)
+            for cy in (top_cy, bottom_cy):
+                painter.drawText(
+                    QRectF(cx - 60, cy - 10, 120, 20),
+                    Qt.AlignmentFlag.AlignCenter,
+                    text,
+                )
 
     def _draw_side_labels(self, painter, left, right, top, bottom, y_ticks, py):
         """Northing labels rotated 90° (parallel to the side borders)."""
@@ -350,16 +371,24 @@ class PostplotMapWidget(QWidget):
         for axis in ("bottom", "left", "top", "right"):
             self._plot.showAxis(axis)
             ax = self._plot_item.getAxis(axis)
-            ax.setPen(pg.mkPen(TEXT_PRINT))
+            # Transparent pen: the zebra neatline (MapFrameOverlay) is the real border,
+            # so pyqtgraph's axis baseline/ticks must not draw — otherwise they appear as
+            # thin "ruler" lines just inside the frame in the vector PDF.
+            ax.setPen(pg.mkPen(None))
             ax.setTextPen(pg.mkPen(TEXT_PRINT))
             ax.setZValue(0.5)
             ax.enableAutoSIPrefix(False)
 
-        # Easting (horizontal) labels: pyqtgraph draws them, full value format.
+        # Easting (horizontal) labels are drawn by MapFrameOverlay (same as the
+        # northing labels) so they render identically on screen and in the vector PDF.
+        # pyqtgraph's own axis text is hidden because, as a scene item, it inherits the
+        # PDF painter's point-size font and balloons ~6× on a high-DPI page; the overlay
+        # is rendered in widget coordinates and stays correctly sized. The axis height is
+        # still reserved so the labels sit in the margin outside the neatline.
         for axis in ("bottom", "top"):
             ax = self._plot_item.getAxis(axis)
-            ax.setStyle(showValues=True)
-            ax.tickStrings = types.MethodType(_full_tick_strings, ax)
+            ax.setStyle(showValues=False)
+            ax.setHeight(_FRAME_TOPBOT_MARGIN)
 
         # Northing (vertical) labels: hidden here and redrawn rotated by the
         # overlay; reserve margin width so they sit outside the frame.
@@ -406,6 +435,42 @@ class PostplotMapWidget(QWidget):
         self._reposition_overlays()
         self._frame.update()
         self.repaint()
+
+    def render_vector(self, painter: QPainter, target: QRectF) -> None:
+        """Paint the map as scalable vector content into ``target`` (PDF export).
+
+        The pyqtgraph scene (nav lines, axes, coordinate labels) is rendered as true
+        vector paths/text; the zebra frame and north arrow are widget overlays drawn
+        on top at the matching transform so the whole map stays sharp when zoomed.
+        """
+        self._reposition_overlays()
+        plot = self._plot
+        scene = plot.scene()
+        source = plot.mapToScene(plot.viewport().rect()).boundingRect()
+        painter.save()
+        scene.render(painter, target, source, Qt.AspectRatioMode.IgnoreAspectRatio)
+        painter.restore()
+
+        plot_w = max(plot.width(), 1)
+        plot_h = max(plot.height(), 1)
+        sx = target.width() / plot_w
+        sy = target.height() / plot_h
+        for overlay in (self._frame, self._north):
+            if overlay is None or not overlay.isVisible():
+                continue
+            ow = max(overlay.width(), 1)
+            oh = max(overlay.height(), 1)
+            painter.save()
+            painter.translate(target.x() + overlay.x() * sx, target.y() + overlay.y() * sy)
+            painter.scale((ow * sx) / ow, (oh * sy) / oh)
+            QWidget.render(
+                overlay,
+                painter,
+                QPoint(0, 0),
+                QRegion(overlay.rect()),
+                QWidget.RenderFlag.DrawWindowBackground | QWidget.RenderFlag.DrawChildren,
+            )
+            painter.restore()
 
     def clear(self) -> None:
         view_box = self._plot.getViewBox()

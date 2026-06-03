@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 
-from PySide6.QtCore import Qt, QMarginsF, QPoint, QSizeF
+from PySide6.QtCore import Qt, QMarginsF, QPoint, QRectF, QSizeF
 from PySide6.QtGui import (
     QImage,
     QPageLayout,
@@ -448,3 +448,123 @@ def write_pdf(
     """Write a single-page PDF (captures on UI thread, then composes)."""
     map_image, pane_image = capture_export_images(map_widget, right_pane, options)
     compose_pdf_to_path(path, map_image, pane_image, options)
+
+
+# Vector export: resolution only sets coordinate precision / embedded-raster DPI;
+# lines, dots and text are written as scalable vector objects either way.
+VECTOR_DEVICE_DPI = 600
+
+
+def _render_widget_into(painter: QPainter, widget: QWidget, target: QRectF) -> None:
+    """Paint a widget (and children) into ``target`` as vector content."""
+    src_w = max(widget.width(), 1)
+    src_h = max(widget.height(), 1)
+    painter.save()
+    painter.translate(target.x(), target.y())
+    painter.scale(target.width() / src_w, target.height() / src_h)
+    QWidget.render(
+        widget,
+        painter,
+        QPoint(0, 0),
+        QRegion(widget.rect()),
+        QWidget.RenderFlag.DrawWindowBackground | QWidget.RenderFlag.DrawChildren,
+    )
+    painter.restore()
+
+
+def compose_pdf_vector(
+    path: Path,
+    map_widget: QWidget,
+    right_pane: QWidget,
+    options: PdfExportOptions,
+) -> None:
+    """Write a scalable vector PDF by painting the widgets straight onto the page.
+
+    Unlike the raster path this keeps nav lines, scatter dots, axis labels and the
+    right-pane text as true vector objects, so zooming in a PDF viewer stays sharp.
+    Must run on the UI thread (touches live widgets).
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    device_dpi = min(max(options.dpi, 150), VECTOR_DEVICE_DPI)
+    layout = page_layout_for(options.paper, options.landscape)
+    writer = QPdfWriter(str(path))
+    writer.setResolution(device_dpi)
+    writer.setPageLayout(layout)
+    page_rect = layout.paintRectPixels(device_dpi)
+
+    painter = QPainter(writer)
+    painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+    painter.setRenderHint(QPainter.RenderHint.TextAntialiasing, True)
+    painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
+    painter.fillRect(page_rect, Qt.GlobalColor.white)
+
+    inner_w = float(page_rect.width())
+    inner_h = float(page_rect.height())
+    ox = float(page_rect.x())
+    oy = float(page_rect.y())
+
+    map_w = max(map_widget.width(), 1)
+    map_h = max(map_widget.height(), 1)
+    pane_w = max(right_pane.width(), 1)
+    pane_h = max(right_pane.height(), 1)
+
+    # Both widgets occupy the printable height (pane optionally smaller), side by side
+    # at true aspect, then the whole strip is fit uniformly onto the page.
+    base_h = inner_h
+    map_disp_w = map_w * (base_h / map_h)
+    pane_disp_h = base_h * PANE_PDF_SCALE
+    pane_disp_w = pane_w * (pane_disp_h / pane_h)
+    gap = max(inner_w * 0.004, 2.0)
+    strip_w = map_disp_w + gap + pane_disp_w
+
+    fit = min(inner_w / strip_w, inner_h / base_h)
+    mode = options.scale_mode.strip().lower()
+    if mode == "custom":
+        fit *= max(options.scale_percent, 1) / 100.0
+
+    placed_w = strip_w * fit
+    placed_h = base_h * fit
+    x0 = ox + max(0.0, (inner_w - placed_w) / 2.0)
+    y0 = oy + max(0.0, (inner_h - placed_h) / 2.0)
+
+    map_rect = QRectF(x0, y0, map_disp_w * fit, base_h * fit)
+    pane_rect = QRectF(
+        x0 + (map_disp_w + gap) * fit,
+        y0,
+        pane_disp_w * fit,
+        pane_disp_h * fit,
+    )
+
+    # Map renders its graphics scene as true vector; pane is drawn as a high-res
+    # raster (it embeds a pyqtgraph minimap that cannot vectorise cleanly, and a
+    # crisp bitmap matches the GUI without the blur seen from a scaled widget render).
+    render_vector = getattr(map_widget, "render_vector", None)
+    if callable(render_vector):
+        painter.fillRect(map_rect, Qt.GlobalColor.white)
+        render_vector(painter, map_rect)
+    else:
+        _render_widget_into(painter, map_widget, map_rect)
+
+    pane_px_h = min(max(int(pane_rect.height()), 1), 3200)
+    pane_image = render_widget_to_height(right_pane, pane_px_h)
+    if not pane_image.isNull():
+        painter.drawImage(pane_rect, pane_image)
+    else:
+        _render_widget_into(painter, right_pane, pane_rect)
+    painter.end()
+
+
+def write_pdf_vector(
+    path: Path,
+    map_widget: QWidget,
+    right_pane: QWidget,
+    options: PdfExportOptions,
+) -> None:
+    """Prepare widgets and write a scalable vector PDF (UI thread only)."""
+    map_height = max(map_widget.height(), 1)
+    map_widget.prepare_for_export()
+    right_pane.prepare_export_snapshot(map_height=map_height)
+    try:
+        compose_pdf_vector(path, map_widget, right_pane, options)
+    finally:
+        right_pane.reset_export_snapshot()

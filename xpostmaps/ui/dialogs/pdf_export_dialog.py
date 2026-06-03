@@ -42,6 +42,7 @@ from xpostmaps.core.pdf_export import (
     raster_dpi_clamped,
     render_sheet_preview,
     resolve_output_path,
+    write_pdf_vector,
 )
 from xpostmaps.core.pdf_export_worker import PdfExportCapture, PdfExportWorker
 from xpostmaps.ui.dialogs.base_dialog import SingleInstanceDialog
@@ -145,14 +146,18 @@ class PdfExportDialog:
             scale_host.setLayout(scale_row)
             left_form.addRow("Scale", scale_host)
 
+            vector_mode = QCheckBox("Scalable vector PDF (recommended)")
+            vector_mode.setChecked(True)
+            left_form.addRow("", vector_mode)
+
             open_after = QCheckBox("Open folder after export")
             open_after.setChecked(True)
             left_form.addRow("", open_after)
 
             hint = QLabel(
-                "Exports map and right pane at equal height with true aspect ratio "
-                "(no horizontal squeeze). Raster detail is capped at 500 DPI for speed; "
-                "higher settings still use 500 DPI for compositing."
+                "Vector mode keeps lines, dots and text infinitely sharp when zoomed "
+                "(DPI is ignored). Uncheck for a flat raster image; raster detail is "
+                "capped at 500 DPI for speed."
             )
             hint.setWordWrap(True)
             hint.setStyleSheet("color: #8b949e; font-size: 11px;")
@@ -327,6 +332,29 @@ class PdfExportDialog:
                     )
                     if answer != QMessageBox.StandardButton.Yes:
                         return
+
+                if vector_mode.isChecked():
+                    _set_export_busy(True)
+                    progress = QProgressDialog(
+                        "Writing scalable PDF…",
+                        None,
+                        0,
+                        0,
+                        dialog,
+                    )
+                    progress.setWindowTitle("Export to PDF")
+                    progress.setWindowModality(Qt.WindowModality.WindowModal)
+                    progress.setMinimumDuration(0)
+                    progress.setCancelButton(None)
+                    progress.show()
+                    QApplication.processEvents()
+                    try:
+                        write_pdf_vector(out_path, map_widget, right_pane, opts)
+                    except Exception as exc:  # noqa: BLE001
+                        _fail_export(str(exc))
+                        return
+                    _finish_export(out_path, opts, dpi_note="")
+                    return
 
                 dpi_note = ""
                 if raster_dpi_clamped(opts.dpi):
