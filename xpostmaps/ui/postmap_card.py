@@ -3,14 +3,29 @@
 from __future__ import annotations
 
 from PySide6.QtCore import Qt
-from PySide6.QtGui import QFont, QColor, QPainter, QPen
-from PySide6.QtWidgets import QGridLayout, QHBoxLayout, QLabel, QVBoxLayout, QWidget
+from PySide6.QtGui import QFont, QFontMetrics, QColor, QPainter, QPen
+from PySide6.QtWidgets import (
+    QGridLayout,
+    QHBoxLayout,
+    QLabel,
+    QSizePolicy,
+    QVBoxLayout,
+    QWidget,
+)
 
 from xpostmaps.core.crs_utils import epsg_label
 from xpostmaps.core.models import LegendConfig, LineStyle, PostmapInfo, SurveyBounds
 from xpostmaps.core.polygon_import_service import non_imported_polygon_entries
-from xpostmaps.ui.theme import BG_PRINT, TEXT_PRINT, TEXT_PRINT_SECONDARY
+from xpostmaps.ui.theme import BG_PRINT, TEXT_PRINT
 from xpostmaps.ui.widgets.scale_bar import ScaleBarWidget
+
+# Right-pane vertical rhythm (postplot sheet layout)
+_SCALE_MARGIN = 8
+_METADATA_TOP = 6
+_LEGEND_TOP = 10
+_LEGEND_TITLE_GAP = 6
+_LEGEND_SECTION_GAP = 8
+_LEGEND_ITEM_GAP = 3
 
 
 class _LineSwatch(QWidget):
@@ -18,7 +33,7 @@ class _LineSwatch(QWidget):
         super().__init__(parent)
         self._color = color
         self._line_style = line_style
-        self.setFixedSize(28, 14)
+        self.setFixedSize(24, 12)
 
     def paintEvent(self, event) -> None:  # noqa: N802
         painter = QPainter(self)
@@ -42,7 +57,7 @@ class _BoxSwatch(QWidget):
     def __init__(self, color: str, parent=None) -> None:
         super().__init__(parent)
         self._color = color
-        self.setFixedSize(18, 14)
+        self.setFixedSize(16, 12)
 
     def paintEvent(self, event) -> None:  # noqa: N802
         painter = QPainter(self)
@@ -63,33 +78,43 @@ class PostmapInfoCard(QWidget):
     def _build_ui(self) -> None:
         layout = QVBoxLayout(self)
         layout.setContentsMargins(4, 2, 4, 4)
-        layout.setSpacing(4)
+        layout.setSpacing(2)
+        layout.setAlignment(Qt.AlignmentFlag.AlignTop)
+        self.setSizePolicy(
+            QSizePolicy.Policy.Preferred,
+            QSizePolicy.Policy.Maximum,
+        )
 
         header = QVBoxLayout()
         header.setSpacing(0)
         header.setContentsMargins(0, 0, 0, 0)
+
+        header_font = QFont("Segoe UI", 10, QFont.Weight.Bold)
+        header_line_h = QFontMetrics(header_font).height()
 
         self._client = QLabel("Client Name: —")
         self._area = QLabel("Area: —")
         self._project = QLabel("Project: —")
         for lbl in (self._client, self._area, self._project):
             lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
-            lbl.setFont(QFont("Segoe UI", 10, QFont.Weight.Bold))
+            lbl.setFont(header_font)
             lbl.setStyleSheet(
-                f"color: {TEXT_PRINT}; margin: 0; padding: 0; line-height: 1.1;"
+                f"color: {TEXT_PRINT}; margin: 0; padding: 0; line-height: 1.0;"
             )
             lbl.setContentsMargins(0, 0, 0, 0)
+            lbl.setFixedHeight(header_line_h)
             header.addWidget(lbl)
 
         layout.addLayout(header)
-        layout.addSpacing(4)
+        layout.addSpacing(_SCALE_MARGIN)
 
         self._scale = ScaleBarWidget(km=40, print_theme=True)
         layout.addWidget(self._scale)
+        layout.addSpacing(_SCALE_MARGIN)
 
         grid = QGridLayout()
-        grid.setHorizontalSpacing(12)
-        grid.setVerticalSpacing(3)
+        grid.setHorizontalSpacing(14)
+        grid.setVerticalSpacing(4)
         self._left_labels: list[QLabel] = []
         self._right_labels: list[QLabel] = []
         for i in range(6):
@@ -104,34 +129,35 @@ class PostmapInfoCard(QWidget):
             self._left_labels.append(left)
             self._right_labels.append(right)
         layout.addLayout(grid)
+        layout.addSpacing(_METADATA_TOP)
+
+        legend_block = QWidget()
+        legend_block.setSizePolicy(
+            QSizePolicy.Policy.Preferred,
+            QSizePolicy.Policy.Maximum,
+        )
+        self._legend_content = QVBoxLayout(legend_block)
+        self._legend_content.setSpacing(_LEGEND_ITEM_GAP)
+        self._legend_content.setContentsMargins(0, 0, 0, 0)
 
         self._legend_title = QLabel("Legend")
-        self._legend_title.setFont(QFont("Segoe UI", 10, QFont.Weight.Bold))
-        self._legend_title.setStyleSheet(f"color: {TEXT_PRINT};")
-        layout.addWidget(self._legend_title)
+        self._legend_title.setFont(QFont("Segoe UI", 11, QFont.Weight.Bold))
+        self._legend_title.setStyleSheet(
+            f"color: {TEXT_PRINT}; margin: 0; padding: 0; line-height: 1.0;"
+        )
+        self._legend_title.setContentsMargins(0, 0, 0, 0)
+        self._legend_content.addWidget(self._legend_title)
 
-        self._legend_area = QVBoxLayout()
-        self._legend_preplot = QVBoxLayout()
-        self._legend_postplot = QVBoxLayout()
-        for legend_layout in (
-            self._legend_area,
-            self._legend_preplot,
-            self._legend_postplot,
-        ):
-            legend_layout.setSpacing(1)
-            legend_layout.setContentsMargins(0, 0, 0, 0)
-        layout.addLayout(self._legend_area)
-        layout.addLayout(self._legend_preplot)
-        layout.addLayout(self._legend_postplot)
+        layout.addSpacing(_LEGEND_TOP)
+        layout.addWidget(legend_block)
+        layout.addStretch(1)
 
-        osm = QLabel("OpenStreetMap")
-        osm.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        osm.setStyleSheet(f"color: {TEXT_PRINT_SECONDARY}; font-size: 9px;")
-        layout.addWidget(osm)
-
-    def _clear_layout(self, lay: QVBoxLayout) -> None:
-        while lay.count():
-            item = lay.takeAt(0)
+    def _clear_legend_entries(self) -> None:
+        """Remove dynamic legend rows but keep the Legend title."""
+        while self._legend_content.count() > 1:
+            item = self._legend_content.takeAt(1)
+            if item is None:
+                break
             widget = item.widget()
             if widget is not None:
                 widget.deleteLater()
@@ -143,34 +169,45 @@ class PostmapInfoCard(QWidget):
                     if sub.widget():
                         sub.widget().deleteLater()
 
+    @staticmethod
+    def _legend_section_header(text: str) -> QLabel:
+        hdr = QLabel(text)
+        hdr.setStyleSheet(
+            f"font-size: 10px; font-weight: 600; color: {TEXT_PRINT};"
+            " margin: 0; padding: 0; line-height: 1.0;"
+        )
+        hdr.setContentsMargins(0, 0, 0, 0)
+        hdr.setFixedHeight(hdr.fontMetrics().height())
+        return hdr
+
     def _legend_row_widget(self, swatch: QWidget, text: str) -> QWidget:
         row = QHBoxLayout()
         row.setContentsMargins(0, 0, 0, 0)
-        row.setSpacing(3)
+        row.setSpacing(2)
         row.addWidget(swatch)
         lbl = QLabel(text)
-        lbl.setWordWrap(True)
+        lbl.setWordWrap(False)
         lbl.setStyleSheet(
-            f"font-size: 9px; color: {TEXT_PRINT}; margin: 0; padding: 0;"
+            f"font-size: 9px; color: {TEXT_PRINT}; margin: 0; padding: 0; line-height: 1.0;"
         )
+        lbl.setContentsMargins(0, 0, 0, 0)
         row.addWidget(lbl, stretch=1)
         w = QWidget()
         w.setLayout(row)
+        w.setFixedHeight(14)
         return w
-
-    def _add_legend_row(self, lay: QVBoxLayout, swatch: QWidget, text: str) -> None:
-        w = self._legend_row_widget(swatch, text)
-        lay.addWidget(w)
 
     def _add_legend_grid(
         self,
         lay: QVBoxLayout,
         rows: list[tuple[QWidget, str]],
     ) -> None:
+        if not rows:
+            return
         grid = QGridLayout()
         grid.setContentsMargins(0, 0, 0, 0)
-        grid.setHorizontalSpacing(6)
-        grid.setVerticalSpacing(1)
+        grid.setHorizontalSpacing(4)
+        grid.setVerticalSpacing(2)
         for index, (swatch, text) in enumerate(rows):
             grid.addWidget(self._legend_row_widget(swatch, text), index // 2, index % 2)
         w = QWidget()
@@ -216,54 +253,56 @@ class PostmapInfoCard(QWidget):
         for i, text in enumerate(right_rows):
             self._right_labels[i].setText(text)
 
-        self._clear_layout(self._legend_area)
-        self._clear_layout(self._legend_preplot)
-        self._clear_layout(self._legend_postplot)
+        self._clear_legend_entries()
 
-        area_hdr = QLabel("Area")
-        area_hdr.setStyleSheet(f"font-size: 10px; font-weight: 600; color: {TEXT_PRINT};")
-        self._legend_area.addWidget(area_hdr)
         visible_areas = [
             entry
             for entry in non_imported_polygon_entries(legend.areas)
             if entry.name and not entry.hidden
         ]
-        self._add_legend_grid(
-            self._legend_area,
-            [(_BoxSwatch(entry.color), entry.name) for entry in visible_areas],
-        )
-
         visible_preplot = [
             entry for entry in legend.preplot_lines if entry.name and not entry.hidden
         ]
-        if visible_preplot:
-            preplot_hdr = QLabel("Preplot")
-            preplot_hdr.setStyleSheet(
-                f"font-size: 10px; font-weight: 600; margin-top: 4px; color: {TEXT_PRINT};"
-            )
-            self._legend_preplot.addWidget(preplot_hdr)
-            for entry in visible_preplot:
-                self._add_legend_row(
-                    self._legend_preplot,
-                    _LineSwatch(entry.color, line_style=entry.line_style),
-                    entry.name,
-                )
-
-        post_hdr = QLabel("PostPlot")
-        post_hdr.setStyleSheet(
-            f"font-size: 10px; font-weight: 600; margin-top: 4px; color: {TEXT_PRINT};"
-        )
-        self._legend_postplot.addWidget(post_hdr)
         visible_postplot = [
             entry for entry in legend.postplot_lines if entry.name and not entry.hidden
         ]
-        self._add_legend_grid(
-            self._legend_postplot,
-            [
-                (_LineSwatch(entry.color, line_style=entry.line_style), entry.name)
-                for entry in visible_postplot
-            ],
-        )
+
+        if visible_areas or visible_preplot or visible_postplot:
+            self._legend_content.addSpacing(_LEGEND_TITLE_GAP)
+
+        first_section = True
+        if visible_areas:
+            self._legend_content.addWidget(self._legend_section_header("Area"))
+            self._add_legend_grid(
+                self._legend_content,
+                [(_BoxSwatch(entry.color), entry.name) for entry in visible_areas],
+            )
+            first_section = False
+
+        if visible_preplot:
+            if not first_section:
+                self._legend_content.addSpacing(_LEGEND_SECTION_GAP)
+            self._legend_content.addWidget(self._legend_section_header("Preplot"))
+            self._add_legend_grid(
+                self._legend_content,
+                [
+                    (_LineSwatch(entry.color, line_style=entry.line_style), entry.name)
+                    for entry in visible_preplot
+                ],
+            )
+            first_section = False
+
+        if visible_postplot:
+            if not first_section:
+                self._legend_content.addSpacing(_LEGEND_SECTION_GAP)
+            self._legend_content.addWidget(self._legend_section_header("PostPlot"))
+            self._add_legend_grid(
+                self._legend_content,
+                [
+                    (_LineSwatch(entry.color, line_style=entry.line_style), entry.name)
+                    for entry in visible_postplot
+                ],
+            )
 
         self.updateGeometry()
         self.adjustSize()

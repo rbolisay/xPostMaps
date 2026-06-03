@@ -24,7 +24,7 @@ class RightPane(PrintPanel):
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
-        self.setFixedWidth(300)
+        self.setFixedWidth(360)
         self._logo_path = ""
         self.setStyleSheet(f"background: {BG_PRINT}; color: {TEXT_PRINT};")
         self._build_ui()
@@ -53,8 +53,9 @@ class RightPane(PrintPanel):
         card_host.setStyleSheet(f"background: {BG_PRINT};")
         card_layout = QVBoxLayout(card_host)
         card_layout.setContentsMargins(0, 0, 0, 0)
+        card_layout.setAlignment(Qt.AlignmentFlag.AlignTop)
         self._card = PostmapInfoCard()
-        card_layout.addWidget(self._card)
+        card_layout.addWidget(self._card, 0, Qt.AlignmentFlag.AlignTop)
         scroll.setWidget(card_host)
         layout.addWidget(scroll, stretch=1)
 
