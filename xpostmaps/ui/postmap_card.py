@@ -13,8 +13,8 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from xpostmaps.core.crs_utils import epsg_label
 from xpostmaps.core.models import LegendConfig, LineStyle, PostmapInfo, SurveyBounds
+from xpostmaps.core.postmap_info_layout import column_display_lines, ensure_layout
 from xpostmaps.core.polygon_import_service import non_imported_polygon_entries
 from xpostmaps.ui.theme import BG_PRINT, TEXT_PRINT
 from xpostmaps.ui.widgets.scale_bar import ScaleBarWidget
@@ -112,23 +112,11 @@ class PostmapInfoCard(QWidget):
         layout.addWidget(self._scale)
         layout.addSpacing(_SCALE_MARGIN)
 
-        grid = QGridLayout()
-        grid.setHorizontalSpacing(14)
-        grid.setVerticalSpacing(4)
-        self._left_labels: list[QLabel] = []
-        self._right_labels: list[QLabel] = []
-        for i in range(6):
-            left = QLabel("")
-            left.setWordWrap(True)
-            left.setStyleSheet(f"font-size: 10px; color: {TEXT_PRINT};")
-            right = QLabel("")
-            right.setWordWrap(True)
-            right.setStyleSheet(f"font-size: 10px; color: {TEXT_PRINT};")
-            grid.addWidget(left, i, 0)
-            grid.addWidget(right, i, 1)
-            self._left_labels.append(left)
-            self._right_labels.append(right)
-        layout.addLayout(grid)
+        self._metadata_grid = QGridLayout()
+        self._metadata_grid.setHorizontalSpacing(14)
+        self._metadata_grid.setVerticalSpacing(4)
+        self._metadata_labels: list[QLabel] = []
+        layout.addLayout(self._metadata_grid)
         layout.addSpacing(_METADATA_TOP)
 
         legend_block = QWidget()
@@ -151,6 +139,26 @@ class PostmapInfoCard(QWidget):
         layout.addSpacing(_LEGEND_TOP)
         layout.addWidget(legend_block)
         layout.addStretch(1)
+
+    def _clear_metadata_labels(self) -> None:
+        for lbl in self._metadata_labels:
+            self._metadata_grid.removeWidget(lbl)
+            lbl.deleteLater()
+        self._metadata_labels.clear()
+
+    def _set_metadata_columns(self, left_lines: list[str], right_lines: list[str]) -> None:
+        self._clear_metadata_labels()
+        row_count = max(len(left_lines), len(right_lines), 1)
+        label_style = f"font-size: 10px; color: {TEXT_PRINT};"
+        for row in range(row_count):
+            left_text = left_lines[row] if row < len(left_lines) else ""
+            right_text = right_lines[row] if row < len(right_lines) else ""
+            for col, text in ((0, left_text), (1, right_text)):
+                lbl = QLabel(text)
+                lbl.setWordWrap(True)
+                lbl.setStyleSheet(label_style)
+                self._metadata_grid.addWidget(lbl, row, col)
+                self._metadata_labels.append(lbl)
 
     def _clear_legend_entries(self) -> None:
         """Remove dynamic legend rows but keep the Legend title."""
@@ -230,28 +238,10 @@ class PostmapInfoCard(QWidget):
         else:
             self._scale.set_km(40)
 
-        left_rows = [
-            f"Job Number: {info.job_number or '—'}",
-            f"Client Project Reference: {info.client_ref or '—'}",
-            f"File Name: {info.file_name or '—'}",
-            f"User Name: {info.user_name or '—'}",
-            f"Date: {info.date or '—'}",
-        ]
-        authority = epsg_label(info.epsg_code) if info.epsg_code else "—"
-        right_rows = [
-            "Coordinate Reference System",
-            f"Name: {info.crs_name or '—'}",
-            f"Projection: {info.projection or info.crs_name or '—'}",
-            f"Authority: {authority}",
-            f"Geographic Datum: {info.geographic_datum or '—'}",
-            f"Spheroid: {info.spheroid or '—'}",
-        ]
-        for i, text in enumerate(left_rows):
-            self._left_labels[i].setText(text)
-        for i in range(len(left_rows), len(self._left_labels)):
-            self._left_labels[i].setText("")
-        for i, text in enumerate(right_rows):
-            self._right_labels[i].setText(text)
+        ensure_layout(info)
+        left_rows = column_display_lines(info, 0)
+        right_rows = column_display_lines(info, 1)
+        self._set_metadata_columns(left_rows, right_rows)
 
         self._clear_legend_entries()
 

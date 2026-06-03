@@ -48,6 +48,11 @@ def app_stylesheet() -> str:
         color: {TEXT_PRIMARY};
         selection-background-color: {ACCENT};
     }}
+    QLineEdit#projectInfoLineEdit {{
+        font-size: 12px;
+        padding: 7px 11px;
+        min-height: 36px;
+    }}
     QComboBox:focus {{
         border: 1px solid {ACCENT};
     }}
