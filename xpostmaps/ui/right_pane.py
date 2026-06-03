@@ -17,6 +17,8 @@ from xpostmaps.core.crs_utils import WGS84_EPSG, normalize_epsg, transform_coord
 from xpostmaps.core.models import GeoBounds, MapData, PostmapInfo, ProjectSettings, SurveyBounds
 from xpostmaps.core.polygon_import_service import non_imported_polygon_entries
 from xpostmaps.ui.minimap_widget import MinimapWidget
+
+_MINIMAP_HEIGHT = MinimapWidget._HEIGHT
 from xpostmaps.ui.postmap_card import PostmapInfoCard
 from xpostmaps.ui.print_panel import PrintPanel
 from xpostmaps.ui.theme import BG_PRINT, TEXT_PRINT
@@ -180,6 +182,10 @@ class RightPane(PrintPanel):
         self._minimap.set_export_mode(True)
         # Widen the panel 20% for the PDF so content reflows wider (no text squeeze).
         self.setFixedWidth(int(round(self._BASE_WIDTH * self._EXPORT_WIDTH_SCALE)))
+        # Match GUI minimap proportions: height scales with export width (432×215 ratio).
+        self._minimap.setFixedHeight(
+            int(round(_MINIMAP_HEIGHT * self._EXPORT_WIDTH_SCALE))
+        )
         self._card.adjustSize()
         self._card_host.adjustSize()
         card_need = max(self._card.sizeHint().height(), self._card.height()) + 8
@@ -205,4 +211,5 @@ class RightPane(PrintPanel):
         self._card_scroll.setMinimumHeight(0)
         self._card_scroll.setMaximumHeight(_MAX_WIDGET_SIZE)
         self._minimap.set_export_mode(False)
+        self._minimap.setFixedHeight(_MINIMAP_HEIGHT)
         self.setFixedWidth(self._BASE_WIDTH)
