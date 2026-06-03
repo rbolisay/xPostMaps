@@ -44,6 +44,7 @@ from xpostmaps.parsers.directory_parser import NAV_EXTENSIONS, resolve_nav_files
 from xpostmaps.parsers.preplot_parser import resolve_preplot_files
 from xpostmaps.core.polygon_import_service import imported_polygon_entries
 from xpostmaps.ui.dialogs.nav_picker_dialog import NavFilePickerDialog
+from xpostmaps.ui.dialogs.pdf_export_dialog import PdfExportDialog
 from xpostmaps.ui.dialogs.postmap_info_dialog import PostmapInfoDialog
 from xpostmaps.ui.dialogs.preplot_navplan_dialog import PreplotNavplanDialog
 from xpostmaps.ui.dialogs.project_browser_dialog import ProjectBrowserDialog
@@ -118,6 +119,7 @@ class MainWindow(QMainWindow):
         self._left.select_logo.connect(self._select_logo)
         self._left.open_postmap_info.connect(self._open_postmap_info)
         self._left.open_legend.connect(self._open_legend)
+        self._left.open_pdf_export.connect(self._open_pdf_export)
         self._right.minimap_view_changed.connect(self._on_minimap_view_changed)
 
         self._mediator.map_data_updated.connect(self._on_map_data_updated)
@@ -272,6 +274,25 @@ class MainWindow(QMainWindow):
         )
         if path:
             self._on_logo_changed(path)
+
+    def _open_pdf_export(self) -> None:
+        if not self._map_data:
+            QMessageBox.information(
+                self,
+                "Export to PDF",
+                "Load a project with map data before exporting.",
+            )
+            return
+        self._right.update_from_project(self._settings, self._map_data)
+        PdfExportDialog.open(
+            self,
+            map_widget=self._map,
+            right_pane=self._right,
+            settings=self._settings,
+            map_data=self._map_data,
+            project_name=self._settings.name,
+            default_output_dir=self._db_directory,
+        )
 
     def _open_legend(self) -> None:
         perimeters = self._map_data.survey_perimeters if self._map_data else []

@@ -9,6 +9,9 @@ from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QPixmap
 from PySide6.QtWidgets import QLabel, QScrollArea, QVBoxLayout, QWidget
 
+# Qt maximum widget dimension (same role as QWIDGETSIZE_MAX).
+_MAX_WIDGET_SIZE = 16777215
+
 from xpostmaps.core.area_utils import resolve_area_polygon
 from xpostmaps.core.crs_utils import WGS84_EPSG, normalize_epsg, transform_coordinates
 from xpostmaps.core.models import GeoBounds, MapData, PostmapInfo, ProjectSettings, SurveyBounds
@@ -22,12 +25,20 @@ from xpostmaps.ui.theme import BG_PRINT, TEXT_PRINT
 class RightPane(PrintPanel):
     minimap_view_changed = Signal(dict)
 
+    # Panel is 20% wider than the original 360 px and its text scales to match,
+    # applied in both the live GUI and the PDF export.
+    _BASE_WIDTH = 432
+    _TEXT_SCALE = 1.2
+    # The PDF pane is an extra 20% wider than the on-screen panel.
+    _EXPORT_WIDTH_SCALE = 1.2
+
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
-        self.setFixedWidth(360)
+        self.setFixedWidth(self._BASE_WIDTH)
         self._logo_path = ""
         self.setStyleSheet(f"background: {BG_PRINT}; color: {TEXT_PRINT};")
         self._build_ui()
+        self._card.set_text_scale(self._TEXT_SCALE)
 
     def _build_ui(self) -> None:
         layout = self.content_layout
@@ -43,21 +54,21 @@ class RightPane(PrintPanel):
         self._minimap.view_changed.connect(self.minimap_view_changed.emit)
         layout.addWidget(self._minimap)
 
-        scroll = QScrollArea()
-        scroll.setWidgetResizable(True)
-        scroll.setFrameShape(QScrollArea.Shape.NoFrame)
-        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        scroll.setStyleSheet(f"background: {BG_PRINT}; border: none;")
+        self._card_scroll = QScrollArea()
+        self._card_scroll.setWidgetResizable(True)
+        self._card_scroll.setFrameShape(QScrollArea.Shape.NoFrame)
+        self._card_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self._card_scroll.setStyleSheet(f"background: {BG_PRINT}; border: none;")
 
-        card_host = QWidget()
-        card_host.setStyleSheet(f"background: {BG_PRINT};")
-        card_layout = QVBoxLayout(card_host)
+        self._card_host = QWidget()
+        self._card_host.setStyleSheet(f"background: {BG_PRINT};")
+        card_layout = QVBoxLayout(self._card_host)
         card_layout.setContentsMargins(0, 0, 0, 0)
         card_layout.setAlignment(Qt.AlignmentFlag.AlignTop)
         self._card = PostmapInfoCard()
         card_layout.addWidget(self._card, 0, Qt.AlignmentFlag.AlignTop)
-        scroll.setWidget(card_host)
-        layout.addWidget(scroll, stretch=1)
+        self._card_scroll.setWidget(self._card_host)
+        layout.addWidget(self._card_scroll, stretch=1)
 
     def set_logo(self, path: str) -> None:
         self._logo_path = path
@@ -163,3 +174,35 @@ class RightPane(PrintPanel):
         self._card.updateGeometry()
         self._card.repaint()
         self._minimap.set_location(geo, minimap_polygons, settings.minimap_view)
+
+    def prepare_export_snapshot(self, map_height: int | None = None) -> None:
+        """Prepare right pane for PDF capture at true aspect (same height as map)."""
+        self._minimap.set_export_mode(True)
+        # Widen the panel 20% for the PDF so content reflows wider (no text squeeze).
+        self.setFixedWidth(int(round(self._BASE_WIDTH * self._EXPORT_WIDTH_SCALE)))
+        self._card.adjustSize()
+        self._card_host.adjustSize()
+        card_need = max(self._card.sizeHint().height(), self._card.height()) + 8
+        self._card_host.setMinimumHeight(card_need)
+
+        if map_height is not None and map_height > 0:
+            self.setFixedHeight(map_height)
+            chrome_h = self._logo_label.height() + self._minimap.height() + 12
+            scroll_h = max(map_height - chrome_h, 100)
+            self._card_scroll.setMinimumHeight(min(card_need, scroll_h))
+            self._card_scroll.setMaximumHeight(scroll_h)
+        else:
+            self._card_scroll.setMinimumHeight(min(card_need, 2400))
+            self._card_scroll.setMaximumHeight(_MAX_WIDGET_SIZE)
+
+        self.adjustSize()
+        self.repaint()
+
+    def reset_export_snapshot(self) -> None:
+        self.setMinimumHeight(0)
+        self.setMaximumHeight(_MAX_WIDGET_SIZE)
+        self._card_host.setMinimumHeight(0)
+        self._card_scroll.setMinimumHeight(0)
+        self._card_scroll.setMaximumHeight(_MAX_WIDGET_SIZE)
+        self._minimap.set_export_mode(False)
+        self.setFixedWidth(self._BASE_WIDTH)

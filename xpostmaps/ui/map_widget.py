@@ -401,6 +401,12 @@ class PostplotMapWidget(QWidget):
         self._legend = legend
         self._cached_signature = None
 
+    def prepare_for_export(self) -> None:
+        """Refresh map overlays before PDF/raster capture."""
+        self._reposition_overlays()
+        self._frame.update()
+        self.repaint()
+
     def clear(self) -> None:
         view_box = self._plot.getViewBox()
         scene = self._plot.scene()

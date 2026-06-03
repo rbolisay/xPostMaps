@@ -27,6 +27,7 @@ class LeftPanel(GlassPanel):
     select_logo = Signal()
     open_postmap_info = Signal()
     open_legend = Signal()
+    open_pdf_export = Signal()
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent, radius=16)
@@ -114,13 +115,16 @@ class LeftPanel(GlassPanel):
 
         self._legend_btn = QPushButton("Legend")
         self._legend_btn.setObjectName("dirBtn")
+        self._pdf_btn = QPushButton("Export to PDF")
+        self._pdf_btn.setObjectName("dirBtn")
         self._info_btn = QPushButton("Project Information")
         self._info_btn.setObjectName("dirBtn")
 
-        for btn in (self._info_btn, self._legend_btn):
+        for btn in (self._info_btn, self._legend_btn, self._pdf_btn):
             layout.addWidget(btn)
 
         self._legend_btn.clicked.connect(self.open_legend.emit)
+        self._pdf_btn.clicked.connect(self.open_pdf_export.emit)
         self._info_btn.clicked.connect(self.open_postmap_info.emit)
 
         self._progress = QProgressBar()
@@ -159,6 +163,7 @@ class LeftPanel(GlassPanel):
             self._import_polygons_btn,
             self._logo_btn,
             self._legend_btn,
+            self._pdf_btn,
             self._info_btn,
         ):
             widget.setEnabled(enabled)

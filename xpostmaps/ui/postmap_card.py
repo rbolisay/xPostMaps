@@ -29,15 +29,23 @@ _LEGEND_ITEM_GAP = 3
 
 
 class _LineSwatch(QWidget):
-    def __init__(self, color: str, line_style: LineStyle = LineStyle.SOLID, parent=None) -> None:
+    def __init__(
+        self,
+        color: str,
+        line_style: LineStyle = LineStyle.SOLID,
+        scale: float = 1.0,
+        parent=None,
+    ) -> None:
         super().__init__(parent)
         self._color = color
         self._line_style = line_style
-        self.setFixedSize(24, 12)
+        self._scale = scale
+        self.setFixedSize(int(round(24 * scale)), int(round(12 * scale)))
 
     def paintEvent(self, event) -> None:  # noqa: N802
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        painter.scale(self._scale, self._scale)
         color = QColor(self._color)
 
         if self._line_style == LineStyle.DOTTED:
@@ -54,13 +62,15 @@ class _LineSwatch(QWidget):
 
 
 class _BoxSwatch(QWidget):
-    def __init__(self, color: str, parent=None) -> None:
+    def __init__(self, color: str, scale: float = 1.0, parent=None) -> None:
         super().__init__(parent)
         self._color = color
-        self.setFixedSize(16, 12)
+        self._scale = scale
+        self.setFixedSize(int(round(16 * scale)), int(round(12 * scale)))
 
     def paintEvent(self, event) -> None:  # noqa: N802
         painter = QPainter(self)
+        painter.scale(self._scale, self._scale)
         painter.setBrush(Qt.BrushStyle.NoBrush)
         pen = QPen(QColor(self._color), 2)
         painter.setPen(pen)
@@ -73,7 +83,37 @@ class PostmapInfoCard(QWidget):
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
         self.setStyleSheet(f"background: {BG_PRINT}; color: {TEXT_PRINT};")
+        self._text_scale = 1.0
+        self._last_args: tuple | None = None
         self._build_ui()
+
+    def _px(self, value: float) -> int:
+        return max(int(round(value * self._text_scale)), 1)
+
+    def _header_font(self) -> QFont:
+        font = QFont("Segoe UI")
+        # Client/Area/Project header is the largest text on the card.
+        font.setPointSizeF(13 * self._text_scale)
+        font.setWeight(QFont.Weight.Bold)
+        return font
+
+    def set_text_scale(self, scale: float) -> None:
+        """Scale all card text/swatches (applied to both the GUI and PDF export)."""
+        scale = max(scale, 0.5)
+        if abs(scale - self._text_scale) < 0.001:
+            return
+        self._text_scale = scale
+        header_font = self._header_font()
+        header_line_h = QFontMetrics(header_font).height()
+        for lbl in (self._client, self._area, self._project):
+            lbl.setFont(header_font)
+            lbl.setFixedHeight(header_line_h)
+        title_font = QFont("Segoe UI")
+        title_font.setPointSizeF(11 * self._text_scale)
+        title_font.setWeight(QFont.Weight.Bold)
+        self._legend_title.setFont(title_font)
+        if self._last_args is not None:
+            self.update_content(*self._last_args)
 
     def _build_ui(self) -> None:
         layout = QVBoxLayout(self)
@@ -89,12 +129,12 @@ class PostmapInfoCard(QWidget):
         header.setSpacing(0)
         header.setContentsMargins(0, 0, 0, 0)
 
-        header_font = QFont("Segoe UI", 10, QFont.Weight.Bold)
+        header_font = self._header_font()
         header_line_h = QFontMetrics(header_font).height()
 
         self._client = QLabel("Client Name: —")
         self._area = QLabel("Area: —")
-        self._project = QLabel("Project: —")
+        self._project = QLabel("Project Name: —")
         for lbl in (self._client, self._area, self._project):
             lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
             lbl.setFont(header_font)
@@ -129,7 +169,10 @@ class PostmapInfoCard(QWidget):
         self._legend_content.setContentsMargins(0, 0, 0, 0)
 
         self._legend_title = QLabel("Legend")
-        self._legend_title.setFont(QFont("Segoe UI", 11, QFont.Weight.Bold))
+        _title_font = QFont("Segoe UI")
+        _title_font.setPointSizeF(11 * self._text_scale)
+        _title_font.setWeight(QFont.Weight.Bold)
+        self._legend_title.setFont(_title_font)
         self._legend_title.setStyleSheet(
             f"color: {TEXT_PRINT}; margin: 0; padding: 0; line-height: 1.0;"
         )
@@ -149,7 +192,7 @@ class PostmapInfoCard(QWidget):
     def _set_metadata_columns(self, left_lines: list[str], right_lines: list[str]) -> None:
         self._clear_metadata_labels()
         row_count = max(len(left_lines), len(right_lines), 1)
-        label_style = f"font-size: 10px; color: {TEXT_PRINT};"
+        label_style = f"font-size: {self._px(10)}px; color: {TEXT_PRINT};"
         for row in range(row_count):
             left_text = left_lines[row] if row < len(left_lines) else ""
             right_text = right_lines[row] if row < len(right_lines) else ""
@@ -177,11 +220,10 @@ class PostmapInfoCard(QWidget):
                     if sub.widget():
                         sub.widget().deleteLater()
 
-    @staticmethod
-    def _legend_section_header(text: str) -> QLabel:
+    def _legend_section_header(self, text: str) -> QLabel:
         hdr = QLabel(text)
         hdr.setStyleSheet(
-            f"font-size: 10px; font-weight: 600; color: {TEXT_PRINT};"
+            f"font-size: {self._px(10)}px; font-weight: 600; color: {TEXT_PRINT};"
             " margin: 0; padding: 0; line-height: 1.0;"
         )
         hdr.setContentsMargins(0, 0, 0, 0)
@@ -191,18 +233,19 @@ class PostmapInfoCard(QWidget):
     def _legend_row_widget(self, swatch: QWidget, text: str) -> QWidget:
         row = QHBoxLayout()
         row.setContentsMargins(0, 0, 0, 0)
-        row.setSpacing(2)
+        row.setSpacing(self._px(2))
         row.addWidget(swatch)
         lbl = QLabel(text)
         lbl.setWordWrap(False)
         lbl.setStyleSheet(
-            f"font-size: 9px; color: {TEXT_PRINT}; margin: 0; padding: 0; line-height: 1.0;"
+            f"font-size: {self._px(9)}px; color: {TEXT_PRINT};"
+            " margin: 0; padding: 0; line-height: 1.0;"
         )
         lbl.setContentsMargins(0, 0, 0, 0)
         row.addWidget(lbl, stretch=1)
         w = QWidget()
         w.setLayout(row)
-        w.setFixedHeight(14)
+        w.setFixedHeight(self._px(14))
         return w
 
     def _add_legend_grid(
@@ -228,9 +271,10 @@ class PostmapInfoCard(QWidget):
         bounds: SurveyBounds,
         legend: LegendConfig,
     ) -> None:
+        self._last_args = (info, bounds, legend)
         self._client.setText(f"Client Name: {info.client or '—'}")
         self._area.setText(f"Area: {info.area or '—'}")
-        self._project.setText(f"Project: {info.project or '—'}")
+        self._project.setText(f"Project Name: {info.project or '—'}")
 
         if bounds.is_valid:
             width_km = (bounds.xmax - bounds.xmin) / 1000
@@ -265,7 +309,10 @@ class PostmapInfoCard(QWidget):
             self._legend_content.addWidget(self._legend_section_header("Area"))
             self._add_legend_grid(
                 self._legend_content,
-                [(_BoxSwatch(entry.color), entry.name) for entry in visible_areas],
+                [
+                    (_BoxSwatch(entry.color, scale=self._text_scale), entry.name)
+                    for entry in visible_areas
+                ],
             )
             first_section = False
 
@@ -276,7 +323,14 @@ class PostmapInfoCard(QWidget):
             self._add_legend_grid(
                 self._legend_content,
                 [
-                    (_LineSwatch(entry.color, line_style=entry.line_style), entry.name)
+                    (
+                        _LineSwatch(
+                            entry.color,
+                            line_style=entry.line_style,
+                            scale=self._text_scale,
+                        ),
+                        entry.name,
+                    )
                     for entry in visible_preplot
                 ],
             )
@@ -289,7 +343,14 @@ class PostmapInfoCard(QWidget):
             self._add_legend_grid(
                 self._legend_content,
                 [
-                    (_LineSwatch(entry.color, line_style=entry.line_style), entry.name)
+                    (
+                        _LineSwatch(
+                            entry.color,
+                            line_style=entry.line_style,
+                            scale=self._text_scale,
+                        ),
+                        entry.name,
+                    )
                     for entry in visible_postplot
                 ],
             )

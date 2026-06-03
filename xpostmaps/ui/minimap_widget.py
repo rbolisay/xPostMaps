@@ -92,7 +92,12 @@ class MinimapWidget(QWidget):
 
         self._coast_segments: list[tuple[list[float], list[list[float]]]] = []
         self._coast_items: list[pg.PlotDataItem] = []
-        self._coast_pen = pg.mkPen(MINIMAP_COAST, width=0.9)
+        self._export_mode = False
+        # Marker / area polygons kept so pens can be rebuilt for export without
+        # changing the current minimap view.
+        self._marker_xy: tuple[list[float], list[float]] | None = None
+        self._area_polys: list[tuple[list[float], list[float]]] = []
+        self._coast_pen = pg.mkPen(MINIMAP_COAST, width=self._coast_width())
         self._coast_refresh_timer = QTimer(self)
         self._coast_refresh_timer.setSingleShot(True)
         self._coast_refresh_timer.setInterval(16)
@@ -103,6 +108,52 @@ class MinimapWidget(QWidget):
         self._view_box.sigRangeChangedManually.connect(self._schedule_coast_refresh)
         self._view_box.sigRangeChangedManually.connect(self._emit_view_changed)
         self._load_coastline_data()
+
+    def _coast_width(self) -> float:
+        return 2.4 if self._export_mode else 0.9
+
+    def _marker_width(self) -> float:
+        return 4.0 if self._export_mode else 2.0
+
+    def _area_width(self) -> float:
+        return 3.2 if self._export_mode else 1.6
+
+    def set_export_mode(self, enabled: bool) -> None:
+        """Thicken pens and enable antialiasing so the minimap stays crisp in the PDF."""
+        if enabled == self._export_mode:
+            return
+        self._export_mode = enabled
+        self._coast_pen = pg.mkPen(MINIMAP_COAST, width=self._coast_width())
+        self._refresh_visible_coastlines()
+        self._rebuild_marker_items()
+
+    def _rebuild_marker_items(self) -> None:
+        """Recreate marker + area items with the current pen widths / antialiasing."""
+        if self._marker is not None:
+            self._plot.removeItem(self._marker)
+            self._marker = None
+        for item in self._area_items:
+            self._plot.removeItem(item)
+        self._area_items.clear()
+
+        if self._marker_xy is not None:
+            xs, ys = self._marker_xy
+            self._marker = pg.PlotDataItem(
+                xs, ys,
+                pen=pg.mkPen("#cc0000", width=self._marker_width()),
+                connect="all",
+                antialias=self._export_mode,
+            )
+            self._plot.addItem(self._marker)
+        for lons, lats in self._area_polys:
+            area_item = pg.PlotDataItem(
+                lons, lats,
+                pen=pg.mkPen("#00a651", width=self._area_width()),
+                connect="all",
+                antialias=self._export_mode,
+            )
+            self._plot.addItem(area_item)
+            self._area_items.append(area_item)
 
     @staticmethod
     def _valid_saved_view(view: dict | None) -> tuple[tuple[float, float], tuple[float, float]] | None:
@@ -203,6 +254,7 @@ class MinimapWidget(QWidget):
                 lats,
                 pen=self._coast_pen,
                 connect="all",
+                antialias=self._export_mode,
             )
             self._plot.addItem(item)
             self._coast_items.append(item)
@@ -219,6 +271,8 @@ class MinimapWidget(QWidget):
         for item in self._area_items:
             self._plot.removeItem(item)
         self._area_items.clear()
+        self._marker_xy = None
+        self._area_polys = []
         if not geo.is_valid:
             self._view_box.set_extent_range(None, None)
             return
@@ -239,20 +293,24 @@ class MinimapWidget(QWidget):
             geo.lat_max + pad_lat,
             geo.lat_min - pad_lat,
         ]
+        self._marker_xy = (xs, ys)
         self._marker = pg.PlotDataItem(
             xs, ys,
-            pen=pg.mkPen("#cc0000", width=2),
+            pen=pg.mkPen("#cc0000", width=self._marker_width()),
             connect="all",
+            antialias=self._export_mode,
         )
         self._plot.addItem(self._marker)
         for lons, lats in area_polygons or []:
             if len(lons) < 2 or len(lons) != len(lats):
                 continue
+            self._area_polys.append((lons, lats))
             area_item = pg.PlotDataItem(
                 lons,
                 lats,
-                pen=pg.mkPen("#00a651", width=1.6),
+                pen=pg.mkPen("#00a651", width=self._area_width()),
                 connect="all",
+                antialias=self._export_mode,
             )
             self._plot.addItem(area_item)
             self._area_items.append(area_item)

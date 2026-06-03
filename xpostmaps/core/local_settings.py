@@ -33,3 +33,16 @@ def save_db_directory(directory: Path) -> None:
     data = _read()
     data["db_directory"] = str(directory)
     _write(data)
+
+
+def load_pdf_output_directory(default: Path) -> Path:
+    raw = str(_read().get("pdf_output_directory", "")).strip()
+    if raw and Path(raw).is_dir():
+        return Path(raw)
+    return default
+
+
+def save_pdf_output_directory(directory: Path) -> None:
+    data = _read()
+    data["pdf_output_directory"] = str(directory)
+    _write(data)

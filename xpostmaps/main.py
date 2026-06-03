@@ -18,7 +18,7 @@ def main() -> int:
     app.setStyleSheet(app_stylesheet())
 
     window = MainWindow()
-    window.show()
+    window.showMaximized()
     return app.exec()
 
 
