@@ -1,4 +1,4 @@
-"""Data models for xPostMaps."""
+"""Data models for TierMaps."""
 
 from __future__ import annotations
 

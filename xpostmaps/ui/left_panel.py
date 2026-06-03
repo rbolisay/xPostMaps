@@ -14,6 +14,7 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
 )
 
+from xpostmaps.core.branding import APP_NAME, APP_SUBTITLE
 from xpostmaps.ui.glass_widget import GlassPanel
 
 
@@ -37,11 +38,11 @@ class LeftPanel(GlassPanel):
     def _build_ui(self) -> None:
         layout = self.content_layout
 
-        header = QLabel("xPostMaps")
+        header = QLabel(APP_NAME)
         header.setStyleSheet("font-size: 20px; font-weight: 700; letter-spacing: 0.5px;")
         layout.addWidget(header)
 
-        sub = QLabel("Postplot Navigation Viewer")
+        sub = QLabel(APP_SUBTITLE)
         sub.setStyleSheet("color: #8b949e; font-size: 12px; margin-bottom: 4px;")
         layout.addWidget(sub)
 

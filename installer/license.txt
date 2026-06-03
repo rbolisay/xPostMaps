@@ -1,0 +1,9 @@
+TierMaps - Navigation PostMaps Viewer
+Copyright (c) R. Bolisay
+
+Permission is hereby granted to use this software for internal business purposes.
+Redistribution outside your organization requires prior written permission from the copyright holder.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED,
+INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A
+PARTICULAR PURPOSE AND NONINFRINGEMENT.

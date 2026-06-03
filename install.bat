@@ -2,7 +2,7 @@
 setlocal
 cd /d "%~dp0"
 
-echo xPostMaps - installing dependencies into project folder...
+echo TierMaps - installing dependencies into project folder...
 echo.
 
 where python >nul 2>&1

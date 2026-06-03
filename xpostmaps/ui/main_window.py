@@ -10,11 +10,15 @@ from PySide6.QtWidgets import (
     QFileDialog,
     QHBoxLayout,
     QInputDialog,
+    QLabel,
     QMainWindow,
     QMessageBox,
     QStatusBar,
+    QVBoxLayout,
     QWidget,
 )
+
+from xpostmaps.core.branding import APP_WINDOW_TITLE, DEVELOPER_CREDIT
 
 from xpostmaps.core.autosave import AutosaveController
 from xpostmaps.core.database import Database
@@ -80,7 +84,7 @@ class MainWindow(QMainWindow):
             delay_ms=500,
         )
 
-        self.setWindowTitle("xPostMaps — Postplot Viewer")
+        self.setWindowTitle(APP_WINDOW_TITLE)
         self.resize(1600, 900)
         self.setStyleSheet(app_stylesheet())
 
@@ -88,9 +92,13 @@ class MainWindow(QMainWindow):
         central.setStyleSheet(f"background: {BG_DARK};")
         self.setCentralWidget(central)
 
-        root = QHBoxLayout(central)
-        root.setContentsMargins(12, 12, 0, 12)
-        root.setSpacing(12)
+        root = QVBoxLayout(central)
+        root.setContentsMargins(12, 12, 12, 6)
+        root.setSpacing(4)
+
+        content = QHBoxLayout()
+        content.setContentsMargins(0, 0, 0, 0)
+        content.setSpacing(12)
 
         self._left = LeftPanel()
         self._left.setFixedWidth(320)
@@ -106,8 +114,13 @@ class MainWindow(QMainWindow):
 
         sheet_host = QWidget()
         sheet_host.setLayout(sheet)
-        root.addWidget(self._left)
-        root.addWidget(sheet_host, stretch=1)
+        content.addWidget(self._left)
+        content.addWidget(sheet_host, stretch=1)
+        root.addLayout(content, stretch=1)
+
+        credit = QLabel(DEVELOPER_CREDIT)
+        credit.setStyleSheet("color: #6e7681; font-size: 10px; padding-left: 2px;")
+        root.addWidget(credit, alignment=Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignBottom)
 
         status = QStatusBar()
         self.setStatusBar(status)

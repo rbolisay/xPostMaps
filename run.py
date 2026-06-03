@@ -1,4 +1,4 @@
-"""Launch xPostMaps."""
+"""Launch TierMaps."""
 
 from xpostmaps.main import main
 
