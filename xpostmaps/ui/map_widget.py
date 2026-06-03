@@ -11,6 +11,10 @@ from PySide6.QtGui import QColor, QFont, QPainter, QPen, QPolygonF, QRegion
 from PySide6.QtWidgets import QGraphicsView, QVBoxLayout, QWidget
 
 from xpostmaps.core.area_utils import resolve_area_polygon
+from xpostmaps.core.navplan_catalog_utils import (
+    resolve_navplan_file_order,
+    segments_for_navplan_source,
+)
 from xpostmaps.core.polygon_import_service import is_imported_polygon
 from xpostmaps.core.preplot_catalog_utils import (
     resolve_preplot_file_order,
@@ -23,6 +27,7 @@ from xpostmaps.core.models import (
     LineStyle,
     MapData,
     NavDataType,
+    NavplanLegendEntry,
     PostplotLegendEntry,
     PreplotLegendEntry,
     RecordType,
@@ -716,6 +721,39 @@ class PostplotMapWidget(QWidget):
                 dot_radius=entry.dot_radius,
             )
 
+    def _add_legend_navplan_segments(self, map_data: MapData | None) -> None:
+        if map_data is None or not map_data.navplan_segments:
+            return
+        file_paths = resolve_navplan_file_order(map_data)
+        for entry in self._legend.navplan_lines:
+            if entry.hidden:
+                continue
+            # Navplans are only drawn when explicitly selected for this legend row
+            # (individually or by group via "Select Navplans"). No selection = nothing.
+            source_indices = entry.navplan_source_indices
+            segments: list[LineSegment] = []
+            for source_index in source_indices:
+                segments.extend(
+                    segments_for_navplan_source(
+                        map_data.navplan_segments,
+                        file_paths,
+                        source_index,
+                    )
+                )
+            if not segments:
+                continue
+            style = entry.line_style
+            if style not in (LineStyle.SOLID, LineStyle.DASH, LineStyle.DOTTED):
+                style = LineStyle.SOLID
+            self._add_batched_segments_styled(
+                segments,
+                color=entry.color,
+                line_style=style,
+                opacity=entry.opacity,
+                width=entry.line_width,
+                dot_radius=entry.dot_radius,
+            )
+
     def _add_area_polygons(self, map_data: MapData | None) -> None:
         legend_areas = self._legend.areas
         for entry in legend_areas:
@@ -878,6 +916,20 @@ class PostplotMapWidget(QWidget):
                 all_x.extend(segment.xs)
                 all_y.extend(segment.ys)
 
+        navplan_paths = resolve_navplan_file_order(map_data)
+        for entry in self._legend.navplan_lines:
+            if entry.hidden:
+                continue
+            source_indices = entry.navplan_source_indices
+            for source_index in source_indices:
+                for segment in segments_for_navplan_source(
+                    map_data.navplan_segments,
+                    navplan_paths,
+                    source_index,
+                ):
+                    all_x.extend(segment.xs)
+                    all_y.extend(segment.ys)
+
         for entry in self._legend.areas:
             if entry.hidden or is_imported_polygon(entry):
                 continue
@@ -969,6 +1021,7 @@ class PostplotMapWidget(QWidget):
         return (
             len(map_data.segments),
             len(map_data.preplot_segments),
+            len(map_data.navplan_segments),
             len(map_data.overlay_segments),
             len(self._legend.preplot_lines),
             tuple(
@@ -983,6 +1036,20 @@ class PostplotMapWidget(QWidget):
                     entry.hidden,
                 )
                 for entry in self._legend.preplot_lines
+            ),
+            tuple(
+                (
+                    entry.name,
+                    tuple(entry.navplan_source_indices),
+                    entry.navplan_filter_active,
+                    entry.line_style.value,
+                    entry.color,
+                    entry.opacity,
+                    entry.line_width,
+                    entry.dot_radius,
+                    entry.hidden,
+                )
+                for entry in self._legend.navplan_lines
             ),
             bounds,
             self._display_mode,
@@ -1026,6 +1093,22 @@ class PostplotMapWidget(QWidget):
             )
             for entry in self._legend.preplot_lines
         )
+        navplan_paths = resolve_navplan_file_order(map_data)
+        visible_navplan = any(
+            not entry.hidden
+            and bool(
+                [
+                    segment
+                    for source_index in entry.navplan_source_indices
+                    for segment in segments_for_navplan_source(
+                        map_data.navplan_segments,
+                        navplan_paths,
+                        source_index,
+                    )
+                ]
+            )
+            for entry in self._legend.navplan_lines
+        )
         visible_areas = any(
             not entry.hidden
             and not is_imported_polygon(entry)
@@ -1034,7 +1117,7 @@ class PostplotMapWidget(QWidget):
         )
         has_nav = bool(nav_segments)
 
-        if not has_nav and not visible_preplot and not visible_areas:
+        if not has_nav and not visible_preplot and not visible_navplan and not visible_areas:
             self._extent_x = None
             self._extent_y = None
             if isinstance(vb, MapViewBox):
@@ -1053,6 +1136,7 @@ class PostplotMapWidget(QWidget):
 
         self._add_batched_segments(nav_segments)
         self._add_legend_preplot_segments(map_data)
+        self._add_legend_navplan_segments(map_data)
 
         self._add_area_polygons(map_data)
 

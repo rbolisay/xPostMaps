@@ -266,6 +266,7 @@ class MinimapWidget(QWidget):
         geo: GeoBounds,
         area_polygons: list[tuple[list[float], list[float]]] | None = None,
         saved_view: dict | None = None,
+        tight_zoom: bool = False,
     ) -> None:
         if self._marker:
             self._plot.removeItem(self._marker)
@@ -317,11 +318,19 @@ class MinimapWidget(QWidget):
             self._plot.addItem(area_item)
             self._area_items.append(area_item)
 
-        cx = (geo.lon_min + geo.lon_max) / 2
-        cy = (geo.lat_min + geo.lat_max) / 2
-        span = max(geo.lon_max - geo.lon_min, geo.lat_max - geo.lat_min, 0.5) * 4.0
-        x_range = (cx - span, cx + span)
-        y_range = (cy - span * 0.6, cy + span * 0.6)
+        if tight_zoom:
+            # Frame the survey/main-map extent closely (small padding for a bit
+            # of coastline context), instead of the wide 4x context view.
+            pad_lon = max((geo.lon_max - geo.lon_min) * 0.25, 0.3)
+            pad_lat = max((geo.lat_max - geo.lat_min) * 0.25, 0.3)
+            x_range = (geo.lon_min - pad_lon, geo.lon_max + pad_lon)
+            y_range = (geo.lat_min - pad_lat, geo.lat_max + pad_lat)
+        else:
+            cx = (geo.lon_min + geo.lon_max) / 2
+            cy = (geo.lat_min + geo.lat_max) / 2
+            span = max(geo.lon_max - geo.lon_min, geo.lat_max - geo.lat_min, 0.5) * 4.0
+            x_range = (cx - span, cx + span)
+            y_range = (cy - span * 0.6, cy + span * 0.6)
         self._view_box.set_extent_range(x_range, y_range)
         saved_ranges = self._valid_saved_view(saved_view)
         target_x, target_y = saved_ranges if saved_ranges is not None else (x_range, y_range)

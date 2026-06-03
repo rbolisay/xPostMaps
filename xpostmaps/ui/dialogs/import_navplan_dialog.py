@@ -1,4 +1,4 @@
-"""Manage preplot files in a dedicated non-modal window."""
+"""Manage navplan source-position files in a dedicated non-modal window."""
 
 from __future__ import annotations
 
@@ -18,17 +18,17 @@ from PySide6.QtWidgets import (
 )
 
 from xpostmaps.core.crs_utils import epsg_label
-from xpostmaps.core.models import PreplotCatalogEntry, ProjectSettings
-from xpostmaps.core.preplot_catalog_utils import (
-    build_preplot_catalog,
-    renumber_preplot_catalog,
+from xpostmaps.core.models import ProjectSettings
+from xpostmaps.core.navplan_catalog_utils import (
+    build_navplan_catalog,
+    collect_navplan_files_from_folder,
+    renumber_navplan_catalog,
 )
-from xpostmaps.parsers.preplot_parser import PREPLOT_EXTENSIONS
 from xpostmaps.ui.dialogs.base_dialog import SingleInstanceDialog
 from xpostmaps.ui.theme import themed_open_directory, themed_open_files
 
-_PREPLOT_FILTER = (
-    "Preplot Files (*.p111 *.p190 *.190 *.txt);;"
+_NAVPLAN_FILTER = (
+    "Navplan Files (*.navplan *.p190 *.190 *.p111);;"
     "All Files (*)"
 )
 
@@ -80,19 +80,8 @@ def _set_table_viewport_rows(table: QTableWidget, visible_rows: int = 8) -> None
     table.setMaximumHeight(viewport_h)
 
 
-def _collect_from_folder(folder: str) -> list[str]:
-    root = Path(folder)
-    if not root.is_dir():
-        return []
-    files: list[str] = []
-    for path in sorted(root.rglob("*")):
-        if path.is_file() and path.suffix.lower() in {ext.lower() for ext in PREPLOT_EXTENSIONS}:
-            files.append(str(path.resolve()))
-    return files
-
-
-class PreplotNavplanDialog:
-    KEY = "preplot_navplan"
+class ImportNavplanDialog:
+    KEY = "import_navplan"
 
     @classmethod
     def open(
@@ -103,21 +92,21 @@ class PreplotNavplanDialog:
         initial_dir: str = "",
     ) -> None:
         state = {
-            "folder": settings.preplots_dir or initial_dir,
-            "files": list(settings.preplot_files),
-            "catalog": list(settings.preplot_catalog),
+            "folder": settings.navplans_dir or initial_dir,
+            "files": list(settings.navplan_files),
+            "catalog": list(settings.navplan_catalog),
         }
 
         def rebuild_catalog() -> None:
             paths = [Path(path) for path in state["files"] if Path(path).is_file()]
-            state["catalog"] = build_preplot_catalog(paths) if paths else []
-            renumber_preplot_catalog(state["catalog"])
+            state["catalog"] = build_navplan_catalog(paths) if paths else []
+            renumber_navplan_catalog(state["catalog"])
 
         def apply_changes() -> None:
-            settings.preplot_files = list(state["files"])
-            settings.preplot_files_explicit = True
-            settings.preplots_dir = state["folder"]
-            settings.preplot_catalog = list(state["catalog"])
+            settings.navplan_files = list(state["files"])
+            settings.navplan_files_explicit = True
+            settings.navplans_dir = state["folder"]
+            settings.navplan_catalog = list(state["catalog"])
             on_apply(settings)
 
         def refresh_table(table: QTableWidget) -> None:
@@ -125,38 +114,35 @@ class PreplotNavplanDialog:
             for entry in state["catalog"]:
                 row = table.rowCount()
                 table.insertRow(row)
-                table.setItem(row, 0, QTableWidgetItem(str(entry.preplot_number)))
-                table.setItem(row, 1, QTableWidgetItem(Path(entry.file_path).name))
-                crs_text = (
-                    epsg_label(entry.crs_code) if entry.crs_code else "Unknown"
+                table.setItem(row, 0, QTableWidgetItem(str(entry.navplan_number)))
+                table.setItem(
+                    row,
+                    1,
+                    QTableWidgetItem(
+                        entry.navplan_name or Path(entry.file_path).name
+                    ),
                 )
+                crs_text = epsg_label(entry.crs_code) if entry.crs_code else "Unknown"
                 table.setItem(row, 2, QTableWidgetItem(crs_text))
-                table.setItem(row, 3, QTableWidgetItem(str(entry.total_lines)))
             _fit_table(table)
             _set_table_viewport_rows(table, 8)
-            summary.setText(f"{len(state['catalog'])} preplot file(s)")
-
-        def refresh_files_from_catalog() -> None:
-            state["files"] = [entry.file_path for entry in state["catalog"]]
+            summary.setText(f"{len(state['catalog'])} navplan file(s)")
 
         def browse_folder() -> None:
-            folder = themed_open_directory(
-                parent,
-                "Import Preplot — Select Folder",
-            )
+            folder = themed_open_directory(parent, "Import Navplan — Select Folder")
             if not folder:
                 return
             state["folder"] = folder
-            state["files"] = _collect_from_folder(folder)
+            state["files"] = collect_navplan_files_from_folder(folder)
             rebuild_catalog()
             refresh_table(table)
             apply_changes()
 
-        def add_files() -> None:
+        def select_files() -> None:
             paths = themed_open_files(
                 parent,
-                "Import Preplot — Select Files",
-                _PREPLOT_FILTER,
+                "Import Navplan — Select Files",
+                _NAVPLAN_FILTER,
             )
             if not paths:
                 return
@@ -188,27 +174,28 @@ class PreplotNavplanDialog:
             apply_changes()
 
         def build(dialog: SingleInstanceDialog) -> None:
-            state["files"] = list(settings.preplot_files)
-            state["folder"] = settings.preplots_dir or initial_dir
+            state["files"] = list(settings.navplan_files)
+            state["folder"] = settings.navplans_dir or initial_dir
             rebuild_catalog()
             layout = dialog.content_layout
             _clear_layout(layout)
 
             hint = QLabel(
-                "Import preplot files (.p111/.p190/.190 start/end lines and doglegs)."
+                "Import navplan source positions from .navplan, .p190, .190, "
+                ".p111, or extensionless files."
             )
             hint.setWordWrap(True)
             layout.addWidget(hint)
 
             btn_row = QHBoxLayout()
             browse_btn = QPushButton("Browse Folder…")
-            files_btn = QPushButton("Add Files…")
+            files_btn = QPushButton("Select Files…")
             remove_btn = QPushButton("Remove Selected")
             for btn in (browse_btn, files_btn, remove_btn):
                 btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
                 btn.setAutoDefault(False)
             browse_btn.clicked.connect(browse_folder)
-            files_btn.clicked.connect(add_files)
+            files_btn.clicked.connect(select_files)
             remove_btn.clicked.connect(remove_selected)
             btn_row.addWidget(browse_btn)
             btn_row.addWidget(files_btn)
@@ -222,10 +209,8 @@ class PreplotNavplanDialog:
             layout.addWidget(summary)
 
             nonlocal table
-            table = QTableWidget(0, 4)
-            table.setHorizontalHeaderLabels(
-                ["Preplot No.", "Filename", "CRS Code", "Total Preplot Lines"]
-            )
+            table = QTableWidget(0, 3)
+            table.setHorizontalHeaderLabels(["Navplan No.", "Navplan Name", "CRS Code"])
             _configure_table(table)
             layout.addWidget(table)
 
@@ -244,9 +229,9 @@ class PreplotNavplanDialog:
 
         SingleInstanceDialog.show_dialog(
             cls.KEY,
-            "Import Preplot",
+            "Import Navplan",
             build,
             parent,
-            width=860,
-            height=560,
+            width=780,
+            height=540,
         )

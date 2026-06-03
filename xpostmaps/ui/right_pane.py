@@ -114,9 +114,9 @@ class RightPane(PrintPanel):
         settings: ProjectSettings,
         map_data: MapData | None,
         info: PostmapInfo,
-    ) -> tuple[SurveyBounds, GeoBounds, list[tuple[list[float], list[float]]]]:
+    ) -> tuple[SurveyBounds, GeoBounds, list[tuple[list[float], list[float]]], bool]:
         if map_data is None:
-            return SurveyBounds(), GeoBounds(), []
+            return SurveyBounds(), GeoBounds(), [], False
 
         visible_areas = [
             entry
@@ -155,11 +155,14 @@ class RightPane(PrintPanel):
 
         projected_bounds = self._bounds_from_xy(focus_xs, focus_ys)
         geo_bounds = self._geo_bounds_from_lon_lat(focus_lons, focus_lats)
+        # A Fullfold area is "detected" only when one exists and produced the
+        # geo focus (i.e. before any fallback to the full survey extent).
+        has_fullfold = bool(fullfold_areas) and geo_bounds.is_valid
         if not projected_bounds.is_valid:
             projected_bounds = map_data.bounds
         if not geo_bounds.is_valid:
             geo_bounds = map_data.geo_bounds
-        return projected_bounds, geo_bounds, focus_polygons
+        return projected_bounds, geo_bounds, focus_polygons, has_fullfold
 
     def update_from_project(
         self,
@@ -170,12 +173,21 @@ class RightPane(PrintPanel):
             self.set_logo(settings.logo_path)
 
         info = map_data.postmap_info if map_data else PostmapInfo()
-        bounds, geo, minimap_polygons = self._right_pane_focus(settings, map_data, info)
+        bounds, geo, minimap_polygons, has_fullfold = self._right_pane_focus(
+            settings, map_data, info
+        )
 
         self._card.update_content(info, bounds, settings.legend_config)
         self._card.updateGeometry()
         self._card.repaint()
-        self._minimap.set_location(geo, minimap_polygons, settings.minimap_view)
+        # Without a Fullfold area to focus on, zoom the minimap close to the
+        # survey/main-map extent instead of the wide context view.
+        self._minimap.set_location(
+            geo,
+            minimap_polygons,
+            settings.minimap_view,
+            tight_zoom=not has_fullfold,
+        )
 
     def prepare_export_snapshot(self, map_height: int | None = None) -> None:
         """Prepare right pane for PDF capture at true aspect (same height as map)."""

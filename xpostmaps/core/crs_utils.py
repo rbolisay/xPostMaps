@@ -31,6 +31,64 @@ def epsg_label(code: str | int | None) -> str:
     return f"EPSG:{normalized}" if normalized else "unknown CRS"
 
 
+def infer_epsg_from_header(
+    datum: str = "",
+    projection: str = "",
+    zone: str = "",
+) -> str:
+    """Infer an EPSG code from P190/P111 datum + projection + zone headers.
+
+    Header text is not always a complete CRS definition, so explicit EPSG values
+    remain authoritative. This helper only covers unambiguous common cases and
+    asks pyproj/PROJ to resolve the final authority code.
+    """
+    datum_text = (datum or "").upper()
+    projection_text = (projection or "").upper()
+    zone_text = (zone or "").upper().strip()
+
+    datum_name = ""
+    if "ED50" in datum_text or "ED-50" in datum_text:
+        datum_name = "ED50"
+    elif "WGS84" in datum_text or "WGS 84" in datum_text:
+        datum_name = "WGS 84"
+    elif "NZGD2000" in datum_text or "NZTM2000" in datum_text:
+        datum_name = "NZGD2000"
+
+    try:
+        from pyproj import CRS
+    except Exception:  # noqa: BLE001
+        CRS = None
+
+    def from_user_input(text: str) -> str:
+        if CRS is None:
+            return ""
+        try:
+            epsg = CRS.from_user_input(text).to_epsg()
+        except Exception:  # noqa: BLE001
+            return ""
+        return str(epsg) if epsg is not None else ""
+
+    if "UTM" in projection_text or "U.T.M" in projection_text:
+        match = re.search(r"(\d{1,2})\s*([NS])?", zone_text)
+        if match:
+            zone_num = int(match.group(1))
+            hemisphere = match.group(2) or (
+                "S" if "SOUTH" in projection_text else "N"
+            )
+            if datum_name == "WGS 84":
+                return str(32600 + zone_num if hemisphere == "N" else 32700 + zone_num)
+            if datum_name:
+                return from_user_input(f"{datum_name} / UTM zone {zone_num}{hemisphere}")
+
+    if (
+        "TRANSVERSE MERCATOR" in projection_text
+        and ("NEW ZEALAND" in projection_text or datum_name == "NZGD2000")
+    ):
+        return from_user_input("NZGD2000 / New Zealand Transverse Mercator 2000") or "2193"
+
+    return ""
+
+
 def crs_match(source: str | int | None, target: str | int | None) -> bool:
     src = normalize_epsg(source)
     dst = normalize_epsg(target)

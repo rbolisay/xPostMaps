@@ -16,6 +16,7 @@ from xpostmaps.core.models import (
     SurveyBounds,
 )
 from xpostmaps.core.sequence_utils import nav_file_cache_key, nav_file_signature
+from xpostmaps.core.navplan_catalog_utils import parse_navplan_files, resolve_navplan_files
 from xpostmaps.parsers.metadata_parser import collect_postmap_metadata
 from xpostmaps.parsers.p111_parser import parse_p111_file, scan_vessel_id
 from xpostmaps.parsers.p190_parser import parse_p190_file
@@ -192,7 +193,8 @@ def parse_navigation_directory(
 
     main_files = resolve_nav_files(settings)
     preplot_files = resolve_preplot_files(settings)
-    total_steps = max(len(main_files) + len(preplot_files), 1)
+    navplan_files = resolve_navplan_files(settings)
+    total_steps = max(len(main_files) + len(preplot_files) + len(navplan_files), 1)
     step = 0
     shared_vessel_id = _scan_shared_vessel_id(main_files)
 
@@ -232,6 +234,9 @@ def parse_navigation_directory(
     all_records: list[PositionRecord] = list(carried_records)
 
     for path in preplot_files:
+        map_data.source_files.append(str(path))
+
+    for path in navplan_files:
         map_data.source_files.append(str(path))
 
     for path in main_files:
@@ -319,6 +324,33 @@ def parse_navigation_directory(
         map_data.survey_perimeters = []
         map_data.preplot_file_order = []
 
+    navplan_stats: dict[str, int] = {}
+    if settings.show_preplots and navplan_files:
+        if progress_callback:
+            progress_callback(int(100 * step / total_steps), "Parsing navplan…")
+        navplan_segments, _meta, navplan_stats = parse_navplan_files(navplan_files)
+        map_data.navplan_segments = navplan_segments
+        map_data.navplan_file_order = [str(path) for path in navplan_files]
+        for seg in navplan_segments:
+            all_x.extend(seg.xs)
+            all_y.extend(seg.ys)
+        step += len(navplan_files)
+    elif existing_map_data and not settings.navplan_files_explicit:
+        map_data.navplan_segments = list(existing_map_data.navplan_segments)
+        map_data.navplan_file_order = list(existing_map_data.navplan_file_order)
+        if not map_data.navplan_file_order and map_data.navplan_segments:
+            seen: list[str] = []
+            for segment in map_data.navplan_segments:
+                if segment.file_name and segment.file_name not in seen:
+                    seen.append(segment.file_name)
+            map_data.navplan_file_order = seen
+        for seg in map_data.navplan_segments:
+            all_x.extend(seg.xs)
+            all_y.extend(seg.ys)
+    else:
+        map_data.navplan_segments = []
+        map_data.navplan_file_order = []
+
     xs_arr = np.array(all_x, dtype=np.float64)
     ys_arr = np.array(all_y, dtype=np.float64)
     map_data.bounds = _merge_bounds(SurveyBounds(), xs_arr, ys_arr)
@@ -326,7 +358,7 @@ def parse_navigation_directory(
     map_data.postmap_info = _merge_postmap_info(
         existing_postmap,
         main_files,
-        preplot_files,
+        preplot_files + navplan_files,
         settings,
     )
     map_data.stats = {
@@ -338,7 +370,9 @@ def parse_navigation_directory(
         "nav_files_skipped": skipped_files,
         "preplot_files": preplot_stats.get("preplot_files", 0),
         "preplot_lines": preplot_stats.get("preplot_lines", 0),
-        "navplan_files": preplot_stats.get("navplan_files", 0),
+        "navplan_files": navplan_stats.get("navplan_files", 0),
+        "navplan_lines": navplan_stats.get("navplan_lines", 0),
+        "navplan_points": navplan_stats.get("navplan_points", 0),
         "survey_perimeters": len(map_data.survey_perimeters),
     }
     if progress_callback:

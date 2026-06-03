@@ -32,6 +32,12 @@ from xpostmaps.core.models import (
 )
 from xpostmaps.core.parse_worker import ParseWorker
 from xpostmaps.core.crs_utils import normalize_epsg
+from xpostmaps.core.navplan_catalog_utils import (
+    build_navplan_catalog_from_segments,
+    resolve_navplan_file_order,
+    resolve_navplan_files,
+    sync_navplan_legend_entries,
+)
 from xpostmaps.core.preplot_catalog_utils import (
     build_preplot_catalog_from_segments,
     resolve_preplot_file_order,
@@ -39,6 +45,7 @@ from xpostmaps.core.preplot_catalog_utils import (
 )
 from xpostmaps.core.sequence_utils import sequence_id_matches
 from xpostmaps.ui.dialogs.import_polygons_dialog import ImportPolygonsDialog
+from xpostmaps.ui.dialogs.import_navplan_dialog import ImportNavplanDialog
 from xpostmaps.ui.dialogs.legend_dialog import LegendDialog
 from xpostmaps.parsers.directory_parser import NAV_EXTENSIONS, resolve_nav_files
 from xpostmaps.parsers.preplot_parser import resolve_preplot_files
@@ -114,6 +121,7 @@ class MainWindow(QMainWindow):
         self._left.browse_load_project.connect(self._open_project_browser)
         self._left.save_project.connect(lambda: self._save_project(silent=False))
         self._left.select_preplot_navplan.connect(self._select_preplot_navplan)
+        self._left.import_navplan.connect(self._open_import_navplan)
         self._left.select_p111_p190_dir.connect(self._select_p111_dir)
         self._left.open_import_polygons.connect(self._open_import_polygons)
         self._left.select_logo.connect(self._select_logo)
@@ -142,9 +150,12 @@ class MainWindow(QMainWindow):
         candidates: list[str] = []
         if self._settings.preplots_dir:
             candidates.append(self._settings.preplots_dir)
+        if self._settings.navplans_dir:
+            candidates.append(self._settings.navplans_dir)
         if self._settings.p111_p190_dir:
             candidates.append(self._settings.p111_p190_dir)
         candidates.extend(self._settings.preplot_files[:1])
+        candidates.extend(self._settings.navplan_files[:1])
         candidates.extend(self._settings.nav_files[:1])
         for raw in candidates:
             if not raw:
@@ -168,6 +179,9 @@ class MainWindow(QMainWindow):
         order = resolve_preplot_file_order(self._map_data, self._settings)
         if order:
             self._map_data.preplot_file_order = order
+        navplan_order = resolve_navplan_file_order(self._map_data, self._settings)
+        if navplan_order:
+            self._map_data.navplan_file_order = navplan_order
 
     def _apply_map_crs_from_preplot(self, map_data: MapData) -> None:
         info = map_data.postmap_info
@@ -175,6 +189,10 @@ class MainWindow(QMainWindow):
             info.epsg_code = normalize_epsg(info.epsg_code)
             return
         for entry in self._settings.preplot_catalog:
+            if entry.crs_code:
+                info.epsg_code = normalize_epsg(entry.crs_code)
+                return
+        for entry in self._settings.navplan_catalog:
             if entry.crs_code:
                 info.epsg_code = normalize_epsg(entry.crs_code)
                 return
@@ -246,11 +264,19 @@ class MainWindow(QMainWindow):
         self._left.set_preplot_dependent_controls_enabled(has_preplot)
         if not catalog:
             self._left.set_preplot_navplan("Not set")
+            self._left.set_navplan("Not set")
             return
         if len(catalog) == 1:
             self._left.set_preplot_navplan(Path(catalog[0].file_path).name)
         else:
             self._left.set_preplot_navplan(f"{len(catalog)} preplot file(s)")
+        nav_catalog = self._settings.navplan_catalog
+        if not nav_catalog:
+            self._left.set_navplan("Not set")
+        elif len(nav_catalog) == 1:
+            self._left.set_navplan(Path(nav_catalog[0].file_path).name)
+        else:
+            self._left.set_navplan(f"{len(nav_catalog)} navplan file(s)")
 
     def _on_project_name_changed(self, name: str) -> None:
         self._settings.name = name.strip()
@@ -304,6 +330,7 @@ class MainWindow(QMainWindow):
             sequences_provider=self._current_sequences,
             survey_perimeters=perimeters,
             preplot_count=len(self._settings.preplot_catalog),
+            navplan_catalog=self._settings.navplan_catalog,
             map_epsg=self._current_map_epsg(),
             on_map_epsg_changed=self._on_import_map_epsg_changed,
         )
@@ -384,6 +411,17 @@ class MainWindow(QMainWindow):
             initial_dir=self._settings.preplots_dir or self._settings.p111_p190_dir or "",
         )
 
+    def _open_import_navplan(self) -> None:
+        ImportNavplanDialog.open(
+            self,
+            self._settings,
+            on_apply=self._on_navplan_settings_changed,
+            initial_dir=self._settings.navplans_dir
+            or self._settings.preplots_dir
+            or self._settings.p111_p190_dir
+            or "",
+        )
+
     def _on_preplot_settings_changed(self, settings: ProjectSettings) -> None:
         self._settings.preplot_files = settings.preplot_files
         self._settings.preplot_files_explicit = settings.preplot_files_explicit
@@ -392,6 +430,19 @@ class MainWindow(QMainWindow):
         sync_preplot_legend_entries(
             self._settings.legend_config,
             self._settings.preplot_catalog,
+        )
+        self._refresh_preplot_summary()
+        self._ensure_project_name()
+        self._start_parse()
+
+    def _on_navplan_settings_changed(self, settings: ProjectSettings) -> None:
+        self._settings.navplan_files = settings.navplan_files
+        self._settings.navplan_files_explicit = settings.navplan_files_explicit
+        self._settings.navplans_dir = settings.navplans_dir
+        self._settings.navplan_catalog = list(settings.navplan_catalog)
+        sync_navplan_legend_entries(
+            self._settings.legend_config,
+            self._settings.navplan_catalog,
         )
         self._refresh_preplot_summary()
         self._ensure_project_name()
@@ -434,11 +485,13 @@ class MainWindow(QMainWindow):
             return
         has_nav = bool(resolve_nav_files(self._settings))
         has_preplot = bool(resolve_preplot_files(self._settings))
+        has_navplan = bool(resolve_navplan_files(self._settings))
         explicit_sources = (
             self._settings.nav_files_explicit
             or self._settings.preplot_files_explicit
+            or self._settings.navplan_files_explicit
         )
-        if not has_nav and not has_preplot and not explicit_sources:
+        if not has_nav and not has_preplot and not has_navplan and not explicit_sources:
             return
 
         self._parsing = True
@@ -503,6 +556,18 @@ class MainWindow(QMainWindow):
             self._settings.legend_config,
             self._settings.preplot_catalog,
         )
+        if self._settings.navplan_files:
+            self._settings.navplan_catalog = build_navplan_catalog_from_segments(
+                self._settings.navplan_files,
+                map_data.navplan_segments,
+                map_data.postmap_info.epsg_code,
+            )
+        elif self._settings.navplan_files_explicit:
+            self._settings.navplan_catalog = []
+        sync_navplan_legend_entries(
+            self._settings.legend_config,
+            self._settings.navplan_catalog,
+        )
         self._apply_map_crs_from_preplot(map_data)
         self._sync_map_data_preplot_order()
         self._refresh_preplot_summary()
@@ -514,7 +579,8 @@ class MainWindow(QMainWindow):
             f"Loaded {map_data.stats.get('total_records', 0):,} nav records, "
             f"{map_data.stats.get('preplot_lines', 0)} preplot lines from "
             f"{parsed or map_data.stats.get('source_files', 0)} parsed nav + "
-            f"{map_data.stats.get('preplot_files', 0)} preplot file(s){skip_note}"
+            f"{map_data.stats.get('preplot_files', 0)} preplot file(s), "
+            f"{map_data.stats.get('navplan_files', 0)} navplan file(s){skip_note}"
         )
         self._map.set_legend(self._settings.legend_config)
         self._map.set_display_mode(self._settings.display_mode)
@@ -544,6 +610,7 @@ class MainWindow(QMainWindow):
             str(self._db_directory),
             on_load=self._load_database_project,
             on_delete=self._delete_database_project,
+            on_new_project=self._create_new_project,
             on_directory_changed=self._on_db_directory_changed,
         )
 
@@ -564,6 +631,45 @@ class MainWindow(QMainWindow):
             return
         self._switch_database(path)
         self._load_project_by_name(project_name)
+
+    def _create_new_project(self, directory: str, project_name: str) -> bool:
+        name = project_name.strip()
+        if not name:
+            return False
+        db_dir = Path(directory)
+        db_dir.mkdir(parents=True, exist_ok=True)
+        target_db = project_db_path(db_dir, name)
+        if target_db.exists():
+            existing_db = Database(target_db)
+            try:
+                if name in existing_db.list_projects():
+                    QMessageBox.warning(
+                        self,
+                        "New Project",
+                        f"Project '{name}' already exists.",
+                    )
+                    return False
+            finally:
+                existing_db.close()
+
+        settings = ProjectSettings(name=name)
+        map_data = MapData(postmap_info=PostmapInfo())
+        self._switch_database(target_db)
+        try:
+            self._db.save_project(settings, map_data)
+        except Exception as exc:  # noqa: BLE001
+            QMessageBox.critical(
+                self,
+                "New Project",
+                f"Could not create project database:\n{exc}",
+            )
+            return False
+
+        self._db_directory = db_dir
+        save_db_directory(self._db_directory)
+        self._apply_loaded_project(settings, map_data)
+        self.statusBar().showMessage(f"Created project: {name}", 3000)
+        return True
 
     def _delete_database_project(self, db_path: str, project_name: str) -> None:
         path = Path(db_path)
@@ -586,6 +692,7 @@ class MainWindow(QMainWindow):
             self._left.set_project_name("")
             self._left.set_p111_p190_dir("")
             self._left.set_preplot_navplan("")
+            self._left.set_navplan("")
             self._refresh_ui()
 
         if not remaining and path.is_file():
@@ -644,6 +751,16 @@ class MainWindow(QMainWindow):
                     settings.legend_config,
                     settings.preplot_catalog,
                 )
+            if settings.navplan_files and not settings.navplan_catalog:
+                settings.navplan_catalog = build_navplan_catalog_from_segments(
+                    settings.navplan_files,
+                    map_data.navplan_segments,
+                    map_data.postmap_info.epsg_code,
+                )
+                sync_navplan_legend_entries(
+                    settings.legend_config,
+                    settings.navplan_catalog,
+                )
             self._apply_map_crs_from_preplot(map_data)
             self._sync_map_data_preplot_order()
             self._left.set_project_name(settings.name)
@@ -665,6 +782,7 @@ class MainWindow(QMainWindow):
                 f"Loaded project: {settings.name} "
                 f"({len(map_data.segments)} nav segments, "
                 f"{len(map_data.preplot_segments)} preplot segments, "
+                f"{len(map_data.navplan_segments)} navplan segments, "
                 f"{total_records:,} positions)"
             )
         finally:

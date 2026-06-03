@@ -11,6 +11,7 @@ from PySide6.QtWidgets import (
     QFileDialog,
     QHBoxLayout,
     QHeaderView,
+    QInputDialog,
     QLabel,
     QLineEdit,
     QMessageBox,
@@ -45,6 +46,7 @@ class ProjectBrowserDialog:
         *,
         on_load: Callable[[str, str], None],
         on_delete: Callable[[str, str], None],
+        on_new_project: Callable[[str, str], bool] | None = None,
         on_directory_changed: Callable[[str], None] | None = None,
     ) -> None:
         state = {"directory": start_directory or str(Path.cwd())}
@@ -152,6 +154,24 @@ class ProjectBrowserDialog:
                 on_load(path, project)
                 dialog.close()
 
+            def new_project() -> None:
+                if on_new_project is None:
+                    return
+                name, ok = QInputDialog.getText(
+                    dialog,
+                    "New Project",
+                    "Project name:",
+                )
+                project_name = name.strip()
+                if not ok:
+                    return
+                if not project_name:
+                    message_label.setText("Enter a project name.")
+                    return
+                if on_new_project(state["directory"], project_name):
+                    refresh()
+                    dialog.close()
+
             def delete_selected() -> None:
                 entries = selected_entries()
                 if not entries:
@@ -225,11 +245,13 @@ class ProjectBrowserDialog:
             btn_row = QHBoxLayout()
             refresh_btn = QPushButton("Refresh")
             delete_btn = QPushButton("Delete Selected")
+            new_btn = QPushButton("New Project")
             open_btn = QPushButton("Open Selected")
             open_btn.setObjectName("primaryBtn")
             close_btn = QPushButton("Close")
             refresh_btn.clicked.connect(refresh)
             delete_btn.clicked.connect(delete_selected)
+            new_btn.clicked.connect(new_project)
             open_btn.clicked.connect(open_selected)
             close_btn.clicked.connect(dialog.close)
             table.itemDoubleClicked.connect(lambda _item: open_selected())
@@ -237,6 +259,7 @@ class ProjectBrowserDialog:
             btn_row.addWidget(refresh_btn)
             btn_row.addWidget(delete_btn)
             btn_row.addStretch()
+            btn_row.addWidget(new_btn)
             btn_row.addWidget(open_btn)
             btn_row.addWidget(close_btn)
             layout.addLayout(btn_row)

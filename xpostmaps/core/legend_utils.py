@@ -7,6 +7,7 @@ from xpostmaps.core.models import (
     AreaLegendEntry,
     LegendConfig,
     LineStyle,
+    NavplanLegendEntry,
     NavDataType,
     PolygonPoint,
     PostplotLegendEntry,
@@ -64,6 +65,20 @@ def legend_to_dict(config: LegendConfig) -> dict:
                 "hidden": p.hidden,
             }
             for p in config.preplot_lines
+        ],
+        "navplan_lines": [
+            {
+                "name": n.name,
+                "line_style": n.line_style.value,
+                "color": n.color,
+                "opacity": n.opacity,
+                "line_width": n.line_width,
+                "dot_radius": n.dot_radius,
+                "hidden": n.hidden,
+                "navplan_source_indices": list(n.navplan_source_indices),
+                "navplan_filter_active": n.navplan_filter_active,
+            }
+            for n in config.navplan_lines
         ],
         "postplot_lines": [
             {
@@ -147,6 +162,33 @@ def legend_from_dict(data: dict | None) -> LegendConfig:
                 hidden=bool(item.get("hidden", False)),
             )
         )
+    navplan_lines = []
+    for item in data.get("navplan_lines", []):
+        raw_style = item.get("line_style", "solid")
+        try:
+            line_style = LineStyle(raw_style)
+        except ValueError:
+            line_style = LineStyle.SOLID
+        navplan_lines.append(
+            NavplanLegendEntry(
+                name=item.get("name", ""),
+                line_style=line_style,
+                color=item.get("color", "#22c55e"),
+                opacity=float(item.get("opacity", 1.0)),
+                line_width=float(item.get("line_width", 0.9)),
+                dot_radius=float(item.get("dot_radius", 3.0)),
+                hidden=bool(item.get("hidden", False)),
+                navplan_source_indices=[
+                    int(index) for index in item.get("navplan_source_indices", [])
+                ],
+                navplan_filter_active=bool(
+                    item.get(
+                        "navplan_filter_active",
+                        bool(item.get("navplan_source_indices")),
+                    )
+                ),
+            )
+        )
     lines = []
     for item in data.get("postplot_lines", []):
         raw_style = item.get("line_style", "solid")
@@ -178,10 +220,11 @@ def legend_from_dict(data: dict | None) -> LegendConfig:
                 ),
             )
         )
-    if not areas and not lines:
+    if not areas and not preplot_lines and not navplan_lines and not lines:
         return LegendConfig.default()
     return LegendConfig(
         areas=areas,
         preplot_lines=preplot_lines,
+        navplan_lines=navplan_lines,
         postplot_lines=lines or LegendConfig.default().postplot_lines,
     )

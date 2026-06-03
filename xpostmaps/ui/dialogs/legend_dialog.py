@@ -32,6 +32,8 @@ from xpostmaps.core.models import (
     LineSequence,
     LineStyle,
     NavDataType,
+    NavplanCatalogEntry,
+    NavplanLegendEntry,
     PolygonPoint,
     PostplotLegendEntry,
     PreplotLegendEntry,
@@ -44,6 +46,7 @@ from xpostmaps.core.polygon_import_service import (
 from xpostmaps.core.preplot_catalog_utils import preplot_source_labels
 from xpostmaps.ui.dialogs.base_dialog import SingleInstanceDialog
 from xpostmaps.ui.dialogs.custom_polygon_dialog import CustomPolygonDialog
+from xpostmaps.ui.dialogs.navplans_dialog import NavplansDialog
 from xpostmaps.ui.dialogs.sequences_dialog import SequencesDialog
 from xpostmaps.ui.widgets.color_button import ColorButton
 
@@ -168,12 +171,16 @@ class LegendDialog:
         sequences_provider: Callable[[], list[LineSequence]] | None = None,
         survey_perimeters: list[SurveyPerimeter] | None = None,
         preplot_count: int = 0,
+        navplan_catalog: list[NavplanCatalogEntry] | None = None,
         map_epsg: str = "",
         on_map_epsg_changed: Callable[[str], None] | None = None,
     ) -> None:
         seq_list: list[LineSequence] = list(sequences or [])
+        navplan_list: list[NavplanCatalogEntry] = list(navplan_catalog or [])
         row_sequence_ids: list[list[str]] = []
         row_sequence_filter_active: list[bool] = []
+        row_navplan_indices: list[list[int]] = []
+        row_navplan_filter_active: list[bool] = []
         row_custom_points: list[list[PolygonPoint]] = []
         perimeter_count = len(survey_perimeters or [])
         imported_storage: list[AreaLegendEntry] = []
@@ -189,6 +196,8 @@ class LegendDialog:
             row_custom_points.clear()
             row_sequence_ids.clear()
             row_sequence_filter_active.clear()
+            row_navplan_indices.clear()
+            row_navplan_filter_active.clear()
             imported_storage.clear()
             imported_storage.extend(imported_polygon_entries(legend.areas))
             imported_count = len(imported_storage)
@@ -276,6 +285,7 @@ class LegendDialog:
                 return LegendConfig(
                     areas=areas + list(imported_storage),
                     preplot_lines=_collect_preplot_lines(),
+                    navplan_lines=_collect_navplan_lines(),
                     postplot_lines=_collect_postplot_lines(),
                 )
 
@@ -308,6 +318,47 @@ class LegendDialog:
                                     line_width=color_w.metric_value,
                                     dot_radius=color_w.metric_value,
                                     hidden=hide_w.isChecked(),
+                                )
+                            )
+                return lines
+
+            def _collect_navplan_lines() -> list[NavplanLegendEntry]:
+                lines: list[NavplanLegendEntry] = []
+                for row in range(navplan_table.rowCount()):
+                    name_w = navplan_table.cellWidget(row, 0)
+                    style_w = navplan_table.cellWidget(row, 1)
+                    color_w = navplan_table.cellWidget(row, 2)
+                    hide_w = navplan_table.cellWidget(row, 4)
+                    if (
+                        isinstance(name_w, QLineEdit)
+                        and isinstance(style_w, QComboBox)
+                        and isinstance(color_w, ColorButton)
+                        and isinstance(hide_w, QCheckBox)
+                    ):
+                        name = name_w.text().strip()
+                        if name:
+                            style = cls._style_from_index(style_w.currentIndex())
+                            selected = (
+                                row_navplan_indices[row]
+                                if row < len(row_navplan_indices)
+                                else []
+                            )
+                            filter_active = (
+                                row_navplan_filter_active[row]
+                                if row < len(row_navplan_filter_active)
+                                else False
+                            )
+                            lines.append(
+                                NavplanLegendEntry(
+                                    name=name,
+                                    line_style=style,
+                                    color=color_w.color,
+                                    opacity=color_w.opacity,
+                                    line_width=color_w.metric_value,
+                                    dot_radius=color_w.metric_value,
+                                    hidden=hide_w.isChecked(),
+                                    navplan_source_indices=selected,
+                                    navplan_filter_active=filter_active,
                                 )
                             )
                 return lines
@@ -674,6 +725,131 @@ class LegendDialog:
                     preplot_table.removeRow(row)
                     apply_legend()
 
+            navplan_lbl = QLabel("Navplan")
+            navplan_lbl.setStyleSheet("font-weight: 600; margin-top: 8px;")
+
+            navplan_table = QTableWidget(0, 5)
+            navplan_table.setHorizontalHeaderLabels(
+                [
+                    "Navplan Name",
+                    "Line Style",
+                    "Navplan Color",
+                    "Select Navplans",
+                    "Hide",
+                ]
+            )
+            _configure_legend_table(navplan_table)
+
+            def _open_navplans(row: int, name: str) -> None:
+                if not navplan_list:
+                    return
+
+                def on_changed(indices: list[int]) -> None:
+                    if row < len(row_navplan_indices):
+                        row_navplan_indices[row] = indices
+                    else:
+                        while len(row_navplan_indices) <= row:
+                            row_navplan_indices.append([])
+                        row_navplan_indices[row] = indices
+                    if row < len(row_navplan_filter_active):
+                        row_navplan_filter_active[row] = True
+                    else:
+                        while len(row_navplan_filter_active) <= row:
+                            row_navplan_filter_active.append(False)
+                        row_navplan_filter_active[row] = True
+                    btn = navplan_table.cellWidget(row, 3)
+                    if isinstance(btn, QPushButton):
+                        btn.setText(
+                            f"Select Navplans ({len(indices)})"
+                            if indices
+                            else "Select Navplans"
+                        )
+                        _fit_table_row(navplan_table, row)
+                    apply_legend()
+
+                NavplansDialog.open(
+                    parent=dialog,
+                    legend_row_name=name,
+                    catalog=navplan_list,
+                    selected_indices=(
+                        row_navplan_indices[row]
+                        if row < len(row_navplan_indices)
+                        else []
+                    ),
+                    on_changed=on_changed,
+                    row_key=str(row),
+                )
+
+            def add_navplan_row(entry: NavplanLegendEntry | None = None) -> None:
+                row = navplan_table.rowCount()
+                navplan_table.insertRow(row)
+                name = entry.name if entry else ""
+                nav_name = QLineEdit(name)
+                nav_name.editingFinished.connect(live_apply)
+                navplan_table.setCellWidget(row, 0, nav_name)
+
+                style_combo = QComboBox()
+                style_combo.addItems(list(cls._STYLE_LABELS))
+                if entry:
+                    style_combo.setCurrentIndex(cls._index_from_style(entry.line_style))
+                style_combo.currentIndexChanged.connect(live_apply)
+                navplan_table.setCellWidget(row, 1, style_combo)
+
+                def navplan_metric_config(combo=style_combo) -> tuple[str, int, int]:
+                    return cls._metric_config_for_style(
+                        cls._style_from_index(combo.currentIndex())
+                    )
+
+                navplan_metric = (
+                    entry.dot_radius
+                    if entry and entry.line_style == LineStyle.DOTTED
+                    else entry.line_width if entry else 0.9
+                )
+                color_btn = ColorButton(
+                    entry.color if entry else "#22c55e",
+                    entry.opacity if entry else 1.0,
+                    navplan_metric,
+                    navplan_metric_config,
+                )
+                color_btn.color_changed.connect(live_apply)
+                color_btn.opacity_changed.connect(live_apply)
+                color_btn.metric_changed.connect(live_apply)
+                navplan_table.setCellWidget(row, 2, color_btn)
+
+                selected = list(entry.navplan_source_indices) if entry else []
+                row_navplan_indices.append(selected)
+                row_navplan_filter_active.append(
+                    entry.navplan_filter_active if entry else False
+                )
+                nav_btn = _table_cell_button(
+                    f"Select Navplans ({len(selected)})"
+                    if selected
+                    else "Select Navplans"
+                )
+                nav_btn.setEnabled(bool(navplan_list))
+                nav_btn.clicked.connect(lambda _checked=False, r=row, n=name: _open_navplans(
+                    r,
+                    navplan_table.cellWidget(r, 0).text().strip() if isinstance(
+                        navplan_table.cellWidget(r, 0), QLineEdit
+                    ) else n,
+                ))
+                navplan_table.setCellWidget(row, 3, nav_btn)
+
+                hide_box = _hide_checkbox(entry.hidden if entry else False)
+                hide_box.toggled.connect(live_apply)
+                navplan_table.setCellWidget(row, 4, hide_box)
+                _fit_table_row(navplan_table, row)
+
+            def remove_navplan_row() -> None:
+                row = navplan_table.currentRow()
+                if row >= 0:
+                    navplan_table.removeRow(row)
+                    if row < len(row_navplan_indices):
+                        del row_navplan_indices[row]
+                    if row < len(row_navplan_filter_active):
+                        del row_navplan_filter_active[row]
+                    apply_legend()
+
             for entry in legend.preplot_lines:
                 add_preplot_row(entry)
 
@@ -693,6 +869,28 @@ class LegendDialog:
                 )
                 preplot_note.setStyleSheet("color: #94a3b8; font-size: 11px;")
                 layout.addWidget(preplot_note)
+
+            layout.addWidget(navplan_lbl)
+
+            for entry in legend.navplan_lines:
+                add_navplan_row(entry)
+
+            navplan_btns = QHBoxLayout()
+            add_navplan_btn = QPushButton("Add Navplan Row")
+            rem_navplan_btn = QPushButton("Remove Selected")
+            add_navplan_btn.clicked.connect(add_navplan_row)
+            rem_navplan_btn.clicked.connect(remove_navplan_row)
+            navplan_btns.addWidget(add_navplan_btn)
+            navplan_btns.addWidget(rem_navplan_btn)
+            navplan_btns.addStretch()
+            layout.addLayout(navplan_btns)
+            layout.addWidget(navplan_table)
+            if not navplan_list:
+                navplan_note = QLabel(
+                    "Import navplan files from the left pane to enable Select Navplans."
+                )
+                navplan_note.setStyleSheet("color: #94a3b8; font-size: 11px;")
+                layout.addWidget(navplan_note)
 
             layout.addWidget(post_lbl)
 
@@ -715,6 +913,7 @@ class LegendDialog:
 
             _set_table_viewport_rows(area_table, 5)
             _set_table_viewport_rows(preplot_table, 4)
+            _set_table_viewport_rows(navplan_table, 4)
             _set_table_viewport_rows(post_table, 5)
 
             if not seq_list:
@@ -743,4 +942,4 @@ class LegendDialog:
             # All rows built: enable live updates for subsequent user edits.
             live["on"] = True
 
-        SingleInstanceDialog.show_dialog(cls.KEY, "Legend", build, parent, width=980, height=900)
+        SingleInstanceDialog.show_dialog(cls.KEY, "Legend", build, parent, width=980, height=1040)

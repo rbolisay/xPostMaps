@@ -5,6 +5,7 @@ from __future__ import annotations
 from PySide6.QtCore import QThread, Signal
 
 from xpostmaps.core.models import MapData, PostmapInfo, ProjectSettings
+from xpostmaps.core.navplan_catalog_utils import resolve_navplan_files
 from xpostmaps.parsers.directory_parser import parse_navigation_directory, resolve_nav_files
 from xpostmaps.parsers.preplot_parser import resolve_preplot_files
 
@@ -30,12 +31,14 @@ class ParseWorker(QThread):
         try:
             has_nav = bool(resolve_nav_files(self._settings))
             has_preplot = bool(resolve_preplot_files(self._settings))
+            has_navplan = bool(resolve_navplan_files(self._settings))
             explicit = (
                 self._settings.nav_files_explicit
                 or self._settings.preplot_files_explicit
+                or self._settings.navplan_files_explicit
             )
-            if not has_nav and not has_preplot and not explicit:
-                self.failed.emit("Select P111/P190 or Preplot/Navplan files first.")
+            if not has_nav and not has_preplot and not has_navplan and not explicit:
+                self.failed.emit("Select P111/P190, preplot, or navplan files first.")
                 return
 
             def callback(pct: int, msg: str) -> None:
@@ -50,9 +53,10 @@ class ParseWorker(QThread):
             if (
                 not map_data.segments
                 and not map_data.preplot_segments
+                and not map_data.navplan_segments
                 and not explicit
             ):
-                self.failed.emit("No navigation or preplot records found in selected files.")
+                self.failed.emit("No navigation, preplot, or navplan records found in selected files.")
                 return
             self.finished_ok.emit(map_data)
         except Exception as exc:  # noqa: BLE001

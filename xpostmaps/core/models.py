@@ -74,6 +74,17 @@ class PreplotCatalogEntry:
 
 
 @dataclass
+class NavplanCatalogEntry:
+    navplan_number: int = 0
+    navplan_name: str = ""
+    file_path: str = ""
+    crs_code: str = ""
+    fsp: int = 0
+    lsp: int = 0
+    total_points: int = 0
+
+
+@dataclass
 class PreplotLegendEntry:
     name: str = ""
     preplot_source_index: int = 0
@@ -83,6 +94,19 @@ class PreplotLegendEntry:
     line_width: float = 0.9
     dot_radius: float = 3.0
     hidden: bool = False
+
+
+@dataclass
+class NavplanLegendEntry:
+    name: str = ""
+    line_style: LineStyle = LineStyle.SOLID
+    color: str = "#22c55e"
+    opacity: float = 1.0
+    line_width: float = 0.9
+    dot_radius: float = 3.0
+    hidden: bool = False
+    navplan_source_indices: list[int] = field(default_factory=list)
+    navplan_filter_active: bool = False
 
 
 @dataclass
@@ -103,6 +127,7 @@ class PostplotLegendEntry:
 class LegendConfig:
     areas: list[AreaLegendEntry] = field(default_factory=list)
     preplot_lines: list[PreplotLegendEntry] = field(default_factory=list)
+    navplan_lines: list[NavplanLegendEntry] = field(default_factory=list)
     postplot_lines: list[PostplotLegendEntry] = field(default_factory=list)
 
     @staticmethod
@@ -215,6 +240,10 @@ class ProjectSettings:
     preplot_files_explicit: bool = False
     preplots_dir: str = ""
     preplot_catalog: list[PreplotCatalogEntry] = field(default_factory=list)
+    navplan_files: list[str] = field(default_factory=list)
+    navplan_files_explicit: bool = False
+    navplans_dir: str = ""
+    navplan_catalog: list[NavplanCatalogEntry] = field(default_factory=list)
     overlay_dir: str = ""  # legacy; migrated to preplot_files
     display_mode: DisplayMode = DisplayMode.LINES
     show_source: bool = True
@@ -278,6 +307,7 @@ class MapData:
     segments: list[LineSegment] = field(default_factory=list)
     overlay_segments: list[LineSegment] = field(default_factory=list)
     preplot_segments: list[LineSegment] = field(default_factory=list)
+    navplan_segments: list[LineSegment] = field(default_factory=list)
     sequences: list[LineSequence] = field(default_factory=list)
     positions: list[PositionRecord] = field(default_factory=list)
     bounds: SurveyBounds = field(default_factory=SurveyBounds)
@@ -287,6 +317,7 @@ class MapData:
     nav_file_cache: dict[str, tuple[float, int, str]] = field(default_factory=dict)
     survey_perimeters: list[SurveyPerimeter] = field(default_factory=list)
     preplot_file_order: list[str] = field(default_factory=list)
+    navplan_file_order: list[str] = field(default_factory=list)
     stats: dict[str, Any] = field(default_factory=dict)
     # Transient flag: positions already exist in the DB and have not been
     # re-parsed/modified in memory. When True and ``positions`` is empty, the

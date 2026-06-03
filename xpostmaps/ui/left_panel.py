@@ -22,6 +22,7 @@ class LeftPanel(GlassPanel):
     browse_load_project = Signal()
     save_project = Signal()
     select_preplot_navplan = Signal()
+    import_navplan = Signal()
     select_p111_p190_dir = Signal()
     open_import_polygons = Signal()
     select_logo = Signal()
@@ -71,11 +72,17 @@ class LeftPanel(GlassPanel):
         dirs_title.setObjectName("sectionTitle")
         layout.addWidget(dirs_title)
 
-        self._preplot_btn = QPushButton("Import Preplot/Navplan")
+        self._preplot_btn = QPushButton("Import Preplot")
         self._preplot_btn.setObjectName("dirBtn")
         self._preplot_path = QLabel("Not set")
         self._preplot_path.setWordWrap(True)
         self._preplot_path.setStyleSheet("color: #8b949e; font-size: 11px;")
+
+        self._navplan_btn = QPushButton("Import Navplan")
+        self._navplan_btn.setObjectName("dirBtn")
+        self._navplan_path = QLabel("Not set")
+        self._navplan_path.setWordWrap(True)
+        self._navplan_path.setStyleSheet("color: #8b949e; font-size: 11px;")
 
         self._p111_btn = QPushButton("Import P111/P190")
         self._p111_btn.setObjectName("dirBtn")
@@ -85,12 +92,14 @@ class LeftPanel(GlassPanel):
 
         for btn, path_lbl in (
             (self._preplot_btn, self._preplot_path),
+            (self._navplan_btn, self._navplan_path),
             (self._p111_btn, self._p111_path),
         ):
             layout.addWidget(btn)
             layout.addWidget(path_lbl)
 
         self._preplot_btn.clicked.connect(self.select_preplot_navplan.emit)
+        self._navplan_btn.clicked.connect(self.import_navplan.emit)
         self._p111_btn.clicked.connect(self.select_p111_p190_dir.emit)
 
         self._import_polygons_btn = QPushButton("Import Polygons")
@@ -153,12 +162,16 @@ class LeftPanel(GlassPanel):
     def set_preplot_navplan(self, path: str) -> None:
         self._preplot_path.setText(self._short_path(path) if path else "Not set")
 
+    def set_navplan(self, path: str) -> None:
+        self._navplan_path.setText(self._short_path(path) if path else "Not set")
+
     def set_import_polygons(self, summary: str) -> None:
         self._import_polygons_path.setText(summary if summary else "Not set")
 
     def set_preplot_dependent_controls_enabled(self, enabled: bool) -> None:
         """Enable nav/tools only after preplot/navplan files are loaded."""
         for widget in (
+            self._navplan_btn,
             self._p111_btn,
             self._import_polygons_btn,
             self._logo_btn,

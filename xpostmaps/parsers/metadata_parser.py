@@ -6,7 +6,7 @@ import csv
 import re
 from pathlib import Path
 
-from xpostmaps.core.crs_utils import normalize_epsg
+from xpostmaps.core.crs_utils import infer_epsg_from_header, normalize_epsg
 from xpostmaps.core.models import PostmapInfo, ProjectSettings
 
 EPSG_RE = re.compile(r"EPSG\s*[:\s]?\s*(\d+)", re.IGNORECASE)
@@ -136,12 +136,14 @@ def parse_p190_metadata(path: Path) -> dict[str, str]:
             elif line.startswith("H1400"):
                 value = _p190_value(line)
                 parts = value.split()
-                if parts:
-                    _set_if_empty(info, "geographic datum", parts[0])
-                    if len(parts) >= 2:
-                        _set_if_empty(info, "crs name", " ".join(parts[1:3]))
+                if value:
+                    _set_if_empty(info, "geographic datum", value)
+                if parts and len(parts) >= 2:
+                    _set_if_empty(info, "spheroid", parts[1])
             elif line.startswith("H1800"):
                 _set_if_empty(info, "projection", _p190_value(line))
+            elif line.startswith("H1900"):
+                _set_if_empty(info, "projection zone", _p190_value(line))
             elif "CRS EPSG Code" in line:
                 match = TRAILING_INT_RE.search(line)
                 if match:
@@ -154,6 +156,11 @@ def parse_p190_metadata(path: Path) -> dict[str, str]:
                 match = TRAILING_FLOAT_RE.search(line)
                 if match:
                     _set_if_empty(info, "shot point interval", match.group(1))
+            elif "PREPLOT LINE NUMBER" in line.upper():
+                value = _p190_value(line)
+                if not value and ":" in line:
+                    value = line.rsplit(":", 1)[-1].strip()
+                _set_if_empty(info, "preplot line number", value)
             elif "NUMBER OF SAILLINES" in line:
                 match = TRAILING_INT_RE.search(line)
                 if match:
@@ -170,6 +177,15 @@ def parse_p190_metadata(path: Path) -> dict[str, str]:
     )
     if epsg:
         _set_if_empty(info, "epsg code", epsg)
+    else:
+        inferred = infer_epsg_from_header(
+            info.get("geographic datum", ""),
+            info.get("projection", ""),
+            info.get("projection zone", ""),
+        )
+        if inferred:
+            _set_if_empty(info, "epsg code", inferred)
+            _set_if_empty(info, "crs name", f"EPSG:{inferred}")
     return info
 
 

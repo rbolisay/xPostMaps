@@ -8,6 +8,10 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from xpostmaps.core.legend_utils import legend_from_dict, legend_to_dict
+from xpostmaps.core.navplan_catalog_utils import (
+    navplan_catalog_from_json,
+    navplan_catalog_to_json,
+)
 from xpostmaps.core.preplot_catalog_utils import catalog_from_json, catalog_to_json
 from xpostmaps.core.sequence_utils import nav_cache_from_json, nav_cache_to_json
 from xpostmaps.core.models import (
@@ -172,6 +176,22 @@ class Database:
             self._conn.execute(
                 "ALTER TABLE projects ADD COLUMN minimap_view_json TEXT DEFAULT '{}'"
             )
+        if "navplan_files_json" not in cols:
+            self._conn.execute(
+                "ALTER TABLE projects ADD COLUMN navplan_files_json TEXT DEFAULT '[]'"
+            )
+        if "navplan_files_explicit" not in cols:
+            self._conn.execute(
+                "ALTER TABLE projects ADD COLUMN navplan_files_explicit INTEGER DEFAULT 0"
+            )
+        if "navplans_dir" not in cols:
+            self._conn.execute(
+                "ALTER TABLE projects ADD COLUMN navplans_dir TEXT DEFAULT ''"
+            )
+        if "navplan_catalog_json" not in cols:
+            self._conn.execute(
+                "ALTER TABLE projects ADD COLUMN navplan_catalog_json TEXT DEFAULT '[]'"
+            )
 
         seg_cols = {row[1] for row in self._conn.execute("PRAGMA table_info(segments)")}
         if "sequence_id" not in seg_cols:
@@ -236,6 +256,10 @@ class Database:
         nav_files_json = json.dumps(settings.nav_files)
         preplot_files_json = json.dumps(settings.preplot_files)
         preplot_catalog_json = json.dumps(catalog_to_json(settings.preplot_catalog))
+        navplan_files_json = json.dumps(settings.navplan_files)
+        navplan_catalog_json = json.dumps(
+            navplan_catalog_to_json(settings.navplan_catalog)
+        )
         legend_json = json.dumps(legend_to_dict(settings.legend_config))
         nav_cache_json = json.dumps(nav_cache_to_json(map_data.nav_file_cache))
         minimap_view_json = json.dumps(settings.minimap_view)
@@ -256,7 +280,9 @@ class Database:
                     stats_json=?, source_files_json=?, nav_files_json=?,
                     preplot_files_json=?, nav_file_cache_json=?, logo_path=?,
                     legend_config_json=?, nav_files_explicit=?, preplot_files_explicit=?,
-                    preplot_catalog_json=?, minimap_view_json=?, updated_at=?
+                    preplot_catalog_json=?, minimap_view_json=?,
+                    navplan_files_json=?, navplan_files_explicit=?,
+                    navplans_dir=?, navplan_catalog_json=?, updated_at=?
                 WHERE id=?
                 """,
                 (
@@ -282,6 +308,10 @@ class Database:
                     int(settings.preplot_files_explicit),
                     preplot_catalog_json,
                     minimap_view_json,
+                    navplan_files_json,
+                    int(settings.navplan_files_explicit),
+                    settings.navplans_dir,
+                    navplan_catalog_json,
                     now,
                     project_id,
                 ),
@@ -301,8 +331,9 @@ class Database:
                     source_files_json, nav_files_json, preplot_files_json,
                     nav_file_cache_json, logo_path, legend_config_json,
                     nav_files_explicit, preplot_files_explicit, preplot_catalog_json,
-                    minimap_view_json, created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    minimap_view_json, navplan_files_json, navplan_files_explicit,
+                    navplans_dir, navplan_catalog_json, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     settings.name,
@@ -328,6 +359,10 @@ class Database:
                     int(settings.preplot_files_explicit),
                     preplot_catalog_json,
                     minimap_view_json,
+                    navplan_files_json,
+                    int(settings.navplan_files_explicit),
+                    settings.navplans_dir,
+                    navplan_catalog_json,
                     now,
                     now,
                 ),
@@ -337,6 +372,7 @@ class Database:
         self._save_segments(project_id, "main", map_data.segments)
         self._save_segments(project_id, "overlay", map_data.overlay_segments)
         self._save_segments(project_id, "preplot", map_data.preplot_segments)
+        self._save_segments(project_id, "navplan", map_data.navplan_segments)
         self._save_sequences(project_id, map_data.sequences)
         if not skip_positions:
             self._save_positions(project_id, map_data.positions)
@@ -526,6 +562,17 @@ class Database:
             preplot_catalog = catalog_from_json(
                 json.loads(row["preplot_catalog_json"] or "[]")
             )
+        navplan_files = []
+        if "navplan_files_json" in row.keys():
+            navplan_files = json.loads(row["navplan_files_json"] or "[]")
+        navplan_files_explicit = False
+        if "navplan_files_explicit" in row.keys():
+            navplan_files_explicit = bool(row["navplan_files_explicit"])
+        navplan_catalog = []
+        if "navplan_catalog_json" in row.keys():
+            navplan_catalog = navplan_catalog_from_json(
+                json.loads(row["navplan_catalog_json"] or "[]")
+            )
 
         settings = ProjectSettings(
             name=row["name"],
@@ -536,6 +583,10 @@ class Database:
             preplot_files_explicit=preplot_files_explicit or bool(preplot_files),
             preplots_dir=row["preplots_dir"] or "",
             preplot_catalog=preplot_catalog,
+            navplan_files=navplan_files,
+            navplan_files_explicit=navplan_files_explicit or bool(navplan_files),
+            navplans_dir=(row["navplans_dir"] or "") if "navplans_dir" in row.keys() else "",
+            navplan_catalog=navplan_catalog,
             overlay_dir=row["overlay_dir"] or "",
             display_mode=DisplayMode(row["display_mode"]),
             show_source=bool(row["show_source"]),
@@ -584,6 +635,7 @@ class Database:
             segments=self._load_segments(project_id, "main"),
             overlay_segments=self._load_segments(project_id, "overlay"),
             preplot_segments=self._load_segments(project_id, "preplot"),
+            navplan_segments=self._load_segments(project_id, "navplan"),
             sequences=self._load_sequences(project_id),
             positions=positions,
             positions_persisted=positions_persisted,

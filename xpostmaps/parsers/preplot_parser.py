@@ -12,20 +12,26 @@ import numpy as np
 
 from xpostmaps.core.models import LineSegment, PositionRecord, RecordType
 from xpostmaps.parsers.metadata_parser import parse_file_metadata
+from xpostmaps.parsers.p111_parser import parse_p111_file
 from xpostmaps.utils.numba_accel import infer_line_direction
 
 PREPLOT_EXTENSIONS = {
     ".p111",
     ".p190",
+    ".190",
     ".P111",
     ".P190",
-    ".nav",
-    ".navplan",
-    ".plan",
     ".txt",
 }
 
 NAVPLAN_EXTENSIONS = {".nav", ".navplan", ".plan"}
+NAVPLAN_IMPORT_EXTENSIONS = {
+    ".navplan",
+    ".p190",
+    ".190",
+    ".p111",
+    "",
+}
 
 _V_RECORD_RE = re.compile(
     r"^V(?P<line>[A-Za-z0-9_]+)\s+"
@@ -40,6 +46,13 @@ _S_PREPLOT_LAT_TIGHT_RE = re.compile(r"^(\d{1,6})(\d{6}\.\d{2}[NS])")
 _S_LON_RE = re.compile(r"(\d{6}\.\d{2}[EW])\s+(.+)")
 _S_LON_TIGHT_RE = re.compile(r"(\d{6}\.\d{2}[EW])(.+)")
 _EN_PAIR_RE = re.compile(r"(\d+\.\d)(\d+\.\d)")
+_S_SOURCE_RE = re.compile(
+    r"^S(?P<line>.{12}).*?"
+    r"(?P<shotpoint>\d{4,6})"
+    r"(?P<lat>\d{4}\s?\d{2}\.\d{2}[NS])"
+    r"(?P<lon>\d{5}\s?\d{2}\.\d{2}[EW])"
+    r"\s*(?P<coords>.*)$"
+)
 
 
 @dataclass
@@ -87,6 +100,8 @@ def detect_preplot_format(path: Path) -> str:
     if suffix == ".p111":
         return "p111"
     if suffix == ".p190":
+        return "p190"
+    if suffix == ".190":
         return "p190"
     if suffix in NAVPLAN_EXTENSIONS:
         return "navplan"
@@ -210,6 +225,28 @@ def _parse_p190_s_record_preplot(line: str) -> dict | None:
     line_name = line[1:13].strip()
     if not line_name:
         return None
+    source_match = _S_SOURCE_RE.match(line)
+    if source_match:
+        shotpoint = source_match.group("shotpoint")
+        coord_text = source_match.group("coords").strip()
+        en_match = _EN_PAIR_RE.search(coord_text)
+        if en_match:
+            easting = _to_float(en_match.group(1))
+            northing = _to_float(en_match.group(2))
+        else:
+            parts = re.findall(r"\d+\.\d+", coord_text)
+            if len(parts) < 2:
+                return None
+            easting = _to_float(parts[0])
+            northing = _to_float(parts[1])
+        if not (easting == easting and northing == northing):
+            return None
+        return {
+            "line_name": line_name,
+            "shotpoint": shotpoint,
+            "easting": easting,
+            "northing": northing,
+        }
     remainder = line[19:].lstrip()
     sp_lat_match = _S_PREPLOT_LAT_RE.match(remainder) or _S_PREPLOT_LAT_TIGHT_RE.match(remainder)
     if not sp_lat_match:
@@ -323,7 +360,7 @@ def _parse_p190_preplot_file(path: Path) -> tuple[list[LineSegment], list[Positi
     return segments, records, kind
 
 
-def _parse_navplan_file(path: Path) -> tuple[list[LineSegment], list[PositionRecord], str]:
+def _parse_p190_navplan_file(path: Path) -> tuple[list[LineSegment], list[PositionRecord], str]:
     file_name = path.name
     line_name = path.stem
     shotpoints: list[dict] = []
@@ -352,12 +389,67 @@ def _parse_navplan_file(path: Path) -> tuple[list[LineSegment], list[PositionRec
     return segments, records, "navplan"
 
 
+def _records_to_navplan_segments(
+    file_name: str,
+    records: list[PositionRecord],
+) -> tuple[list[LineSegment], list[PositionRecord], str]:
+    points_by_line: dict[str, list[dict]] = defaultdict(list)
+    for record in records:
+        line_name = record.line_name.strip() or Path(file_name).stem
+        points_by_line[line_name].append(
+            {
+                "shotpoint": str(record.point_num),
+                "easting": record.x,
+                "northing": record.y,
+            }
+        )
+
+    segments: list[LineSegment] = []
+    navplan_records: list[PositionRecord] = []
+    for line_name in sorted(points_by_line):
+        points = sorted(
+            points_by_line[line_name],
+            key=lambda item: int(item["shotpoint"]) if str(item["shotpoint"]).isdigit() else 0,
+        )
+        if len(points) < 2:
+            continue
+        seg, recs = _points_to_segment(file_name, line_name, points, RecordType.NAVPLAN)
+        segments.append(seg)
+        navplan_records.extend(recs)
+    return segments, navplan_records, "navplan"
+
+
+def _parse_p111_navplan_file(path: Path) -> tuple[list[LineSegment], list[PositionRecord], str]:
+    source_records = [
+        record
+        for record in parse_p111_file(path)
+        if record.record_type == RecordType.SOURCE
+    ]
+    return _records_to_navplan_segments(path.name, source_records)
+
+
+def parse_navplan_source_file(path: Path) -> PreplotParseResult:
+    """Parse source positions from a navplan file into NAVPLAN segments."""
+    fmt = detect_preplot_format(path)
+    if fmt == "p111":
+        segments, records, kind = _parse_p111_navplan_file(path)
+    else:
+        segments, records, kind = _parse_p190_navplan_file(path)
+    metadata = parse_file_metadata(path, "p111" if fmt == "p111" else "p190")
+    return PreplotParseResult(
+        segments=segments,
+        records=records,
+        metadata=metadata,
+        kind=kind,
+    )
+
+
 def parse_preplot_file(path: Path) -> PreplotParseResult:
     fmt = detect_preplot_format(path)
     if fmt == "p111":
         segments, records, kind = _parse_p111_preplot_file(path)
     elif fmt == "navplan":
-        segments, records, kind = _parse_navplan_file(path)
+        segments, records, kind = _parse_p190_navplan_file(path)
     else:
         segments, records, kind = _parse_p190_preplot_file(path)
 
