@@ -92,7 +92,6 @@ class PostmapInfoCard(QWidget):
 
     def _header_font(self) -> QFont:
         font = QFont("Segoe UI")
-        # Client/Area/Project header is the largest text on the card.
         font.setPointSizeF(13 * self._text_scale)
         font.setWeight(QFont.Weight.Bold)
         return font

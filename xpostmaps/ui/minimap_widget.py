@@ -73,9 +73,11 @@ class MinimapViewBox(pg.ViewBox):
 class MinimapWidget(QWidget):
     view_changed = Signal(dict)
 
+    _HEIGHT = 215  # 150 px + 30%, then +10% (195 × 1.1)
+
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
-        self.setFixedHeight(150)
+        self.setFixedHeight(self._HEIGHT)
         self._suppress_view_changed = False
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
