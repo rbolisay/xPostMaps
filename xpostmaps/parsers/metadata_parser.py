@@ -226,7 +226,9 @@ def metadata_to_postmap(
 
     def pick(base_value: str, *meta_keys: str) -> str:
         from_meta = _lookup(info, *meta_keys)
-        return from_meta or base_value
+        if (base_value or "").strip():
+            return base_value.strip()
+        return from_meta
 
     result = PostmapInfo(
         company_name=base.company_name,

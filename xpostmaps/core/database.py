@@ -345,7 +345,12 @@ class Database:
         return int(project_id)
 
     def save_project_metadata(self, settings: ProjectSettings, map_data: MapData) -> int:
-        """Update project-level settings without rewriting heavy geometry tables."""
+        """Persist UI metadata (legend, minimap, display flags) without touching geometry.
+
+        Project information, bounds, stats, and nav cache are intentionally
+        excluded so legend/minimap autosave cannot overwrite user-edited
+        postmap fields or parsed survey data.
+        """
         row = self._conn.execute(
             "SELECT id FROM projects WHERE name = ?", (settings.name,)
         ).fetchone()
@@ -357,38 +362,19 @@ class Database:
         self._conn.execute(
             """
             UPDATE projects SET
-                p111_p190_dir=?, overlay_dir=?, preplots_dir=?,
                 display_mode=?, show_source=?, show_vessel=?,
                 show_overlay=?, show_preplots=?,
-                postmap_info_json=?, bounds_json=?, geo_bounds_json=?,
-                stats_json=?, source_files_json=?, nav_files_json=?,
-                preplot_files_json=?, nav_file_cache_json=?, logo_path=?,
-                legend_config_json=?, nav_files_explicit=?, preplot_files_explicit=?,
-                preplot_catalog_json=?, minimap_view_json=?, updated_at=?
+                logo_path=?, legend_config_json=?, minimap_view_json=?, updated_at=?
             WHERE id=?
             """,
             (
-                settings.p111_p190_dir,
-                settings.overlay_dir,
-                settings.preplots_dir,
                 settings.display_mode.value,
                 int(settings.show_source),
                 int(settings.show_vessel),
                 int(settings.show_overlay),
                 int(settings.show_preplots),
-                json.dumps(map_data.postmap_info.__dict__, default=str),
-                json.dumps(map_data.bounds.__dict__),
-                json.dumps(map_data.geo_bounds.__dict__),
-                json.dumps(map_data.stats),
-                json.dumps(map_data.source_files),
-                json.dumps(settings.nav_files),
-                json.dumps(settings.preplot_files),
-                json.dumps(nav_cache_to_json(map_data.nav_file_cache)),
                 settings.logo_path,
                 json.dumps(legend_to_dict(settings.legend_config)),
-                int(settings.nav_files_explicit),
-                int(settings.preplot_files_explicit),
-                json.dumps(catalog_to_json(settings.preplot_catalog)),
                 json.dumps(settings.minimap_view),
                 now,
                 project_id,

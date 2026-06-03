@@ -192,19 +192,28 @@ class MainWindow(QMainWindow):
         parsed: PostmapInfo,
         preserved: PostmapInfo | None,
     ) -> PostmapInfo:
+        """Keep in-memory / user-edited project info when re-parsing files.
+
+        Parsed headers only fill fields that are still empty in the preserved
+        copy. Non-empty preserved values always win so autosave and manual edits
+        are not overwritten by file metadata.
+        """
         if preserved is None:
             return parsed
         for field in PostmapInfo.__dataclass_fields__:
             if field == "extra":
                 continue
             preserved_val = getattr(preserved, field)
-            parsed_val = getattr(parsed, field)
-            if field == "company_name" and preserved_val:
+            if isinstance(preserved_val, str) and preserved_val.strip():
+                setattr(parsed, field, preserved_val.strip())
+            elif preserved_val and not isinstance(preserved_val, str):
                 setattr(parsed, field, preserved_val)
-            elif preserved_val and not parsed_val:
-                setattr(parsed, field, preserved_val)
+        if preserved.extra:
+            parsed.extra = {**parsed.extra, **preserved.extra}
         if parsed.epsg_code:
             parsed.epsg_code = normalize_epsg(parsed.epsg_code)
+        elif preserved.epsg_code:
+            parsed.epsg_code = normalize_epsg(preserved.epsg_code)
         return parsed
 
     def _refresh_ui(self) -> None:
@@ -367,19 +376,8 @@ class MainWindow(QMainWindow):
         self._ensure_project_name()
         self._start_parse()
 
-    def _select_p111_dir(self) -> None:
-        result = NavFilePickerDialog.pick(
-            self,
-            title="Select P111/P190 Files",
-            hint="Select a folder to scan for .p111/.p190 files, or add individual files.",
-            extensions=NAV_EXTENSIONS,
-            file_filter="Navigation Files (*.p111 *.p190 *.txt *.nav);;All Files (*)",
-            initial_dir=self._settings.p111_p190_dir or "",
-            initial_files=self._settings.nav_files or None,
-        )
-        if result is None:
-            return
-        files, folder = result
+    def _apply_nav_file_selection(self, files: list[str], folder: str) -> None:
+        """Apply nav file list and re-parse so the map and database stay in sync."""
         self._settings.nav_files = files
         self._settings.nav_files_explicit = True
         self._settings.p111_p190_dir = folder
@@ -394,6 +392,21 @@ class MainWindow(QMainWindow):
         self._left.set_p111_p190_dir(display)
         self._ensure_project_name()
         self._start_parse()
+
+    def _select_p111_dir(self) -> None:
+        result = NavFilePickerDialog.pick(
+            self,
+            title="Select P111/P190 Files",
+            hint="Select a folder to scan for .p111/.p190 files, or add individual files.",
+            extensions=NAV_EXTENSIONS,
+            file_filter="Navigation Files (*.p111 *.p190 *.txt *.nav);;All Files (*)",
+            initial_dir=self._settings.p111_p190_dir or "",
+            initial_files=self._settings.nav_files or None,
+            on_rescan=self._apply_nav_file_selection,
+        )
+        if result is None:
+            return
+        self._apply_nav_file_selection(*result)
 
     def _start_parse(self) -> None:
         if self._worker and self._worker.isRunning():

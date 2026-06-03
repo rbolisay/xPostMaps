@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from pathlib import Path
 
 from PySide6.QtCore import Qt
@@ -31,6 +32,7 @@ class NavFilePickerDialog(QDialog):
         file_filter: str = "All Files (*)",
         initial_dir: str = "",
         initial_files: list[str] | None = None,
+        on_rescan: Callable[[list[str], str], None] | None = None,
     ) -> None:
         super().__init__(parent)
         self.setWindowTitle(title)
@@ -43,6 +45,7 @@ class NavFilePickerDialog(QDialog):
         self._initial_dir = initial_dir
         self._selected_files: list[str] = list(initial_files or [])
         self._folder: str = initial_dir
+        self._on_rescan = on_rescan
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(16, 16, 16, 16)
@@ -77,6 +80,10 @@ class NavFilePickerDialog(QDialog):
         layout.addWidget(self._list, stretch=1)
 
         action_row = QHBoxLayout()
+        rescan_btn = QPushButton("Rescan")
+        rescan_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        rescan_btn.setAutoDefault(False)
+        rescan_btn.clicked.connect(self._rescan)
         ok_btn = QPushButton("OK")
         ok_btn.setObjectName("primaryBtn")
         cancel_btn = QPushButton("Cancel")
@@ -84,6 +91,7 @@ class NavFilePickerDialog(QDialog):
         cancel_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         ok_btn.clicked.connect(self.accept)
         cancel_btn.clicked.connect(self.reject)
+        action_row.addWidget(rescan_btn)
         action_row.addStretch()
         action_row.addWidget(ok_btn)
         action_row.addWidget(cancel_btn)
@@ -157,6 +165,30 @@ class NavFilePickerDialog(QDialog):
         self._selected_files = [path for path in self._selected_files if path not in remove_paths]
         self._refresh_list()
 
+    def _rescan(self) -> None:
+        """Refresh the file list from disk and notify the host to re-parse."""
+        before = len(self._selected_files)
+        if self._folder:
+            self._selected_files = self._collect_from_folder(self._folder)
+        else:
+            self._selected_files = [
+                path for path in self._selected_files if Path(path).is_file()
+            ]
+        self._refresh_list()
+        after = len(self._selected_files)
+        if self._folder:
+            note = f"Rescanned folder — {after} file(s)"
+        else:
+            removed = before - after
+            note = f"{after} file(s)"
+            if removed:
+                note += f" ({removed} removed)"
+            else:
+                note += " (list unchanged)"
+        self._summary.setText(f"Folder: {self._folder or '(none)'}  —  {note}")
+        if self._on_rescan:
+            self._on_rescan(self._selected_files, self._folder)
+
     @classmethod
     def pick(
         cls,
@@ -168,6 +200,7 @@ class NavFilePickerDialog(QDialog):
         file_filter: str = "All Files (*)",
         initial_dir: str = "",
         initial_files: list[str] | None = None,
+        on_rescan: Callable[[list[str], str], None] | None = None,
     ) -> tuple[list[str], str] | None:
         dialog = cls(
             parent,
@@ -177,6 +210,7 @@ class NavFilePickerDialog(QDialog):
             file_filter=file_filter,
             initial_dir=initial_dir,
             initial_files=initial_files,
+            on_rescan=on_rescan,
         )
         if dialog.exec() != QDialog.DialogCode.Accepted:
             return None
