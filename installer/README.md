@@ -24,9 +24,10 @@ dist\TierMaps-0.1.0-Setup.exe
 
 The build script:
 
-1. Copies `xpostmaps`, `run.py`, and `requirements.txt` into `installer\staging`
-2. Creates a virtual environment and installs dependencies into staging
-3. Compiles the NSIS script into a single setup executable
+1. Builds `TierMaps.ico` from `TierMaps.png`
+2. Copies `xpostmaps`, `run.py`, and `requirements.txt` into `installer\staging`
+3. Downloads Windows **embeddable Python** and installs dependencies into a portable `python\` folder (relocatable — works in `Program Files` on any PC)
+4. Compiles the NSIS script into a single setup executable
 
 ## What gets installed
 

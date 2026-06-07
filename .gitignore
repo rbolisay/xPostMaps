@@ -9,3 +9,5 @@ data/
 dist/
 build/
 installer/staging/
+installer/cache/
+installer/TierMaps.ico

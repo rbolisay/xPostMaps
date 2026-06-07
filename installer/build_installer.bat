@@ -11,6 +11,12 @@ if not exist "%NSIS%" (
 
 set "STAGE=installer\staging"
 set "DIST=dist"
+set "CACHE=installer\cache"
+set "PYVER=3.13.7"
+set "EMBED_ZIP=%CACHE%\python-%PYVER%-embed-amd64.zip"
+set "EMBED_URL=https://www.python.org/ftp/python/%PYVER%/python-%PYVER%-embed-amd64.zip"
+set "GET_PIP=%CACHE%\get-pip.py"
+set "GET_PIP_URL=https://bootstrap.pypa.io/get-pip.py"
 
 echo.
 echo ========================================
@@ -24,12 +30,31 @@ if errorlevel 1 (
     exit /b 1
 )
 
-echo [1/5] Preparing staging folder...
-if exist "%STAGE%" rmdir /s /q "%STAGE%"
+if not exist "%CACHE%" mkdir "%CACHE%"
+
+echo [1/7] Building TierMaps.ico from TierMaps.png...
+if not exist "TierMaps.png" (
+    echo ERROR: TierMaps.png not found in repository root.
+    exit /b 1
+)
+if not exist "venv\Scripts\python.exe" (
+    echo ERROR: Development venv not found. Run install.bat first.
+    exit /b 1
+)
+venv\Scripts\pip.exe install pillow --quiet
+if errorlevel 1 exit /b 1
+venv\Scripts\python.exe installer\make_icon.py TierMaps.png installer\TierMaps.ico
+if errorlevel 1 exit /b 1
+
+echo [2/7] Preparing staging folder...
+if exist "%STAGE%" (
+    powershell -NoProfile -Command "Remove-Item -LiteralPath '%STAGE%' -Recurse -Force -ErrorAction SilentlyContinue"
+)
 mkdir "%STAGE%"
 mkdir "%STAGE%\data" 2>nul
+mkdir "%STAGE%\python\Lib\site-packages" 2>nul
 
-echo [2/5] Copying application files...
+echo [3/7] Copying application files...
 robocopy "xpostmaps" "%STAGE%\xpostmaps" /E /NFL /NDL /NJH /NJS /NC /NS /NP ^
     /XD __pycache__ .pytest_cache ^
     /XF *.pyc *.pyo
@@ -38,35 +63,75 @@ if %ERRORLEVEL% GEQ 8 exit /b 1
 copy /Y "run.py" "%STAGE%\" >nul
 copy /Y "requirements.txt" "%STAGE%\" >nul
 copy /Y "installer\TierMaps.bat" "%STAGE%\TierMaps.bat" >nul
-
+copy /Y "TierMaps.png" "%STAGE%\TierMaps.png" >nul
+copy /Y "installer\TierMaps.ico" "%STAGE%\TierMaps.ico" >nul
 echo. > "%STAGE%\data\.gitkeep"
 
-echo [3/5] Building embedded Python environment...
-if exist "venv\Scripts\python.exe" (
-    echo       Reusing existing .\venv from development tree...
-    robocopy "venv" "%STAGE%\venv" /E /NFL /NDL /NJH /NJS /NC /NS /NP ^
-        /XD __pycache__ /XF *.pyc *.pyo
-    if %ERRORLEVEL% GEQ 8 (
-        echo ERROR: Failed to copy virtual environment into staging.
-        exit /b 1
-    )
-) else (
-    echo       Creating new venv and installing dependencies - may take several minutes...
-    python -m venv "%STAGE%\venv"
+echo [4/7] Downloading Windows embeddable Python %PYVER%...
+if not exist "%EMBED_ZIP%" (
+    powershell -NoProfile -Command ^
+        "Invoke-WebRequest -Uri '%EMBED_URL%' -OutFile '%EMBED_ZIP%'"
     if errorlevel 1 (
-        echo ERROR: Failed to create virtual environment in staging.
-        exit /b 1
-    )
-    "%STAGE%\venv\Scripts\python.exe" -m pip install --upgrade pip
-    if errorlevel 1 exit /b 1
-    "%STAGE%\venv\Scripts\pip.exe" install -r "%STAGE%\requirements.txt"
-    if errorlevel 1 (
-        echo ERROR: Failed to install Python dependencies.
+        echo ERROR: Failed to download embeddable Python.
         exit /b 1
     )
 )
 
-echo [4/5] Compiling NSIS installer...
+echo [5/7] Extracting portable Python runtime...
+powershell -NoProfile -Command ^
+    "Expand-Archive -LiteralPath '%EMBED_ZIP%' -DestinationPath '%STAGE%\python' -Force"
+if errorlevel 1 exit /b 1
+
+for %%F in ("%STAGE%\python\python*._pth") do (
+    >"%%F" (
+        echo python313.zip
+        echo .
+        echo Lib\site-packages
+        echo import site
+    )
+)
+
+if not exist "%GET_PIP%" (
+    powershell -NoProfile -Command ^
+        "Invoke-WebRequest -Uri '%GET_PIP_URL%' -OutFile '%GET_PIP%'"
+    if errorlevel 1 (
+        echo ERROR: Failed to download get-pip.py
+        exit /b 1
+    )
+)
+
+echo [6/7] Installing Python dependencies into portable runtime - may take several minutes...
+"%STAGE%\python\python.exe" "%GET_PIP%" --no-warn-script-location
+if errorlevel 1 exit /b 1
+
+"%STAGE%\python\python.exe" -m pip install --upgrade pip --no-warn-script-location
+if errorlevel 1 exit /b 1
+
+set "PYTHONNOUSERSITE=1"
+"%STAGE%\python\python.exe" -m pip install -r "%STAGE%\requirements.txt" ^
+    --no-warn-script-location --no-user --ignore-installed
+if errorlevel 1 (
+    echo ERROR: Failed to install Python dependencies into portable runtime.
+    exit /b 1
+)
+
+echo       Verifying portable runtime...
+set "PYTHONNOUSERSITE=1"
+"%STAGE%\python\python.exe" -c "import PySide6, pyqtgraph, numpy, numba, pyproj, shapefile; print('OK')"
+if errorlevel 1 (
+    echo ERROR: Portable runtime verification failed.
+    exit /b 1
+)
+
+set "QT_QPA_PLATFORM=offscreen"
+set "PYTHONNOUSERSITE=1"
+"%STAGE%\python\python.exe" -c "import sys; sys.path.insert(0, r'%CD%\%STAGE%'); from xpostmaps.ui.main_window import MainWindow; from PySide6.QtWidgets import QApplication; app=QApplication([]); MainWindow(); print('SMOKE_OK')"
+if errorlevel 1 (
+    echo ERROR: Application smoke test failed in staging.
+    exit /b 1
+)
+
+echo [7/7] Compiling NSIS installer...
 if not exist "%DIST%" mkdir "%DIST%"
 pushd installer
 "%NSIS%" /V2 "TierMaps.nsi"
@@ -77,12 +142,13 @@ if %RC% neq 0 (
     exit /b 1
 )
 
-echo [5/5] Done.
 echo.
+echo Done.
 for %%F in ("%DIST%\TierMaps-*-Setup.exe") do (
     echo Installer: %%~fF
     echo Size: %%~zF bytes
 )
 echo.
-echo You can distribute the Setup.exe to end users. They do not need Python installed.
+echo The installer uses a portable embedded Python runtime and does not require
+echo Python to be installed on the target machine.
 exit /b 0
