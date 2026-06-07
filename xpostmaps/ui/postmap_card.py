@@ -264,6 +264,35 @@ class PostmapInfoCard(QWidget):
         w.setLayout(grid)
         lay.addWidget(w)
 
+    def update_info_section(
+        self,
+        info: PostmapInfo,
+        bounds: SurveyBounds,
+    ) -> None:
+        """Update project header and metadata only (skip legend rebuild)."""
+        if self._last_args:
+            self._last_args = (info, bounds, self._last_args[2])
+        else:
+            self._last_args = (info, bounds, LegendConfig.default())
+
+        self._client.setText(f"Client Name: {info.client or '—'}")
+        self._area.setText(f"Area: {info.area or '—'}")
+        self._project.setText(f"Project Name: {info.project or '—'}")
+
+        if bounds.is_valid:
+            width_km = (bounds.xmax - bounds.xmin) / 1000
+            self._scale.set_km(max(round(width_km / 4) * 4, 4))
+        else:
+            self._scale.set_km(40)
+
+        ensure_layout(info)
+        left_rows = column_display_lines(info, 0)
+        right_rows = column_display_lines(info, 1)
+        self._set_metadata_columns(left_rows, right_rows)
+        self.updateGeometry()
+        self.adjustSize()
+        self.update()
+
     def update_content(
         self,
         info: PostmapInfo,

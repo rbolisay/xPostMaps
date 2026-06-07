@@ -205,6 +205,16 @@ class RightPane(PrintPanel):
             tight_zoom=not has_fullfold,
         )
 
+    def refresh_postmap_info(self, map_data: MapData | None) -> None:
+        """Refresh card text for project info edits without rebuilding minimap or legend."""
+        if map_data is None:
+            self._card.update_info_section(PostmapInfo(), SurveyBounds())
+            return
+        info = map_data.postmap_info
+        cached = self._card._last_args
+        bounds = cached[1] if cached and cached[1].is_valid else map_data.bounds
+        self._card.update_info_section(info, bounds)
+
     def prepare_export_snapshot(self, map_height: int | None = None) -> None:
         """Prepare right pane for PDF capture at true aspect (same height as map)."""
         self._minimap.set_export_mode(True)

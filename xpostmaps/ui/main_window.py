@@ -420,8 +420,8 @@ class MainWindow(QMainWindow):
         map_data = self._ensure_map_data()
         map_data.postmap_info = info
         self._ensure_project_info_date(map_data)
-        self._right.update_from_project(self._settings, map_data)
-        self._persist_project()
+        self._right.refresh_postmap_info(map_data)
+        self._schedule_metadata_autosave()
 
     def _select_preplot_navplan(self) -> None:
         PreplotNavplanDialog.open(

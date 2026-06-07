@@ -35,7 +35,8 @@ _EDIT_MIN_HEIGHT = 36
 _ROW_EXTRA = 10
 _COL_GAP = 14
 _LIST_FRAME_PAD = 6
-_MIN_COLUMN_WIDTH = 300
+_MIN_COLUMN_WIDTH = 360
+_ROW_HPAD = 16
 
 
 def _line_edit_height(metrics: QFontMetrics) -> int:
@@ -139,7 +140,7 @@ class _FieldRowWidget(QWidget):
         metrics = QFontMetrics(self.font())
         label = self.findChild(QLabel)
         label_w = label.minimumWidth() if label is not None else 0
-        available = max(column_width - label_w - 20, 80)
+        available = max(column_width - label_w - _ROW_HPAD, 120)
         self.setMinimumWidth(column_width)
         if self.edit is not None:
             self.edit.resize_to_available(available)
@@ -263,7 +264,7 @@ class ProjectInfoBoard(QWidget):
         if widget.edit is not None:
             widget.edit._resize_to_contents()
             edit_w = max(widget.edit.minimumWidth(), 80)
-        return label_w + edit_w + 28
+        return label_w + edit_w + _ROW_HPAD + 12
 
     def _column_fitted_width(self, list_widget: QListWidget) -> int:
         width = _MIN_COLUMN_WIDTH

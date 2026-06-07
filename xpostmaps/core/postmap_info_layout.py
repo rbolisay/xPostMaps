@@ -21,7 +21,7 @@ BUILTIN_LABELS: dict[str, str] = {
     "user_name": "User Name",
     "date": "Date",
     "crs_heading": "Coordinate Reference System",
-    "crs_name": "Name",
+    "crs_name": "CRS Name",
     "projection": "Projection",
     "epsg_code": "EPSG Code",
     "geographic_datum": "Geographic Datum",
@@ -151,8 +151,6 @@ def format_display_line(info: PostmapInfo, key: str, custom: dict[str, dict[str,
         code = normalize_epsg(field_value(info, key))
         authority = epsg_label(code) if code else "—"
         return f"Authority: {authority}"
-    if key == "crs_name":
-        return f"Name: {field_value(info, key) or '—'}"
     label = BUILTIN_LABELS.get(key, key)
     value = field_value(info, key) or "—"
     return f"{label}: {value}"

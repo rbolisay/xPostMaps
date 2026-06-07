@@ -5,6 +5,7 @@ from __future__ import annotations
 from datetime import date
 
 from PySide6.QtCore import Qt, QTimer
+from PySide6.QtGui import QFontMetrics
 from PySide6.QtWidgets import (
     QApplication,
     QHBoxLayout,
@@ -15,6 +16,7 @@ from PySide6.QtWidgets import (
     QPushButton,
     QVBoxLayout,
     QWidget,
+    QSizePolicy,
 )
 
 from xpostmaps.core.models import PostmapInfo
@@ -34,16 +36,13 @@ def _default_project_date(value: str = "") -> str:
 def _autosize_project_info_dialog(
     dialog: SingleInstanceDialog,
     board: ProjectInfoBoard,
-    header_edits: dict[str, AutoFitLineEdit],
 ) -> None:
     """Resize the dialog so all header fields and board rows are visible without clipping."""
     board.apply_fitted_geometry()
-    for edit in header_edits.values():
-        edit._resize_to_contents()
 
-    header_w = max((edit.minimumWidth() for edit in header_edits.values()), default=240) + 120
+    header_w = 520
     board_w = board.size().width()
-    content_w = max(board_w + 96, header_w, 560)
+    content_w = max(board_w + 96, header_w, 720)
 
     dialog.adjustSize()
     chrome_h = max(dialog.height() - board.height(), 220)
@@ -90,25 +89,36 @@ class PostmapInfoDialog:
 
             header_host = QWidget()
             header_layout = QVBoxLayout(header_host)
-            header_layout.setContentsMargins(40, 0, 40, 0)
+            header_layout.setContentsMargins(24, 0, 24, 0)
             header_layout.setSpacing(8)
-            header_layout.setAlignment(Qt.AlignmentFlag.AlignHCenter)
 
-            header_edits: dict[str, AutoFitLineEdit] = {}
+            header_edits: dict[str, QLineEdit] = {}
             header_labels = {
                 "client": "Client Name",
                 "area": "Area",
                 "project": "Project Name",
             }
+            label_min_w = max(
+                QFontMetrics(QLabel().font()).horizontalAdvance(text)
+                for text in header_labels.values()
+            ) + 12
             for key in LOCKED_HEADER_KEYS:
                 value = getattr(info, key, "") or ""
+                row = QHBoxLayout()
+                row.setSpacing(10)
                 lbl = QLabel(header_labels[key])
-                lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
-                edit = AutoFitLineEdit(value, min_chars=12)
+                lbl.setMinimumWidth(label_min_w)
+                lbl.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+                edit = QLineEdit(value)
+                edit.setObjectName("projectInfoLineEdit")
+                edit.setStyleSheet("font-size: 12px; padding: 7px 11px;")
+                edit.setMinimumHeight(AutoFitLineEdit.preferred_height())
+                edit.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
                 edit.setAlignment(Qt.AlignmentFlag.AlignLeft)
                 header_edits[key] = edit
-                header_layout.addWidget(lbl)
-                header_layout.addWidget(edit, alignment=Qt.AlignmentFlag.AlignHCenter)
+                row.addWidget(lbl)
+                row.addWidget(edit, stretch=1)
+                header_layout.addLayout(row)
 
             layout.addWidget(header_host)
 
@@ -120,18 +130,14 @@ class PostmapInfoDialog:
 
             autosize_timer = QTimer(dialog)
             autosize_timer.setSingleShot(True)
-            autosize_timer.setInterval(0)
+            autosize_timer.setInterval(100)
 
             def schedule_autosize() -> None:
                 autosize_timer.start()
 
             autosize_timer.timeout.connect(
-                lambda: _autosize_project_info_dialog(dialog, board, header_edits)
+                lambda: _autosize_project_info_dialog(dialog, board)
             )
-
-            apply_timer = QTimer(dialog)
-            apply_timer.setSingleShot(True)
-            apply_timer.setInterval(250)
 
             def apply() -> None:
                 header = board.collect_header()
@@ -147,14 +153,8 @@ class PostmapInfoDialog:
                 )
                 on_changed(updated)
 
-            def schedule_apply() -> None:
-                apply_timer.start()
-
-            apply_timer.timeout.connect(apply)
-            board.layout_edited.connect(schedule_apply)
             board.layout_edited.connect(schedule_autosize)
             for edit in header_edits.values():
-                edit.textChanged.connect(schedule_apply)
                 edit.textChanged.connect(schedule_autosize)
 
             def on_add() -> None:
@@ -166,7 +166,6 @@ class PostmapInfoDialog:
                 if not ok or not label.strip():
                     return
                 board.add_custom_field(label.strip())
-                schedule_apply()
                 schedule_autosize()
 
             def on_delete() -> None:
@@ -180,7 +179,6 @@ class PostmapInfoDialog:
                     return
                 if not board.delete_selected():
                     return
-                schedule_apply()
                 schedule_autosize()
 
             add_btn.clicked.connect(on_add)
@@ -191,7 +189,7 @@ class PostmapInfoDialog:
             apply_btn.setObjectName("primaryBtn")
             apply_btn.clicked.connect(apply)
             close_btn = QPushButton("Close")
-            close_btn.clicked.connect(dialog.close)
+            close_btn.clicked.connect(lambda: (apply(), dialog.close()))
             action_row.addStretch()
             action_row.addWidget(apply_btn)
             action_row.addWidget(close_btn)

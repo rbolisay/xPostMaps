@@ -15,7 +15,7 @@ class DisplayMode(str, Enum):
 
 class LineStyle(str, Enum):
     SOLID = "solid"
-    DOTTED = "dotted"  # circles / points along the line
+    DOTTED = "dotted"  # one circle marker per navigation shotpoint
     DASH = "dash"      # dashed line segments
 
 

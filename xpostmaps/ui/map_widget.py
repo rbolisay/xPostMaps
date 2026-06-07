@@ -33,7 +33,13 @@ from xpostmaps.core.models import (
     RecordType,
     sequence_id_matches,
 )
-from xpostmaps.ui.map_batch import LineBatchKey, concat_points, concat_polylines
+from xpostmaps.ui.map_batch import (
+    LineBatchKey,
+    concat_polylines,
+    normalize_line_style,
+    renders_as_scatter,
+    shotpoint_marker_coords,
+)
 from xpostmaps.ui.map_view_box import MapViewBox
 from xpostmaps.ui.theme import (
     BG_MAP_PRINT,
@@ -52,7 +58,6 @@ def _configure_pyqtgraph() -> None:
 
 _configure_pyqtgraph()
 
-_MAX_LINE_POINTS = 500_000
 _MAX_SCATTER_POINTS = 200_000
 # Only items larger than this are worth view-clipping; below it the overhead is
 # not worth the extra bookkeeping.
@@ -60,15 +65,31 @@ _CLIP_REGISTER_MIN = 20_000
 # Fraction of the visible span added as margin on every side when clipping so a
 # short pan does not blank the line edges before the debounced reclip fires.
 _CLIP_MARGIN = 0.6
-# Max vertices kept per nav item for the current view. Above this, points are
-# sub-pixel dense so decimating is visually lossless but much faster to paint.
-_CLIP_TARGET_POINTS = 90_000
 
 
 def _color_with_opacity(color: str, opacity: float) -> tuple[int, int, int, int]:
     c = QColor(color)
     c.setAlphaF(max(0.0, min(1.0, opacity)))
     return c.red(), c.green(), c.blue(), c.alpha()
+
+
+def _make_nav_pen(
+    rgba: tuple[int, int, int, int],
+    width: float,
+    line_style: LineStyle,
+) -> QPen:
+    """Legend line widths are pixels; cosmetic pens stay visible at any zoom."""
+    color = QColor(rgba[0], rgba[1], rgba[2], rgba[3])
+    pen = QPen(color)
+    pen.setWidthF(max(1.5, width))
+    pen.setCosmetic(True)
+    pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+    pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
+    style = normalize_line_style(line_style)
+    pen.setStyle(
+        Qt.PenStyle.DashLine if style == LineStyle.DASH else Qt.PenStyle.SolidLine
+    )
+    return pen
 
 
 def _thin_points_for_scatter(
@@ -82,10 +103,17 @@ def _thin_points_for_scatter(
     return xs[::stride], ys[::stride]
 
 
-def _thin_polyline_for_navigation(
+def _clip_point_budget(vb: pg.ViewBox) -> int:
+    """Vertices worth keeping for the current view — avoids over-drawing when zoomed out."""
+    pw = max(int(vb.width()), 1)
+    ph = max(int(vb.height()), 1)
+    return min(300_000, max(6_000, (pw + ph) * 5))
+
+
+def _thin_polyline_preserving_nans(
     xs: np.ndarray,
     ys: np.ndarray,
-    max_points: int = _MAX_LINE_POINTS,
+    max_points: int,
 ) -> tuple[np.ndarray, np.ndarray]:
     if xs.size <= max_points:
         return xs, ys
@@ -175,8 +203,14 @@ class MapFrameOverlay(QWidget):
         super().__init__(parent or plot_widget)
         self._plot = plot_widget
         self._plot_item = plot_item
+        self._origin_x = 0.0
+        self._origin_y = 0.0
         self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+
+    def set_coord_origin(self, origin_x: float, origin_y: float) -> None:
+        self._origin_x = origin_x
+        self._origin_y = origin_y
 
     @staticmethod
     def _major_ticks(axis, lo: float, hi: float, size: float) -> list[float]:
@@ -296,7 +330,7 @@ class MapFrameOverlay(QWidget):
             cx = px(value)
             if not (left < cx < right):
                 continue
-            text = _format_full_value(value, spacing)
+            text = _format_full_value(value + self._origin_x, spacing)
             for cy in (top_cy, bottom_cy):
                 painter.drawText(
                     QRectF(cx - 60, cy - 10, 120, 20),
@@ -319,7 +353,7 @@ class MapFrameOverlay(QWidget):
             cy = py(value)
             if not (top < cy < bottom):
                 continue
-            text = _format_full_value(value, spacing)
+            text = _format_full_value(value + self._origin_y, spacing)
             self._draw_vertical_text(painter, left_cx, cy, text)
             self._draw_vertical_text(painter, right_cx, cy, text)
 
@@ -349,6 +383,8 @@ class PostplotMapWidget(QWidget):
         super().__init__(parent)
         self._display_mode = DisplayMode.LINES
         self._legend = LegendConfig.default()
+        self._origin_x = 0.0
+        self._origin_y = 0.0
         self._suppress_view_changed = False
         self._plot_items: list[pg.GraphicsItem] = []
         # Dense nav line items keep their full coordinate arrays here so the map
@@ -430,6 +466,47 @@ class PostplotMapWidget(QWidget):
         self._clip_timer.timeout.connect(self._apply_view_clip)
         vb.sigRangeChanged.connect(self._on_view_range_changed)
         vb.sigRangeChangedManually.connect(self._emit_view_changed)
+
+    def _set_coord_origin(self, map_data: MapData | None) -> None:
+        """Shift large projected coordinates near zero so polylines render solid."""
+        if map_data is not None and map_data.bounds.is_valid:
+            bounds = map_data.bounds
+            self._origin_x = (bounds.xmin + bounds.xmax) * 0.5
+            self._origin_y = (bounds.ymin + bounds.ymax) * 0.5
+        else:
+            self._origin_x = 0.0
+            self._origin_y = 0.0
+        self._frame.set_coord_origin(self._origin_x, self._origin_y)
+
+    def _localize_array(self, xs, ys) -> tuple[np.ndarray, np.ndarray]:
+        return (
+            np.asarray(xs, dtype=np.float64) - self._origin_x,
+            np.asarray(ys, dtype=np.float64) - self._origin_y,
+        )
+
+    @staticmethod
+    def _localize_range(
+        x_range: tuple[float, float],
+        y_range: tuple[float, float],
+        origin_x: float,
+        origin_y: float,
+    ) -> tuple[tuple[float, float], tuple[float, float]]:
+        return (
+            (x_range[0] - origin_x, x_range[1] - origin_x),
+            (y_range[0] - origin_y, y_range[1] - origin_y),
+        )
+
+    @staticmethod
+    def _world_range(
+        x_range: tuple[float, float],
+        y_range: tuple[float, float],
+        origin_x: float,
+        origin_y: float,
+    ) -> tuple[tuple[float, float], tuple[float, float]]:
+        return (
+            (x_range[0] + origin_x, x_range[1] + origin_x),
+            (y_range[0] + origin_y, y_range[1] + origin_y),
+        )
 
     def set_display_mode(self, mode: DisplayMode) -> None:
         self._display_mode = mode
@@ -584,13 +661,13 @@ class PostplotMapWidget(QWidget):
     ) -> None:
         if not segments:
             return
-        dotted = self._display_mode == DisplayMode.DOTS
         style_fn = self._style_fn_for_batch(width_override)
         batches: dict[LineBatchKey, list[tuple[np.ndarray, np.ndarray]]] = {}
         for segment in segments:
             if not segment.xs:
                 continue
             color, line_style, opacity = style_fn(segment)
+            line_style = normalize_line_style(line_style)
             rgba = _color_with_opacity(color, opacity)
             _, _, _, width, dot_radius = self._style_for_segment(
                 segment,
@@ -600,7 +677,7 @@ class PostplotMapWidget(QWidget):
                 color=rgba,
                 line_style=line_style,
                 width=width,
-                dotted=dotted or line_style == LineStyle.DOTTED,
+                dotted=renders_as_scatter(line_style),
                 dot_radius=dot_radius,
             )
             xs = np.asarray(segment.xs, dtype=np.float64)
@@ -608,7 +685,11 @@ class PostplotMapWidget(QWidget):
             batches.setdefault(key, []).append((xs, ys))
 
         for key, parts in batches.items():
-            self._add_batch_item(key, parts, clipable=True)
+            self._add_batch_item(
+                key,
+                parts,
+                clipable=not key.dotted,
+            )
 
     def _add_batch_item(
         self,
@@ -618,11 +699,12 @@ class PostplotMapWidget(QWidget):
         clipable: bool = False,
     ) -> None:
         rgba = key.color
+        line_style = normalize_line_style(key.line_style)
         if key.dotted:
-            xs, ys = concat_points(parts)
+            local_parts = [self._localize_array(xs, ys) for xs, ys in parts]
+            xs, ys = shotpoint_marker_coords(local_parts)
             if xs.size == 0:
                 return
-            xs, ys = _thin_points_for_scatter(xs, ys)
             item = pg.ScatterPlotItem(
                 xs,
                 ys,
@@ -633,36 +715,39 @@ class PostplotMapWidget(QWidget):
                 symbol="o",
             )
             kind = "scatter"
+            self._plot_item.addItem(item)
+            self._plot_items.append(item)
+            if clipable and xs.size > _CLIP_REGISTER_MIN:
+                self._clip_items.append(
+                    {"item": item, "xs": xs, "ys": ys, "kind": kind}
+                )
+            return
+
+        pen = _make_nav_pen(rgba, key.width, line_style)
+        local_parts: list[tuple[np.ndarray, np.ndarray]] = []
+        for part_xs, part_ys in parts:
+            lx, ly = self._localize_array(part_xs, part_ys)
+            if lx.size >= 2:
+                local_parts.append((lx, ly))
+        if not local_parts:
+            return
+        if len(local_parts) == 1:
+            lx, ly = local_parts[0]
         else:
-            xs, ys = concat_polylines(parts)
-            if xs.size == 0:
-                return
-            xs, ys = _thin_polyline_for_navigation(xs, ys)
-            qt_style = (
-                Qt.PenStyle.DashLine
-                if key.line_style == LineStyle.DASH
-                else Qt.PenStyle.SolidLine
-            )
-            item = pg.PlotDataItem(
-                xs,
-                ys,
-                pen=pg.mkPen(rgba, width=key.width, style=qt_style),
-                connect="finite",
-                antialias=False,
-                clipToView=False,
-                skipFiniteCheck=True,
-            )
-            kind = "line"
-
-        self._plot_item.addItem(item)
-        self._plot_items.append(item)
-
-        # Register dense nav items for view-dependent clipping. Worth it only
-        # above a threshold; small/sparse layers (preplot, areas) stay fully
-        # drawn so long straight segments never disappear at the view edge.
-        if clipable and xs.size > _CLIP_REGISTER_MIN:
+            lx, ly = concat_polylines(local_parts)
+        curve = pg.PlotCurveItem(
+            lx,
+            ly,
+            pen=pen,
+            connect="finite",
+            antialias=False,
+            skipFiniteCheck=True,
+        )
+        self._plot_item.addItem(curve)
+        self._plot_items.append(curve)
+        if clipable and lx.size > _CLIP_REGISTER_MIN:
             self._clip_items.append(
-                {"item": item, "xs": xs, "ys": ys, "kind": kind}
+                {"item": curve, "xs": lx, "ys": ly, "kind": "line"}
             )
 
     def _add_batched_segments_styled(
@@ -677,13 +762,13 @@ class PostplotMapWidget(QWidget):
     ) -> None:
         if not segments:
             return
-        dotted = self._display_mode == DisplayMode.DOTS
         rgba = _color_with_opacity(color, opacity)
+        line_style = normalize_line_style(line_style)
         key = LineBatchKey(
             color=rgba,
             line_style=line_style,
             width=width,
-            dotted=dotted or line_style == LineStyle.DOTTED,
+            dotted=renders_as_scatter(line_style),
             dot_radius=dot_radius,
         )
         parts: list[tuple[np.ndarray, np.ndarray]] = []
@@ -694,7 +779,7 @@ class PostplotMapWidget(QWidget):
                 (np.asarray(segment.xs, dtype=np.float64), np.asarray(segment.ys, dtype=np.float64))
             )
         if parts:
-            self._add_batch_item(key, parts)
+            self._add_batch_item(key, parts, clipable=not key.dotted)
 
     def _add_legend_preplot_segments(self, map_data: MapData | None) -> None:
         if map_data is None or not map_data.preplot_segments:
@@ -767,19 +852,16 @@ class PostplotMapWidget(QWidget):
             if len(xs) < 2:
                 continue
             rgba = _color_with_opacity(entry.color, entry.opacity)
-            qt_style = (
-                Qt.PenStyle.DashLine
-                if entry.border_style == LineStyle.DASH
-                else Qt.PenStyle.SolidLine
-            )
-            boundary = pg.PlotDataItem(
-                np.asarray(xs, dtype=np.float64),
-                np.asarray(ys, dtype=np.float64),
-                pen=pg.mkPen(rgba, width=entry.border_width, style=qt_style),
+            lx, ly = self._localize_array(xs, ys)
+            boundary = pg.PlotCurveItem(
+                lx,
+                ly,
+                pen=_make_nav_pen(rgba, entry.border_width, entry.border_style),
                 connect="all",
                 antialias=False,
-                clipToView=False,
+                skipFiniteCheck=True,
             )
+            boundary.setSegmentedLineMode("off")
             self._plot_item.addItem(boundary)
             self._plot_items.append(boundary)
 
@@ -844,6 +926,7 @@ class PostplotMapWidget(QWidget):
             ):
                 return
         self._clip_bbox = (bx0, bx1, by0, by1)
+        point_budget = _clip_point_budget(vb)
 
         for rec in self._clip_items:
             xs = rec["xs"]
@@ -854,16 +937,11 @@ class PostplotMapWidget(QWidget):
                 np.logical_or(mask, np.isnan(xs), out=mask)
                 cx = xs[mask]
                 cy = ys[mask]
-                # When the visible slice still has far more vertices than the
-                # screen can resolve (e.g. fully zoomed out), decimate it. This
-                # only triggers when points-per-pixel is high, so it is visually
-                # lossless; zoomed-in slices stay below the cap and keep every
-                # vertex.
-                cx, cy = _thin_polyline_for_navigation(cx, cy, _CLIP_TARGET_POINTS)
+                cx, cy = _thin_polyline_preserving_nans(cx, cy, point_budget)
             else:
                 cx = xs[mask]
                 cy = ys[mask]
-                cx, cy = _thin_points_for_scatter(cx, cy, _CLIP_TARGET_POINTS)
+                # Dotted postplot: keep one circle per visible shotpoint (no decimation).
             rec["item"].setData(cx, cy)
 
     def _schedule_overlay_reposition(self) -> None:
@@ -903,11 +981,12 @@ class PostplotMapWidget(QWidget):
 
     def current_view(self) -> dict[str, float]:
         (x0, x1), (y0, y1) = self._plot.getViewBox().viewRange()
+        wx_range, wy_range = self._world_range((x0, x1), (y0, y1), self._origin_x, self._origin_y)
         return {
-            "x_min": float(x0),
-            "x_max": float(x1),
-            "y_min": float(y0),
-            "y_max": float(y1),
+            "x_min": float(wx_range[0]),
+            "x_max": float(wx_range[1]),
+            "y_min": float(wy_range[0]),
+            "y_max": float(wy_range[1]),
         }
 
     @staticmethod
@@ -936,9 +1015,15 @@ class PostplotMapWidget(QWidget):
                 self.zoom_to_extent()
             else:
                 x_range, y_range = ranges
+                local_x, local_y = self._localize_range(
+                    x_range,
+                    y_range,
+                    self._origin_x,
+                    self._origin_y,
+                )
                 vb = self._plot.getViewBox()
                 vb.disableAutoRange()
-                vb.setRange(xRange=x_range, yRange=y_range, padding=0, update=True)
+                vb.setRange(xRange=local_x, yRange=local_y, padding=0, update=True)
         finally:
             self._suppress_view_changed = False
 
@@ -1021,7 +1106,13 @@ class PostplotMapWidget(QWidget):
                 vb.set_extent_range(None, None)
             return
 
-        self._extent_x, self._extent_y = ranges
+        local_ranges = self._localize_range(
+            ranges[0],
+            ranges[1],
+            self._origin_x,
+            self._origin_y,
+        )
+        self._extent_x, self._extent_y = local_ranges
         if isinstance(vb, MapViewBox):
             vb.set_extent_range(self._extent_x, self._extent_y)
 
@@ -1118,16 +1209,29 @@ class PostplotMapWidget(QWidget):
             return
 
         vb = self._plot.getViewBox()
-        current_range = vb.viewRange() if self._plot_items else None
+        current_world_range = None
+        if self._plot_items:
+            (x0, x1), (y0, y1) = vb.viewRange()
+            current_world_range = self._world_range(
+                (x0, x1),
+                (y0, y1),
+                self._origin_x,
+                self._origin_y,
+            )
 
         self.clear()
         if map_data is None:
             self._extent_x = None
             self._extent_y = None
+            self._origin_x = 0.0
+            self._origin_y = 0.0
+            self._frame.set_coord_origin(0.0, 0.0)
             if isinstance(vb, MapViewBox):
                 vb.set_extent_range(None, None)
             self._cached_signature = signature
             return
+
+        self._set_coord_origin(map_data)
 
         nav_segments = [
             seg for seg in map_data.segments if self._segment_should_draw(seg)
@@ -1176,13 +1280,6 @@ class PostplotMapWidget(QWidget):
             return
 
         extent_ranges = self._visible_extent_ranges(map_data, nav_segments)
-        if current_range is None and extent_ranges is not None:
-            x_range, y_range = extent_ranges
-            self._plot.setRange(
-                xRange=x_range,
-                yRange=y_range,
-                padding=0,
-            )
 
         self._add_batched_segments(nav_segments)
         self._add_legend_preplot_segments(map_data)
@@ -1192,10 +1289,28 @@ class PostplotMapWidget(QWidget):
 
         self._update_extent(map_data, nav_segments)
 
-        if current_range is not None:
+        if current_world_range is not None:
+            x_range, y_range = self._localize_range(
+                current_world_range[0],
+                current_world_range[1],
+                self._origin_x,
+                self._origin_y,
+            )
             self._plot.setRange(
-                xRange=current_range[0],
-                yRange=current_range[1],
+                xRange=x_range,
+                yRange=y_range,
+                padding=0,
+            )
+        elif extent_ranges is not None:
+            x_range, y_range = self._localize_range(
+                extent_ranges[0],
+                extent_ranges[1],
+                self._origin_x,
+                self._origin_y,
+            )
+            self._plot.setRange(
+                xRange=x_range,
+                yRange=y_range,
                 padding=0,
             )
 

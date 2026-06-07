@@ -26,6 +26,45 @@ def _rgba_tuple(color: str, opacity: float) -> tuple[int, int, int, int]:
     return c.red(), c.green(), c.blue(), c.alpha()
 
 
+def normalize_line_style(style: LineStyle | str) -> LineStyle:
+    if isinstance(style, LineStyle):
+        return style
+    try:
+        return LineStyle(str(style))
+    except ValueError:
+        return LineStyle.SOLID
+
+
+def renders_as_scatter(line_style: LineStyle | str) -> bool:
+    """Dotted legend style: one circle marker per shotpoint, never a connected line."""
+    return normalize_line_style(line_style) == LineStyle.DOTTED
+
+
+def shotpoint_marker_coords(
+    parts: list[tuple[np.ndarray, np.ndarray]],
+) -> tuple[np.ndarray, np.ndarray]:
+    """Flatten segment vertices to one (x, y) pair per navigation shotpoint."""
+    chunks_x: list[np.ndarray] = []
+    chunks_y: list[np.ndarray] = []
+    for xs, ys in parts:
+        if len(xs) == 0:
+            continue
+        arr_x = np.asarray(xs, dtype=np.float64)
+        arr_y = np.asarray(ys, dtype=np.float64)
+        if arr_x.size != arr_y.size:
+            count = min(arr_x.size, arr_y.size)
+            arr_x = arr_x[:count]
+            arr_y = arr_y[:count]
+        valid = np.isfinite(arr_x) & np.isfinite(arr_y)
+        if not np.any(valid):
+            continue
+        chunks_x.append(arr_x[valid])
+        chunks_y.append(arr_y[valid])
+    if not chunks_x:
+        return np.empty(0, dtype=np.float64), np.empty(0, dtype=np.float64)
+    return np.concatenate(chunks_x), np.concatenate(chunks_y)
+
+
 def concat_polylines(segments: list[tuple[np.ndarray, np.ndarray]]) -> tuple[np.ndarray, np.ndarray]:
     """Join polyline arrays with NaN separators for a single PlotDataItem."""
     if not segments:
@@ -63,8 +102,6 @@ def concat_points(segments: list[tuple[np.ndarray, np.ndarray]]) -> tuple[np.nda
 def build_line_batches(
     segments: list[LineSegment],
     style_fn,
-    *,
-    dotted: bool,
 ) -> dict[LineBatchKey, list[tuple[np.ndarray, np.ndarray]]]:
     """Group segment coordinate arrays by rendered style."""
     batches: dict[LineBatchKey, list[tuple[np.ndarray, np.ndarray]]] = {}
@@ -78,7 +115,7 @@ def build_line_batches(
             color=rgba,
             line_style=line_style,
             width=width,
-            dotted=dotted,
+            dotted=renders_as_scatter(line_style),
             dot_radius=3.0,
         )
         xs = np.asarray(segment.xs, dtype=np.float64)
