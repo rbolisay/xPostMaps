@@ -425,10 +425,11 @@ class LegendDialog:
                 on_apply(_collect())
 
             def live_apply(*_args) -> None:
-                if live["on"]:
-                    live_apply_timer.start()
-
-            live_apply_timer.timeout.connect(lambda: on_apply(_collect()))
+                # Live preview is intentionally disabled: applying a legend edit
+                # triggers a full map re-render plus a minimap/right-pane rebuild,
+                # which froze the dialog when fired on every keystroke/edit. The
+                # legend now applies only when the user clicks Apply or Close.
+                return
 
             def _open_custom_polygon(row: int) -> None:
                 name_w = area_table.cellWidget(row, 0)

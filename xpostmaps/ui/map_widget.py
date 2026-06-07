@@ -58,13 +58,17 @@ def _configure_pyqtgraph() -> None:
 
 _configure_pyqtgraph()
 
-_MAX_SCATTER_POINTS = 200_000
-# Only items larger than this are worth view-clipping; below it the overhead is
-# not worth the extra bookkeeping.
-_CLIP_REGISTER_MIN = 20_000
+# Items larger than this register for level-of-detail: the dense P111/P190 nav
+# layers are hidden while the user pans/zooms and the full view-clipped detail
+# is restored when motion settles. Smaller items paint fast enough to leave on.
+_CLIP_REGISTER_MIN = 6_000
 # Fraction of the visible span added as margin on every side when clipping so a
 # short pan does not blank the line edges before the debounced reclip fires.
 _CLIP_MARGIN = 0.6
+# PDF deliverables should use print-weight lines, not the heavier on-screen
+# minimum needed for interactive visibility.
+_EXPORT_LINE_WIDTH_SCALE = 0.35
+_EXPORT_MIN_LINE_WIDTH = 0.25
 
 
 def _color_with_opacity(color: str, opacity: float) -> tuple[int, int, int, int]:
@@ -92,22 +96,25 @@ def _make_nav_pen(
     return pen
 
 
-def _thin_points_for_scatter(
-    xs: np.ndarray,
-    ys: np.ndarray,
-    max_points: int = _MAX_SCATTER_POINTS,
-) -> tuple[np.ndarray, np.ndarray]:
-    if xs.size <= max_points:
-        return xs, ys
-    stride = max(1, int(np.ceil(xs.size / max_points)))
-    return xs[::stride], ys[::stride]
+def _make_export_pen(pen: QPen) -> QPen:
+    export_pen = QPen(pen)
+    export_pen.setWidthF(max(_EXPORT_MIN_LINE_WIDTH, pen.widthF() * _EXPORT_LINE_WIDTH_SCALE))
+    export_pen.setCosmetic(True)
+    return export_pen
 
 
-def _clip_point_budget(vb: pg.ViewBox) -> int:
-    """Vertices worth keeping for the current view — avoids over-drawing when zoomed out."""
+def _screen_detail_budget(vb: pg.ViewBox) -> int:
+    """Max vertices to paint on screen for the settled view.
+
+    Generous enough to be visually lossless for typical surveys (tens of
+    thousands of points stay at full detail and look sharp), but capped so a
+    very large survey can't repaint a multi-hundred-thousand-point path on
+    every interaction and freeze the UI. PDF export bypasses this entirely and
+    uses full resolution.
+    """
     pw = max(int(vb.width()), 1)
     ph = max(int(vb.height()), 1)
-    return min(300_000, max(6_000, (pw + ph) * 5))
+    return min(200_000, max(80_000, (pw + ph) * 40))
 
 
 def _thin_polyline_preserving_nans(
@@ -387,12 +394,17 @@ class PostplotMapWidget(QWidget):
         self._origin_y = 0.0
         self._suppress_view_changed = False
         self._plot_items: list[pg.GraphicsItem] = []
+        self._line_items: list[dict] = []
         # Dense nav line items keep their full coordinate arrays here so the map
         # can paint only the portion inside the current view (fast pan/zoom on
         # million-point surveys) without the monotonic-x assumption that breaks
         # pyqtgraph's built-in clipToView for weaving survey lines.
         self._clip_items: list[dict] = []
         self._clip_bbox: tuple[float, float, float, float] | None = None
+        # True while the user is actively panning/zooming: dense items show a
+        # pre-computed coarse copy for snappy interaction, then snap back to full
+        # detail when the settle timer fires.
+        self._interacting = False
         self._extent_x: tuple[float, float] | None = None
         self._extent_y: tuple[float, float] | None = None
         self._cached_signature: tuple | None = None
@@ -462,7 +474,10 @@ class PostplotMapWidget(QWidget):
 
         self._clip_timer = QTimer(self)
         self._clip_timer.setSingleShot(True)
-        self._clip_timer.setInterval(45)
+        # Settle delay: how long after the last pan/zoom event full detail is
+        # restored. Long enough to ride through wheel-notch bursts and brief
+        # pauses mid-drag, short enough to feel instant once the user stops.
+        self._clip_timer.setInterval(120)
         self._clip_timer.timeout.connect(self._apply_view_clip)
         vb.sigRangeChanged.connect(self._on_view_range_changed)
         vb.sigRangeChangedManually.connect(self._emit_view_changed)
@@ -516,11 +531,28 @@ class PostplotMapWidget(QWidget):
         self._legend = legend
         self._cached_signature = None
 
-    def prepare_for_export(self) -> None:
-        """Refresh map overlays before PDF/raster capture."""
+    def prepare_for_export(self, *, full_detail: bool = True) -> None:
+        """Refresh map overlays before PDF/raster capture.
+
+        ``full_detail=True`` (real export) swaps in full-resolution visible
+        geometry for crisp deliverables. ``full_detail=False`` (low-DPI preview)
+        keeps the current screen geometry so opening/adjusting the export dialog
+        stays snappy and never bogs the live map down with the full dataset.
+        """
+        if full_detail:
+            self._restore_export_detail()
+        else:
+            self._restore_screen_pens()
         self._reposition_overlays()
         self._frame.update()
         self.repaint()
+
+    def end_export(self) -> None:
+        """Restore interactive screen detail and pens after a PDF/raster capture."""
+        self._restore_screen_pens()
+        self._clip_bbox = None
+        if self._clip_items:
+            self._apply_view_clip()
 
     def render_vector(self, painter: QPainter, target: QRectF) -> None:
         """Paint the map as scalable vector content into ``target`` (PDF export).
@@ -529,13 +561,17 @@ class PostplotMapWidget(QWidget):
         vector paths/text; the zebra frame and north arrow are widget overlays drawn
         on top at the matching transform so the whole map stays sharp when zoomed.
         """
+        self._restore_export_detail(use_export_pens=True)
         self._reposition_overlays()
         plot = self._plot
         scene = plot.scene()
         source = plot.mapToScene(plot.viewport().rect()).boundingRect()
         painter.save()
-        scene.render(painter, target, source, Qt.AspectRatioMode.IgnoreAspectRatio)
-        painter.restore()
+        try:
+            scene.render(painter, target, source, Qt.AspectRatioMode.IgnoreAspectRatio)
+        finally:
+            painter.restore()
+            self.end_export()
 
         plot_w = max(plot.width(), 1)
         plot_h = max(plot.height(), 1)
@@ -575,8 +611,10 @@ class PostplotMapWidget(QWidget):
             except Exception:
                 pass
         self._plot_items.clear()
+        self._line_items.clear()
         self._clip_items.clear()
         self._clip_bbox = None
+        self._interacting = False
 
     @staticmethod
     def _record_type_for_data_type(data_type: NavDataType) -> RecordType:
@@ -743,8 +781,15 @@ class PostplotMapWidget(QWidget):
             antialias=False,
             skipFiniteCheck=True,
         )
+        # Render as one connected path (single drawPath) rather than thousands of
+        # individual line segments. With the round join this stays solid (no gap
+        # artefacts) and is markedly cheaper to repaint while panning/zooming.
+        curve.setSegmentedLineMode("off")
         self._plot_item.addItem(curve)
         self._plot_items.append(curve)
+        self._line_items.append(
+            {"item": curve, "pen": pen, "export_pen": _make_export_pen(pen)}
+        )
         if clipable and lx.size > _CLIP_REGISTER_MIN:
             self._clip_items.append(
                 {"item": curve, "xs": lx, "ys": ly, "kind": "line"}
@@ -853,10 +898,11 @@ class PostplotMapWidget(QWidget):
                 continue
             rgba = _color_with_opacity(entry.color, entry.opacity)
             lx, ly = self._localize_array(xs, ys)
+            pen = _make_nav_pen(rgba, entry.border_width, entry.border_style)
             boundary = pg.PlotCurveItem(
                 lx,
                 ly,
-                pen=_make_nav_pen(rgba, entry.border_width, entry.border_style),
+                pen=pen,
                 connect="all",
                 antialias=False,
                 skipFiniteCheck=True,
@@ -864,6 +910,9 @@ class PostplotMapWidget(QWidget):
             boundary.setSegmentedLineMode("off")
             self._plot_item.addItem(boundary)
             self._plot_items.append(boundary)
+            self._line_items.append(
+                {"item": boundary, "pen": pen, "export_pen": _make_export_pen(pen)}
+            )
 
     def _add_boundary(self, map_data: MapData) -> None:
         if not map_data.bounds.is_valid:
@@ -891,17 +940,66 @@ class PostplotMapWidget(QWidget):
         self._plot_items.append(boundary)
 
     def _on_view_range_changed(self, *_args) -> None:
-        if self._clip_items:
-            self._clip_timer.start()
+        if not self._clip_items:
+            return
+        # First movement of an interaction: hide the dense P111/P190 nav layers
+        # so dragging/zooming is instant (decimating them mid-pan produced a
+        # "hairball" of cross-connected segments). They reappear at full detail
+        # the moment motion settles. Lightweight context layers stay visible.
+        if not self._interacting:
+            self._interacting = True
+            self._hide_dense_detail()
+        # Restart the settle timer; full detail is restored once motion stops.
+        self._clip_timer.start()
+
+    def _hide_dense_detail(self) -> None:
+        # Invalidate the cached clip box so the settle reclip always rebuilds
+        # full detail, even when the view barely moved.
+        self._clip_bbox = None
+        for rec in self._clip_items:
+            rec["item"].setVisible(False)
+
+    def _restore_export_detail(self, *, use_export_pens: bool = False) -> None:
+        """Force full-resolution visible geometry for client PDF/vector output."""
+        self._clip_timer.stop()
+        self._interacting = False
+        self._clip_bbox = None
+        for rec in self._line_items:
+            rec["item"].setPen(rec["export_pen"] if use_export_pens else rec["pen"])
+        if not self._clip_items:
+            return
+        vb = self._plot.getViewBox()
+        (x0, x1), (y0, y1) = vb.viewRange()
+        mx = (x1 - x0) * _CLIP_MARGIN
+        my = (y1 - y0) * _CLIP_MARGIN
+        bx0, bx1 = x0 - mx, x1 + mx
+        by0, by1 = y0 - my, y1 + my
+        self._clip_bbox = (bx0, bx1, by0, by1)
+
+        for rec in self._clip_items:
+            xs = rec["xs"]
+            ys = rec["ys"]
+            mask = (xs >= bx0) & (xs <= bx1) & (ys >= by0) & (ys <= by1)
+            if rec["kind"] == "line":
+                np.logical_or(mask, np.isnan(xs), out=mask)
+            rec["item"].setData(xs[mask], ys[mask])
+
+    def _restore_screen_pens(self) -> None:
+        for rec in self._line_items:
+            rec["item"].setPen(rec["pen"])
 
     def _apply_view_clip(self) -> None:
-        """Limit dense nav items to the points inside the (padded) view.
+        """Restore full, view-clipped detail after pan/zoom motion settles.
 
         Painting only what is on screen keeps pan/zoom fast on million-point
         surveys. A boolean mask is used (not pyqtgraph's clipToView) because
         survey lines are not monotonic in x; the padding keeps the cut off
-        screen so lines look continuous.
+        screen so lines look continuous. Visible vertices are capped to a
+        generous screen budget so the settled view stays sharp for normal
+        surveys yet never repaints an enormous path that freezes the UI. PDF
+        export uses a separate full-resolution path.
         """
+        self._interacting = False
         if not self._clip_items:
             return
         vb = self._plot.getViewBox()
@@ -926,7 +1024,7 @@ class PostplotMapWidget(QWidget):
             ):
                 return
         self._clip_bbox = (bx0, bx1, by0, by1)
-        point_budget = _clip_point_budget(vb)
+        budget = _screen_detail_budget(vb)
 
         for rec in self._clip_items:
             xs = rec["xs"]
@@ -937,12 +1035,14 @@ class PostplotMapWidget(QWidget):
                 np.logical_or(mask, np.isnan(xs), out=mask)
                 cx = xs[mask]
                 cy = ys[mask]
-                cx, cy = _thin_polyline_preserving_nans(cx, cy, point_budget)
+                cx, cy = _thin_polyline_preserving_nans(cx, cy, budget)
             else:
                 cx = xs[mask]
                 cy = ys[mask]
                 # Dotted postplot: keep one circle per visible shotpoint (no decimation).
             rec["item"].setData(cx, cy)
+            # Re-show layers hidden while the user was panning/zooming.
+            rec["item"].setVisible(True)
 
     def _schedule_overlay_reposition(self) -> None:
         self._overlay_timer.start()

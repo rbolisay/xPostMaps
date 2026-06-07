@@ -178,7 +178,13 @@ def capture_export_images(
     raster_dpi = effective_raster_dpi(options.dpi, preview=preview)
     target_h = strip_target_height(options, raster_dpi)
     map_height = max(map_widget.height(), 1)
-    map_widget.prepare_for_export()
+    # Preview is a small thumbnail: keep the live screen geometry so opening or
+    # adjusting the dialog never forces the full dataset onto the UI thread.
+    # A real export uses full-resolution geometry for crisp deliverables.
+    prepare = getattr(map_widget, "prepare_for_export", None)
+    end_export = getattr(map_widget, "end_export", None)
+    if callable(prepare):
+        prepare(full_detail=not preview)
     right_pane.prepare_export_snapshot(map_height=map_height)
     try:
         map_image = render_widget_to_height(map_widget, target_h)
@@ -186,6 +192,8 @@ def capture_export_images(
         return map_image, pane_image
     finally:
         right_pane.reset_export_snapshot()
+        if callable(end_export):
+            end_export()
 
 
 def _scale_uniform(image: QImage, factor: float) -> QImage:
@@ -562,9 +570,11 @@ def write_pdf_vector(
 ) -> None:
     """Prepare widgets and write a scalable vector PDF (UI thread only)."""
     map_height = max(map_widget.height(), 1)
-    map_widget.prepare_for_export()
     right_pane.prepare_export_snapshot(map_height=map_height)
     try:
         compose_pdf_vector(path, map_widget, right_pane, options)
     finally:
         right_pane.reset_export_snapshot()
+        end_export = getattr(map_widget, "end_export", None)
+        if callable(end_export):
+            end_export()
