@@ -117,7 +117,7 @@ if errorlevel 1 (
 
 echo       Verifying portable runtime...
 set "PYTHONNOUSERSITE=1"
-"%STAGE%\python\python.exe" -c "import PySide6, pyqtgraph, numpy, numba, pyproj, shapefile; print('OK')"
+"%STAGE%\python\python.exe" -c "import PySide6, pyqtgraph, numpy, numba, pyproj, shapefile, OpenGL; print('OK')"
 if errorlevel 1 (
     echo ERROR: Portable runtime verification failed.
     exit /b 1
