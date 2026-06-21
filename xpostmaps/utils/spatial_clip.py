@@ -249,6 +249,53 @@ class SpatialGridIndex:
 
         self._cells = cells
 
+    @property
+    def cell_size(self) -> float:
+        return self._cell_size
+
+    @property
+    def origin(self) -> tuple[float, float]:
+        return self._x0, self._y0
+
+    def iter_cell_bboxes(
+        self,
+        padding: float = 0.0,
+    ):
+        """Yield ``((ix, iy), (x0, x1, y0, y1))`` for each populated grid cell."""
+        if not self.use_index or not self._cells:
+            return
+        size = self._cell_size
+        for ix, iy in self._cells:
+            x0 = self._x0 + ix * size - padding
+            x1 = self._x0 + (ix + 1) * size + padding
+            y0 = self._y0 + iy * size - padding
+            y1 = self._y0 + (iy + 1) * size + padding
+            yield (ix, iy), (x0, x1, y0, y1)
+
+    def cell_keys_for_bbox(
+        self,
+        bx0: float,
+        bx1: float,
+        by0: float,
+        by1: float,
+        *,
+        margin_cells: int = 1,
+    ) -> set[tuple[int, int]]:
+        """Return populated cell keys intersecting a world bounding box."""
+        if not self.use_index or not self._cells:
+            return {(0, 0)}
+        size = self._cell_size
+        ix0 = int(math.floor((bx0 - self._x0) / size)) - margin_cells
+        ix1 = int(math.floor((bx1 - self._x0) / size)) + margin_cells
+        iy0 = int(math.floor((by0 - self._y0) / size)) - margin_cells
+        iy1 = int(math.floor((by1 - self._y0) / size)) + margin_cells
+        keys: set[tuple[int, int]] = set()
+        for ix in range(ix0, ix1 + 1):
+            for iy in range(iy0, iy1 + 1):
+                if (ix, iy) in self._cells:
+                    keys.add((ix, iy))
+        return keys
+
     def query_candidate_indices(
         self,
         bx0: float,
@@ -450,6 +497,9 @@ def _polyline_runs(
     if start < xs.size:
         runs.append((xs[start:], ys[start:]))
     return [run for run in runs if run[0].size >= 2]
+
+
+polyline_runs = _polyline_runs
 
 
 def _simplify_run_to_budget(
