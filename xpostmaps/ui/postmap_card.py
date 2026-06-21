@@ -18,6 +18,7 @@ from xpostmaps.core.postmap_info_layout import column_display_lines, ensure_layo
 from xpostmaps.core.polygon_import_service import non_imported_polygon_entries
 from xpostmaps.ui.theme import BG_PRINT, TEXT_PRINT
 from xpostmaps.ui.widgets.scale_bar import ScaleBarWidget
+from xpostmaps.utils.symbology_units import DEFAULT_SCREEN_DPI, mm_to_pixels, scatter_size_px
 
 # Right-pane vertical rhythm (postplot sheet layout)
 _SCALE_MARGIN = 8
@@ -34,12 +35,16 @@ class _LineSwatch(QWidget):
         color: str,
         line_style: LineStyle = LineStyle.SOLID,
         scale: float = 1.0,
+        line_width_mm: float = 0.35,
+        dot_radius_mm: float = 0.8,
         parent=None,
     ) -> None:
         super().__init__(parent)
         self._color = color
         self._line_style = line_style
         self._scale = scale
+        self._line_width_mm = line_width_mm
+        self._dot_radius_mm = dot_radius_mm
         self.setFixedSize(int(round(24 * scale)), int(round(12 * scale)))
 
     def paintEvent(self, event) -> None:  # noqa: N802
@@ -51,13 +56,23 @@ class _LineSwatch(QWidget):
         if self._line_style == LineStyle.DOTTED:
             painter.setPen(Qt.PenStyle.NoPen)
             painter.setBrush(color)
-            for x in (6, 12, 18, 24):
-                painter.drawEllipse(x - 2, 5, 4, 4)
+            dot_px = scatter_size_px(DEFAULT_SCREEN_DPI, self._dot_radius_mm)
+            radius_px = max(1.0, dot_px * 0.5)
+            y_center = 6.0
+            for x in (6.0, 12.0, 18.0, 24.0):
+                painter.drawEllipse(
+                    x - radius_px,
+                    y_center - radius_px,
+                    radius_px * 2.0,
+                    radius_px * 2.0,
+                )
         elif self._line_style == LineStyle.DASH:
-            painter.setPen(QPen(color, 3, Qt.PenStyle.DashLine))
+            width_px = max(1.0, mm_to_pixels(DEFAULT_SCREEN_DPI, self._line_width_mm))
+            painter.setPen(QPen(color, width_px, Qt.PenStyle.DashLine))
             painter.drawLine(2, 7, 26, 7)
         else:
-            painter.setPen(QPen(color, 3, Qt.PenStyle.SolidLine))
+            width_px = max(1.0, mm_to_pixels(DEFAULT_SCREEN_DPI, self._line_width_mm))
+            painter.setPen(QPen(color, width_px, Qt.PenStyle.SolidLine))
             painter.drawLine(2, 7, 26, 7)
 
 
@@ -356,6 +371,8 @@ class PostmapInfoCard(QWidget):
                             entry.color,
                             line_style=entry.line_style,
                             scale=self._text_scale,
+                            line_width_mm=entry.line_width,
+                            dot_radius_mm=entry.dot_radius,
                         ),
                         entry.name,
                     )
@@ -376,6 +393,8 @@ class PostmapInfoCard(QWidget):
                             entry.color,
                             line_style=entry.line_style,
                             scale=self._text_scale,
+                            line_width_mm=entry.line_width,
+                            dot_radius_mm=entry.dot_radius,
                         ),
                         entry.name,
                     )

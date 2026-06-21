@@ -18,6 +18,17 @@ from PySide6.QtWidgets import (
 )
 
 from xpostmaps.ui.theme import color_dialog_stylesheet
+from xpostmaps.utils.symbology_units import metric_slider_to_mm, mm_to_metric_slider
+
+
+def _metric_uses_mm(label: str) -> bool:
+    return "(mm)" in label
+
+
+def _format_metric_label(label: str, slider_value: int) -> str:
+    if _metric_uses_mm(label):
+        return f"{metric_slider_to_mm(slider_value):.1f} mm"
+    return f"{slider_value} px"
 
 
 def pick_color_with_opacity(
@@ -62,10 +73,15 @@ def pick_color_with_opacity(
     metric_slider.setRange(metric_min, metric_max)
     metric_slider.setSingleStep(1)
     metric_slider.setPageStep(1)
-    metric_slider.setValue(int(max(metric_min, min(metric_max, round(metric_value)))))
-    metric_value_lbl = QLabel(f"{metric_slider.value()} px")
+    initial_slider = (
+        mm_to_metric_slider(metric_value, metric_min, metric_max)
+        if _metric_uses_mm(metric_label)
+        else int(max(metric_min, min(metric_max, round(metric_value))))
+    )
+    metric_slider.setValue(initial_slider)
+    metric_value_lbl = QLabel(_format_metric_label(metric_label, metric_slider.value()))
     metric_slider.valueChanged.connect(
-        lambda value: metric_value_lbl.setText(f"{value} px")
+        lambda value: metric_value_lbl.setText(_format_metric_label(metric_label, value))
     )
     metric_layout.addWidget(metric_lbl)
     metric_layout.addWidget(metric_slider, stretch=1)
@@ -87,10 +103,15 @@ def pick_color_with_opacity(
     chosen = dialog.selectedColor()
     if not chosen.isValid():
         return None
+    metric_out = (
+        metric_slider_to_mm(metric_slider.value())
+        if _metric_uses_mm(metric_label)
+        else float(metric_slider.value())
+    )
     return (
         chosen.name(QColor.NameFormat.HexRgb),
         opacity_slider.value() / 100.0,
-        float(metric_slider.value()),
+        metric_out,
     )
 
 
@@ -110,7 +131,7 @@ class ColorButton(QPushButton):
         super().__init__(parent)
         self._color = color
         self._opacity = max(0.0, min(1.0, opacity))
-        self._metric_value = max(1.0, float(metric_value))
+        self._metric_value = max(0.1, float(metric_value))
         self._metric_provider = metric_provider or (lambda: ("Line thickness", 1, 10))
         self.setFixedSize(36, 28)
         self.clicked.connect(self._pick_color)
@@ -138,7 +159,7 @@ class ColorButton(QPushButton):
         if opacity is not None:
             self._opacity = max(0.0, min(1.0, opacity))
         if metric_value is not None:
-            self._metric_value = max(1.0, float(metric_value))
+            self._metric_value = max(0.1, float(metric_value))
         self._apply_style()
 
     def _apply_style(self) -> None:

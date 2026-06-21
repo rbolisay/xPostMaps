@@ -119,8 +119,8 @@ class LegendDialog:
     @staticmethod
     def _metric_config_for_style(style: LineStyle) -> tuple[str, int, int]:
         if style == LineStyle.DOTTED:
-            return "Dot Radius", 1, 20
-        return "Line thickness", 1, 12
+            return "Size (mm)", 2, 80
+        return "Width (mm)", 1, 25
 
     @staticmethod
     def _area_style_from_index(index: int) -> LineStyle:

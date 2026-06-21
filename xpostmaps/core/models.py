@@ -91,8 +91,8 @@ class PreplotLegendEntry:
     line_style: LineStyle = LineStyle.SOLID
     color: str = "#f59e0b"
     opacity: float = 1.0
-    line_width: float = 0.9
-    dot_radius: float = 3.0
+    line_width: float = 0.35  # mm on screen (QGIS canvas units)
+    dot_radius: float = 0.8  # mm marker radius
     hidden: bool = False
 
 
@@ -102,8 +102,8 @@ class NavplanLegendEntry:
     line_style: LineStyle = LineStyle.SOLID
     color: str = "#22c55e"
     opacity: float = 1.0
-    line_width: float = 0.9
-    dot_radius: float = 3.0
+    line_width: float = 0.35  # mm on screen (QGIS canvas units)
+    dot_radius: float = 0.8  # mm marker radius
     hidden: bool = False
     navplan_source_indices: list[int] = field(default_factory=list)
     navplan_filter_active: bool = False
@@ -115,8 +115,8 @@ class PostplotLegendEntry:
     line_style: LineStyle = LineStyle.SOLID
     color: str = "#ef4444"
     opacity: float = 1.0
-    line_width: float = 1.2
-    dot_radius: float = 3.0
+    line_width: float = 0.35  # mm on screen (QGIS canvas units)
+    dot_radius: float = 0.8  # mm marker radius
     hidden: bool = False
     data_type: NavDataType = NavDataType.SOURCE
     sequence_ids: list[str] = field(default_factory=list)
