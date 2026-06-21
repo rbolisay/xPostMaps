@@ -6,9 +6,9 @@ import math
 
 import pyqtgraph as pg
 import numpy as np
-from PySide6.QtCore import Qt, QTimer, QPoint, QRectF, Signal
-from PySide6.QtGui import QColor, QFont, QPainter, QPen, QPolygonF, QRegion
-from PySide6.QtWidgets import QGraphicsItem, QGraphicsView, QVBoxLayout, QWidget
+from PySide6.QtCore import Qt, QTimer, QPoint, QRect, QRectF, Signal
+from PySide6.QtGui import QColor, QFont, QImage, QPainter, QPen, QPolygonF, QRegion
+from PySide6.QtWidgets import QApplication, QGraphicsItem, QGraphicsView, QVBoxLayout, QWidget
 
 from xpostmaps.core.area_utils import resolve_area_polygon
 from xpostmaps.core.navplan_catalog_utils import (
@@ -403,6 +403,8 @@ class PostplotMapWidget(QWidget):
         self._interacting = False
         self._clip_worker = MapClipWorker()
         self._clip_worker.signals.finished.connect(self._on_clip_finished)
+        self._pan_snapshot_item: pg.ImageItem | None = None
+        self._raster_pan_active = False
         self._extent_x: tuple[float, float] | None = None
         self._extent_y: tuple[float, float] | None = None
         self._cached_signature: tuple | None = None
@@ -633,6 +635,93 @@ class PostplotMapWidget(QWidget):
         self._clip_items.clear()
         self._clip_bbox = None
         self._interacting = False
+        self._exit_raster_pan()
+
+    def _capture_viewbox_image(
+        self,
+    ) -> tuple[np.ndarray, tuple[tuple[float, float], tuple[float, float]]] | None:
+        """Grab the current ViewBox pixels for raster pan mode."""
+        vb = self._plot.getViewBox()
+        if vb is None:
+            return None
+        scene_rect = vb.sceneBoundingRect()
+        if scene_rect.width() <= 4 or scene_rect.height() <= 4:
+            return None
+        top_left = self._plot.mapFromScene(scene_rect.topLeft()).toPoint()
+        bottom_right = self._plot.mapFromScene(scene_rect.bottomRight()).toPoint()
+        rect = QRect(top_left, bottom_right).normalized()
+        if rect.width() <= 4 or rect.height() <= 4:
+            return None
+        QApplication.processEvents(QApplication.ProcessEventsFlag.ExcludeUserInputEvents)
+        pixmap = self._plot.grab(rect)
+        if pixmap.isNull():
+            return None
+        image = pixmap.toImage().convertToFormat(QImage.Format.Format_RGB888)
+        width = image.width()
+        height = image.height()
+        if width <= 0 or height <= 0:
+            return None
+        stride = image.bytesPerLine()
+        bytes_per_pixel = 3
+        row_bytes = width * bytes_per_pixel
+        ptr = memoryview(image.bits()).tobytes()
+        arr = np.frombuffer(ptr, dtype=np.uint8)
+        if stride == row_bytes:
+            rgb = arr.reshape(height, width, 3).copy()
+        else:
+            rgb = np.empty((height, width, 3), dtype=np.uint8)
+            for row in range(height):
+                start = row * stride
+                rgb[row] = arr[start : start + row_bytes].reshape(width, 3)
+        view_range = vb.viewRange()
+        return rgb, view_range
+
+    def _enter_raster_pan(self) -> bool:
+        """Show a frozen bitmap in data space — pan/zoom only transform the view."""
+        if self._raster_pan_active:
+            return True
+        captured = self._capture_viewbox_image()
+        if captured is None:
+            return False
+        rgb, ((x0, x1), (y0, y1)) = captured
+        for item in self._plot_items:
+            item.setVisible(False)
+        snapshot = pg.ImageItem(rgb, axisOrder="row-major")
+        snapshot.setRect(QRectF(float(x0), float(y0), float(x1 - x0), float(y1 - y0)))
+        snapshot.setZValue(50)
+        snapshot.setOpacity(1.0)
+        self._plot_item.addItem(snapshot)
+        self._pan_snapshot_item = snapshot
+        self._raster_pan_active = True
+        return True
+
+    def _exit_raster_pan(self) -> None:
+        if self._pan_snapshot_item is None:
+            self._raster_pan_active = False
+            return
+        try:
+            self._plot_item.removeItem(self._pan_snapshot_item)
+        except Exception:  # noqa: BLE001
+            pass
+        self._pan_snapshot_item = None
+        self._raster_pan_active = False
+
+    def _restore_vectors_after_pan(self) -> None:
+        for item in self._plot_items:
+            item.setVisible(True)
+
+    def _enter_fast_pan_mode(self) -> None:
+        """Prefer a single bitmap during motion; fall back to coarse vectors."""
+        self._clip_worker.next_generation()
+        if self._enter_raster_pan():
+            return
+        self._swap_to_coarse_preview()
+
+    def _finish_pan_interaction(self) -> None:
+        self._exit_raster_pan()
+        self._clear_pan_render_cache()
+        self._restore_vectors_after_pan()
+        self._interacting = False
 
     @staticmethod
     def _record_type_for_data_type(data_type: NavDataType) -> RecordType:
@@ -784,22 +873,6 @@ class PostplotMapWidget(QWidget):
                     "export_size": export_size,
                 }
             )
-            if clipable and xs.size > _CLIP_REGISTER_MIN:
-                coarse_x, coarse_y = build_coarse_preview(
-                    xs, ys, max_points=_CLIP_COARSE_MAX
-                )
-                self._clip_items.append(
-                    {
-                        "item": item,
-                        "xs": xs,
-                        "ys": ys,
-                        "kind": kind,
-                        "grid": SpatialGridIndex(xs, ys),
-                        "coarse_xs": coarse_x,
-                        "coarse_ys": coarse_y,
-                        "coarse_active": False,
-                    }
-                )
             return
 
         width_mm = migrate_line_width_mm(key.width)
@@ -1090,13 +1163,13 @@ class PostplotMapWidget(QWidget):
             return
         if not self._interacting:
             self._interacting = True
-            self._swap_to_coarse_preview()
+            self._enter_fast_pan_mode()
         self._clip_timer.start()
 
     def _restore_export_detail(self, *, use_export_pens: bool = False) -> None:
         """Force full-resolution visible geometry for client PDF/vector output."""
         self._clip_timer.stop()
-        self._interacting = False
+        self._finish_pan_interaction()
         self._clip_bbox = None
         for rec in self._line_items:
             rec["item"].setPen(rec["export_pen"] if use_export_pens else rec["pen"])
@@ -1127,6 +1200,8 @@ class PostplotMapWidget(QWidget):
         if not isinstance(results, list):
             return
         self._apply_clipped_data(bbox, results)
+        self._exit_raster_pan()
+        self._restore_vectors_after_pan()
         self._clear_pan_render_cache()
         self._frame.update()
 
@@ -1138,15 +1213,17 @@ class PostplotMapWidget(QWidget):
         fast without decimating visible geometry.
         """
         self._interacting = False
-        self._clear_pan_render_cache()
         if not self._clip_items:
+            self._finish_pan_interaction()
             return
         bbox = self._view_clip_bbox()
         if bbox is None:
+            self._finish_pan_interaction()
             return
 
         prev = self._clip_bbox
         if prev is not None and self._should_skip_reclip(prev, bbox):
+            self._finish_pan_interaction()
             self._frame.update()
             return
         self._clip_bbox = bbox
