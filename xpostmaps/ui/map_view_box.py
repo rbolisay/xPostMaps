@@ -71,6 +71,30 @@ class MapViewBox(pg.ViewBox):
             self.translateBy(x=x, y=y)
         self.sigRangeChangedManually.emit(self.state["mouseEnabled"])
 
+    def _fast_translate_from_drag(self, ev) -> None:
+        """Pan using view span / viewport pixels — avoids per-frame scene transforms."""
+        plot = self.parentWidget()
+        while plot is not None and not hasattr(plot, "viewport"):
+            plot = plot.parentWidget()
+        if plot is None:
+            self._translate_from_drag(ev)
+            return
+        vp = plot.viewport()
+        vp_w = vp.width()
+        vp_h = vp.height()
+        if vp_w <= 0 or vp_h <= 0:
+            return
+        (x_range, y_range) = self.viewRange()
+        x_span = x_range[1] - x_range[0]
+        y_span = y_range[1] - y_range[0]
+        dx_px = ev.pos().x() - ev.lastPos().x()
+        dy_px = ev.pos().y() - ev.lastPos().y()
+        dx_data = -dx_px * x_span / vp_w
+        dy_data = dy_px * y_span / vp_h
+        self._resetTarget()
+        self.translateBy(x=dx_data, y=dy_data)
+        self.sigRangeChangedManually.emit(self.state["mouseEnabled"])
+
     def mouseDragEvent(self, ev, axis=None) -> None:
         if ev.button() == Qt.MouseButton.RightButton:
             ev.accept()
@@ -87,7 +111,7 @@ class MapViewBox(pg.ViewBox):
                     > self._DRAG_THRESHOLD
                 ):
                     self._right_drag_moved = True
-                self._translate_from_drag(ev, axis)
+                self._fast_translate_from_drag(ev)
             return
 
         if ev.button() == Qt.MouseButton.LeftButton:

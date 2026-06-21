@@ -338,3 +338,244 @@ def clip_items_to_bbox(
         )
         results.append((cx, cy))
     return results
+
+
+# --- Screen LOD (shape-preserving lines, uniform scatter pick) ----------------
+
+# Solid lines: use full view-clipped detail up to this cap when motion stops.
+# Simplification (RDP) only runs above the cap — e.g. million-point edge cases.
+SCREEN_LINE_HARD_CAP = 400_000
+SCREEN_SCATTER_BUDGET = 40_000
+# Shape-preserving Douglas–Peucker budget for pan/zoom motion LOD (not uniform pick).
+MOTION_LINE_BUDGET = 32_000
+# Only pre-filter before RDP on extremely large single runs (keeps RDP fast).
+_LINE_PREFILTER_MIN = 900_000
+
+
+@njit(cache=True)
+def _perpendicular_distance(
+    px: float,
+    py: float,
+    x1: float,
+    y1: float,
+    x2: float,
+    y2: float,
+) -> float:
+    dx = x2 - x1
+    dy = y2 - y1
+    denom = dx * dx + dy * dy
+    if denom == 0.0:
+        return math.hypot(px - x1, py - y1)
+    t = ((px - x1) * dx + (py - y1) * dy) / denom
+    if t < 0.0:
+        t = 0.0
+    elif t > 1.0:
+        t = 1.0
+    proj_x = x1 + t * dx
+    proj_y = y1 + t * dy
+    return math.hypot(px - proj_x, py - proj_y)
+
+
+@njit(cache=True)
+def _rdp_keep_mask(xs: np.ndarray, ys: np.ndarray, epsilon: float) -> np.ndarray:
+    n = xs.size
+    keep = np.zeros(n, dtype=np.bool_)
+    if n == 0:
+        return keep
+    if n <= 2:
+        keep[:n] = True
+        return keep
+    keep[0] = True
+    keep[n - 1] = True
+    stack_start = np.empty(n, dtype=np.int64)
+    stack_end = np.empty(n, dtype=np.int64)
+    depth = 1
+    stack_start[0] = 0
+    stack_end[0] = n - 1
+    while depth > 0:
+        depth -= 1
+        start = stack_start[depth]
+        end = stack_end[depth]
+        if end <= start + 1:
+            continue
+        max_dist = -1.0
+        max_idx = start + 1
+        x1 = xs[start]
+        y1 = ys[start]
+        x2 = xs[end]
+        y2 = ys[end]
+        for i in range(start + 1, end):
+            dist = _perpendicular_distance(xs[i], ys[i], x1, y1, x2, y2)
+            if dist > max_dist:
+                max_dist = dist
+                max_idx = i
+        if max_dist > epsilon:
+            keep[max_idx] = True
+            stack_start[depth] = start
+            stack_end[depth] = max_idx
+            depth += 1
+            stack_start[depth] = max_idx
+            stack_end[depth] = end
+            depth += 1
+    return keep
+
+
+def _apply_keep_mask(
+    xs: np.ndarray,
+    ys: np.ndarray,
+    keep: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray]:
+    return xs[keep], ys[keep]
+
+
+def _polyline_runs(
+    xs: np.ndarray,
+    ys: np.ndarray,
+) -> list[tuple[np.ndarray, np.ndarray]]:
+    """Split a batch polyline on NaN separators."""
+    xs = np.asarray(xs, dtype=np.float64)
+    ys = np.asarray(ys, dtype=np.float64)
+    if xs.size == 0:
+        return []
+    nan_break = ~np.isfinite(xs) | ~np.isfinite(ys)
+    if not np.any(nan_break):
+        return [(xs, ys)]
+    indices = np.flatnonzero(nan_break)
+    runs: list[tuple[np.ndarray, np.ndarray]] = []
+    start = 0
+    for stop in indices:
+        if stop > start:
+            runs.append((xs[start:stop], ys[start:stop]))
+        start = stop + 1
+    if start < xs.size:
+        runs.append((xs[start:], ys[start:]))
+    return [run for run in runs if run[0].size >= 2]
+
+
+def _simplify_run_to_budget(
+    xs: np.ndarray,
+    ys: np.ndarray,
+    budget: int,
+) -> tuple[np.ndarray, np.ndarray]:
+    xs = np.asarray(xs, dtype=np.float64)
+    ys = np.asarray(ys, dtype=np.float64)
+    if xs.size <= budget:
+        return xs, ys
+    if xs.size > _LINE_PREFILTER_MIN:
+        prelimit = max(budget * 2, _LINE_PREFILTER_MIN)
+        xs, ys = build_coarse_preview(xs, ys, max_points=prelimit)
+    span = max(
+        float(np.nanmax(xs) - np.nanmin(xs)),
+        float(np.nanmax(ys) - np.nanmin(ys)),
+        1.0,
+    )
+    lo = 0.0
+    hi = span
+    best_x, best_y = xs, ys
+    for _ in range(18):
+        eps = (lo + hi) * 0.5
+        keep = _rdp_keep_mask(xs, ys, eps)
+        sx, sy = _apply_keep_mask(xs, ys, keep)
+        if sx.size > budget:
+            lo = eps
+        else:
+            hi = eps
+            best_x, best_y = sx, sy
+            if sx.size >= budget * 0.95:
+                break
+    return best_x, best_y
+
+
+def motion_line_geometry(
+    xs: np.ndarray,
+    ys: np.ndarray,
+    *,
+    budget: int = MOTION_LINE_BUDGET,
+) -> tuple[np.ndarray, np.ndarray]:
+    """RDP simplification for motion preview — preserves curves unlike uniform pick."""
+    return screen_line_geometry(xs, ys, budget=budget)
+
+
+def screen_line_geometry(
+    xs: np.ndarray,
+    ys: np.ndarray,
+    *,
+    budget: int = SCREEN_LINE_HARD_CAP,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Pass through full view-clipped lines; RDP only if above the hard cap."""
+    xs = np.asarray(xs, dtype=np.float64)
+    ys = np.asarray(ys, dtype=np.float64)
+    if xs.size <= budget:
+        return xs, ys
+    runs = _polyline_runs(xs, ys)
+    if not runs:
+        return xs[:0], ys[:0]
+    total = sum(run[0].size for run in runs)
+    if total <= budget:
+        return xs, ys
+    chunks_x: list[np.ndarray] = []
+    chunks_y: list[np.ndarray] = []
+    remaining = budget
+    for index, (rx, ry) in enumerate(runs):
+        if index == len(runs) - 1:
+            run_budget = max(2, remaining)
+        else:
+            run_budget = max(2, int(round(budget * rx.size / total)))
+            remaining -= run_budget
+        sx, sy = _simplify_run_to_budget(rx, ry, run_budget)
+        if chunks_x:
+            chunks_x.append(np.array([np.nan], dtype=np.float64))
+            chunks_y.append(np.array([np.nan], dtype=np.float64))
+        chunks_x.append(sx)
+        chunks_y.append(sy)
+    return np.concatenate(chunks_x), np.concatenate(chunks_y)
+
+
+def screen_scatter_geometry(
+    xs: np.ndarray,
+    ys: np.ndarray,
+    *,
+    budget: int = SCREEN_SCATTER_BUDGET,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Uniform pick for shotpoint markers — dotted style already looks good."""
+    xs = np.asarray(xs, dtype=np.float64)
+    ys = np.asarray(ys, dtype=np.float64)
+    if xs.size <= budget:
+        return xs, ys
+    return build_coarse_preview(xs, ys, max_points=budget)
+
+
+def prepare_screen_clip_results(
+    items: list[dict],
+    results: list[tuple[np.ndarray, np.ndarray]],
+) -> list[tuple[np.ndarray, np.ndarray]]:
+    """Convert clipped full-resolution arrays to screen-safe geometry off the UI thread."""
+    prepared: list[tuple[np.ndarray, np.ndarray]] = []
+    for rec, (cx, cy) in zip(items, results):
+        if rec.get("kind") == "scatter":
+            cx, cy = screen_scatter_geometry(cx, cy)
+        else:
+            cx, cy = screen_line_geometry(cx, cy)
+        prepared.append((cx, cy))
+    return prepared
+
+
+def clip_and_prepare_items(
+    items: list[dict],
+    bbox: tuple[float, float, float, float],
+) -> list[tuple[np.ndarray, np.ndarray]]:
+    """Clip to view then build screen LOD in one worker pass."""
+    return prepare_screen_clip_results(items, clip_items_to_bbox(items, bbox))
+
+
+def prepare_motion_lod(
+    items: list[dict],
+) -> list[tuple[int, np.ndarray, np.ndarray]]:
+    """Precompute shape-preserving motion geometry for dense line layers."""
+    prepared: list[tuple[int, np.ndarray, np.ndarray]] = []
+    for index, rec in enumerate(items):
+        if rec.get("kind") != "line":
+            continue
+        cx, cy = motion_line_geometry(rec["xs"], rec["ys"])
+        prepared.append((index, cx, cy))
+    return prepared
