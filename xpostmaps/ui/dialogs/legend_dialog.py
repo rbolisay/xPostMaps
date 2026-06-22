@@ -44,6 +44,10 @@ from xpostmaps.core.polygon_import_service import (
     non_imported_polygon_entries,
 )
 from xpostmaps.core.preplot_catalog_utils import preplot_source_labels
+from xpostmaps.core.sequence_utils import (
+    assignments_to_row_sequence_ids,
+    row_sequence_ids_to_assignments,
+)
 from xpostmaps.ui.dialogs.base_dialog import SingleInstanceDialog
 from xpostmaps.ui.dialogs.custom_polygon_dialog import CustomPolygonDialog
 from xpostmaps.ui.dialogs.navplans_dialog import NavplansDialog
@@ -522,31 +526,54 @@ class LegendDialog:
                         del row_custom_points[row]
                     apply_legend()
 
+            def _postplot_names() -> list[str]:
+                names: list[str] = []
+                for row in range(post_table.rowCount()):
+                    name_w = post_table.cellWidget(row, 0)
+                    if isinstance(name_w, QLineEdit):
+                        name = name_w.text().strip()
+                        if name:
+                            names.append(name)
+                return names
+
+            def _refresh_postplot_sequence_buttons() -> None:
+                for row in range(post_table.rowCount()):
+                    btn = post_table.cellWidget(row, 4)
+                    if not isinstance(btn, QPushButton):
+                        continue
+                    count = len(row_sequence_ids[row]) if row < len(row_sequence_ids) else 0
+                    btn.setText(
+                        f"Select Sequences ({count})" if count else "Select Sequences"
+                    )
+                    _fit_table_row(post_table, row)
+
             def _open_sequences(row: int, name: str) -> None:
                 if not seq_list:
                     return
+                postplot_names = _postplot_names()
+                current_assignments = row_sequence_ids_to_assignments(
+                    postplot_names,
+                    row_sequence_ids,
+                )
 
-                def on_changed(ids: list[str]) -> None:
-                    if row < len(row_sequence_ids):
-                        row_sequence_ids[row] = ids
-                    else:
-                        while len(row_sequence_ids) <= row:
-                            row_sequence_ids.append([])
-                        row_sequence_ids[row] = ids
-                    if row < len(row_sequence_filter_active):
-                        row_sequence_filter_active[row] = True
-                    else:
-                        while len(row_sequence_filter_active) <= row:
-                            row_sequence_filter_active.append(False)
-                        row_sequence_filter_active[row] = True
-                    btn = post_table.cellWidget(row, 4)
-                    if isinstance(btn, QPushButton):
-                        btn.setText(
-                            f"Select Sequences ({len(ids)})"
-                            if ids
-                            else "Select Sequences"
+                def on_assignments_changed(updated: dict[str, str]) -> None:
+                    names = _postplot_names()
+                    new_row_ids = assignments_to_row_sequence_ids(names, updated)
+                    row_sequence_ids.clear()
+                    row_sequence_ids.extend(new_row_ids)
+                    while len(row_sequence_ids) < post_table.rowCount():
+                        row_sequence_ids.append([])
+                    while len(row_sequence_filter_active) < post_table.rowCount():
+                        row_sequence_filter_active.append(False)
+                    for idx in range(post_table.rowCount()):
+                        active = bool(
+                            row_sequence_ids[idx] if idx < len(row_sequence_ids) else []
                         )
-                        _fit_table_row(post_table, row)
+                        if idx < len(row_sequence_filter_active):
+                            row_sequence_filter_active[idx] = active
+                        else:
+                            row_sequence_filter_active.append(active)
+                    _refresh_postplot_sequence_buttons()
                     apply_legend()
 
                 def refresh_sequences() -> list[LineSequence]:
@@ -557,10 +584,10 @@ class LegendDialog:
 
                 SequencesDialog.open(
                     parent=dialog,
-                    legend_row_name=name,
                     sequences=seq_list,
-                    selected_ids=row_sequence_ids[row] if row < len(row_sequence_ids) else [],
-                    on_changed=on_changed,
+                    postplot_names=postplot_names,
+                    assignments=current_assignments,
+                    on_assignments_changed=on_assignments_changed,
                     on_refresh=refresh_sequences,
                     row_key=str(row),
                 )

@@ -4,10 +4,12 @@ from __future__ import annotations
 
 from typing import Callable
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import QPoint, Qt
 from PySide6.QtWidgets import (
+    QComboBox,
     QHBoxLayout,
     QHeaderView,
+    QMenu,
     QPushButton,
     QTableWidget,
     QTableWidgetItem,
@@ -16,6 +18,8 @@ from PySide6.QtWidgets import (
 
 from xpostmaps.core.models import LineSequence
 from xpostmaps.ui.dialogs.base_dialog import SingleInstanceDialog
+
+_UNASSIGNED_LABEL = "(Unassigned)"
 
 
 class _SortableTableWidgetItem(QTableWidgetItem):
@@ -26,6 +30,11 @@ class _SortableTableWidgetItem(QTableWidgetItem):
         self._sort_key = sort_key
         self.setFlags(self.flags() & ~Qt.ItemFlag.ItemIsEditable)
         self.setData(Qt.ItemDataRole.UserRole, seq_id)
+
+    def set_sort_key(self, sort_key: float | str, text: str | None = None) -> None:
+        self._sort_key = sort_key
+        if text is not None:
+            self.setText(text)
 
     def __lt__(self, other: QTableWidgetItem) -> bool:
         if isinstance(other, _SortableTableWidgetItem):
@@ -41,6 +50,14 @@ def _numeric_sort_key(value: str) -> float:
         return float("inf")
 
 
+def _assignment_display(name: str) -> str:
+    return name if name else _UNASSIGNED_LABEL
+
+
+def _assignment_sort_key(name: str) -> str:
+    return name.lower() if name else "\uffff"
+
+
 class SequencesDialog:
     KEY_PREFIX = "sequences_"
 
@@ -48,14 +65,14 @@ class SequencesDialog:
     def open(
         cls,
         parent,
-        legend_row_name: str,
         sequences: list[LineSequence],
-        selected_ids: list[str],
-        on_changed,
+        postplot_names: list[str],
+        assignments: dict[str, str],
+        on_assignments_changed: Callable[[dict[str, str]], None],
         on_refresh: Callable[[], list[LineSequence]] | None = None,
         row_key: str = "",
     ) -> None:
-        dialog_key = f"{cls.KEY_PREFIX}{row_key or legend_row_name}"
+        dialog_key = f"{cls.KEY_PREFIX}{row_key or 'all'}"
 
         def build(dialog: SingleInstanceDialog) -> None:
             layout = dialog.content_layout
@@ -74,7 +91,26 @@ class SequencesDialog:
                                 w.deleteLater()
 
             table_holder: dict[str, QTableWidget | None] = {"table": None}
-            selected_set = set(selected_ids)
+            postplot_options = [name for name in postplot_names if name.strip()]
+
+            def _assignment_combo(
+                assigned_name: str,
+                sort_item: _SortableTableWidgetItem,
+            ) -> QComboBox:
+                combo = QComboBox()
+                combo.addItem(_UNASSIGNED_LABEL, "")
+                for name in postplot_options:
+                    combo.addItem(name, name)
+                target = assigned_name if assigned_name in postplot_options else ""
+                index = combo.findData(target)
+                combo.setCurrentIndex(index if index >= 0 else 0)
+
+                def sync_sort(_index: int, item=sort_item, box=combo) -> None:
+                    value = str(box.currentData() or "")
+                    item.set_sort_key(_assignment_sort_key(value), _assignment_display(value))
+
+                combo.currentIndexChanged.connect(sync_sort)
+                return combo
 
             def _populate_table(seq_rows: list[LineSequence]) -> None:
                 table = table_holder["table"]
@@ -97,71 +133,138 @@ class SequencesDialog:
                             col,
                             _SortableTableWidgetItem(text, sort_key, seq.seq_id),
                         )
-                    if seq.seq_id in selected_set:
-                        table.selectRow(row)
+                    assigned = assignments.get(seq.seq_id, "")
+                    sort_item = _SortableTableWidgetItem(
+                        _assignment_display(assigned),
+                        _assignment_sort_key(assigned),
+                        seq.seq_id,
+                    )
+                    table.setItem(row, 5, sort_item)
+                    table.setCellWidget(
+                        row,
+                        5,
+                        _assignment_combo(assigned, sort_item),
+                    )
                 table.setSortingEnabled(was_sorting or True)
 
-            def _collect_pending() -> list[str]:
+            def _collect_assignments() -> dict[str, str]:
                 table = table_holder["table"]
                 if table is None:
-                    return []
-                ids: list[str] = []
-                for index in table.selectionModel().selectedRows():
-                    item = table.item(index.row(), 0)
-                    if item is None:
+                    return {}
+                result: dict[str, str] = {}
+                for row in range(table.rowCount()):
+                    id_item = table.item(row, 0)
+                    if id_item is None:
                         continue
-                    seq_id = item.data(Qt.ItemDataRole.UserRole)
-                    if seq_id and seq_id not in ids:
-                        ids.append(str(seq_id))
-                return ids
+                    seq_id = id_item.data(Qt.ItemDataRole.UserRole)
+                    if not seq_id:
+                        continue
+                    combo = table.cellWidget(row, 5)
+                    if not isinstance(combo, QComboBox):
+                        continue
+                    postplot_name = str(combo.currentData() or "").strip()
+                    if postplot_name:
+                        result[str(seq_id)] = postplot_name
+                return result
 
-            table = QTableWidget(0, 5)
+            def _assign_rows(rows: set[int], postplot_name: str) -> None:
+                table = table_holder["table"]
+                if table is None:
+                    return
+                for row in rows:
+                    combo = table.cellWidget(row, 5)
+                    sort_item = table.item(row, 5)
+                    if not isinstance(combo, QComboBox) or not isinstance(
+                        sort_item, _SortableTableWidgetItem
+                    ):
+                        continue
+                    target = postplot_name if postplot_name in postplot_options else ""
+                    index = combo.findData(target)
+                    combo.setCurrentIndex(index if index >= 0 else 0)
+                    sort_item.set_sort_key(
+                        _assignment_sort_key(target),
+                        _assignment_display(target),
+                    )
+
+            def _show_context_menu(pos: QPoint) -> None:
+                table = table_holder["table"]
+                if table is None:
+                    return
+                index = table.indexAt(pos)
+                selected_rows = {
+                    model_index.row()
+                    for model_index in table.selectionModel().selectedRows()
+                }
+                if index.isValid():
+                    selected_rows.add(index.row())
+                if not selected_rows:
+                    return
+                menu = QMenu(table)
+                assign_menu = menu.addMenu("Assign to")
+                for name in postplot_options:
+                    action = assign_menu.addAction(name)
+                    action.triggered.connect(
+                        lambda _checked=False, n=name, rows=set(selected_rows): _assign_rows(
+                            rows, n
+                        )
+                    )
+                unassigned_action = assign_menu.addAction(_UNASSIGNED_LABEL)
+                unassigned_action.triggered.connect(
+                    lambda _checked=False, rows=set(selected_rows): _assign_rows(rows, "")
+                )
+                menu.exec(table.viewport().mapToGlobal(pos))
+
+            table = QTableWidget(0, 6)
             table.setHorizontalHeaderLabels(
-                ["Sequence No.", "Line Name", "Line Direction", "First SP", "Last SP"]
+                [
+                    "Sequence No.",
+                    "Line Name",
+                    "Line Direction",
+                    "First SP",
+                    "Last SP",
+                    "Assigned Postplot",
+                ]
             )
             table.verticalHeader().setVisible(False)
             table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
             table.setSelectionMode(QTableWidget.SelectionMode.ExtendedSelection)
             table.setSortingEnabled(True)
-            table.horizontalHeader().setSortIndicatorShown(True)
-            table.horizontalHeader().setSectionsClickable(True)
-            table.horizontalHeader().setSectionResizeMode(
-                QHeaderView.ResizeMode.ResizeToContents
-            )
+            table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+            table.customContextMenuRequested.connect(_show_context_menu)
+            header = table.horizontalHeader()
+            header.setSortIndicatorShown(True)
+            header.setSectionsClickable(True)
+            header.setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
             table_holder["table"] = table
             _populate_table(sequences)
 
-            pending_ids: list[str] = list(selected_ids)
+            pending_assignments: dict[str, str] = dict(assignments)
 
-            def commit_selection() -> None:
-                pending_ids.clear()
-                pending_ids.extend(_collect_pending())
-                on_changed(list(pending_ids))
-
-            def select_all() -> None:
-                table.selectAll()
-
-            def clear_selection() -> None:
-                table.clearSelection()
-                commit_selection()
+            def commit_assignments() -> None:
+                pending_assignments.clear()
+                pending_assignments.update(_collect_assignments())
+                on_assignments_changed(dict(pending_assignments))
 
             def commit_and_close() -> None:
-                commit_selection()
+                commit_assignments()
                 dialog.close()
 
             btn_row = QHBoxLayout()
             all_btn = QPushButton("Select All")
             none_btn = QPushButton("Clear Selection")
+            apply_btn = QPushButton("Apply")
+            apply_btn.setObjectName("primaryBtn")
             ok_btn = QPushButton("OK")
-            ok_btn.setObjectName("primaryBtn")
             close_btn = QPushButton("Close")
-            all_btn.clicked.connect(select_all)
-            none_btn.clicked.connect(clear_selection)
+            all_btn.clicked.connect(lambda: table.selectAll())
+            none_btn.clicked.connect(table.clearSelection)
+            apply_btn.clicked.connect(commit_assignments)
             ok_btn.clicked.connect(commit_and_close)
-            close_btn.clicked.connect(commit_and_close)
+            close_btn.clicked.connect(dialog.close)
             btn_row.addWidget(all_btn)
             btn_row.addWidget(none_btn)
             btn_row.addStretch()
+            btn_row.addWidget(apply_btn)
             btn_row.addWidget(ok_btn)
             btn_row.addWidget(close_btn)
 
@@ -173,6 +276,5 @@ class SequencesDialog:
             "P111/P190 Sequences",
             build,
             parent,
-            width=640,
+            width=820,
         )
-

@@ -96,3 +96,34 @@ def nav_cache_from_json(data: dict | None) -> dict[str, tuple[float, int, str]]:
             continue
         result[path] = (mtime, size, version)
     return result
+
+
+def row_sequence_ids_to_assignments(
+    postplot_names: list[str],
+    row_sequence_ids: list[list[str]],
+) -> dict[str, str]:
+    """Map each sequence id to its assigned postplot legend row name."""
+    assignments: dict[str, str] = {}
+    for name, seq_ids in zip(postplot_names, row_sequence_ids):
+        if not name:
+            continue
+        for seq_id in seq_ids:
+            assignments[str(seq_id)] = name
+    return assignments
+
+
+def assignments_to_row_sequence_ids(
+    postplot_names: list[str],
+    assignments: dict[str, str],
+) -> list[list[str]]:
+    """Rebuild per-postplot sequence id lists from a flat assignment map."""
+    result: list[list[str]] = [[] for _ in postplot_names]
+    index_by_name = {name: index for index, name in enumerate(postplot_names) if name}
+    for seq_id, postplot_name in assignments.items():
+        row_index = index_by_name.get(postplot_name)
+        if row_index is None:
+            continue
+        bucket = result[row_index]
+        if seq_id not in bucket:
+            bucket.append(seq_id)
+    return result
