@@ -11,17 +11,8 @@ from xpostmaps.ui.map_gl_overlay import MapGlLineOverlay
 from xpostmaps.utils.spatial_clip import clip_arrays_to_bbox
 
 
-def _bbox_intersects(
-    a: tuple[float, float, float, float],
-    b: tuple[float, float, float, float],
-) -> bool:
-    ax0, ax1, ay0, ay1 = a
-    bx0, bx1, by0, by1 = b
-    return ax1 >= bx0 and ax0 <= bx1 and ay1 >= by0 and ay0 <= by1
-
-
 # Upload this many GL line strips per UI tick (legend apply stays responsive).
-_GL_UPLOADS_PER_TICK = 96
+_GL_UPLOADS_PER_TICK = 128
 
 
 class ResidentGlLineLayer:

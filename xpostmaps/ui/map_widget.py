@@ -707,7 +707,46 @@ class PostplotMapWidget(QWidget):
     def _on_gl_view_settled(self) -> None:
         bbox = self._view_clip_bbox()
         if bbox is not None:
-            self._update_overview_visibility(bbox)
+            self._refresh_settled_gl_detail(bbox)
+
+    def _gl_layers_ready(self) -> bool:
+        return bool(self._gl_line_layers) and all(
+            not layer.has_pending_uploads for layer in self._gl_line_layers
+        )
+
+    def _refresh_settled_gl_detail(
+        self,
+        bbox: tuple[float, float, float, float],
+    ) -> None:
+        """Swap to full GPU detail after pan/zoom stops — pan itself stays transform-only."""
+        self._update_overview_visibility(bbox)
+        if not self._gl_overlay.available or not self._gl_layers_ready():
+            self._frame.update()
+            return
+        zoomed_in = not self._is_overview_zoom(bbox)
+        self._gl_overlay.set_viewport_cull(zoomed_in)
+        self._gl_overlay.sync_geometry()
+        view = self._gl_overlay._view
+        if view is not None:
+            view.update()
+        self._frame.update()
+
+    def _enter_gl_motion_mode(self) -> None:
+        """Fast placeholder while dragging; full GPU detail restores on settle."""
+        if not self._gl_layers_ready():
+            return
+        bbox = self._view_clip_bbox()
+        if bbox is not None and self._is_overview_zoom(bbox):
+            for item in self._overview_cpu_items:
+                item.setVisible(True)
+            for layer in self._gl_line_layers:
+                layer.set_gl_visible(False)
+            return
+        self._gl_overlay.set_viewport_cull(False)
+        for item in self._overview_cpu_items:
+            item.setVisible(False)
+        for layer in self._gl_line_layers:
+            layer.set_gl_visible(True)
 
     def _is_overview_zoom(
         self,
@@ -736,11 +775,18 @@ class PostplotMapWidget(QWidget):
     ) -> None:
         if not self._gl_line_layers and not self._overview_cpu_items:
             return
+        # GPU holds full vertex detail once uploaded — never keep RDP overview on screen.
+        if self._gl_layers_ready():
+            for item in self._overview_cpu_items:
+                item.setVisible(False)
+            for layer in self._gl_line_layers:
+                layer.set_gl_visible(True)
+            return
         overview = self._is_overview_zoom(bbox)
         for item in self._overview_cpu_items:
             item.setVisible(overview)
         for layer in self._gl_line_layers:
-            layer.set_gl_visible(not overview)
+            layer.set_gl_visible(not overview and not layer.has_pending_uploads)
 
     def _start_gl_upload_pump(self) -> None:
         if not self._gl_line_layers:
@@ -759,8 +805,9 @@ class PostplotMapWidget(QWidget):
         else:
             bbox = self._view_clip_bbox()
             if bbox is not None:
-                self._update_overview_visibility(bbox)
-            self._frame.update()
+                self._refresh_settled_gl_detail(bbox)
+            else:
+                self._frame.update()
 
     def _enter_motion_lod(self) -> None:
         """Keep line geometry on screen during pan; hide scatter markers only."""
@@ -1005,7 +1052,6 @@ class PostplotMapWidget(QWidget):
                 skipFiniteCheck=True,
             )
             overview_curve.setSegmentedLineMode("off")
-            overview_curve.setCacheMode(QGraphicsItem.CacheMode.DeviceCoordinateCache)
             self._register_plot_item(overview_curve, layer=layer)
             self._overview_cpu_items.append(overview_curve)
             self._overview_strokes.append((lx, ly, rgba))
@@ -1358,6 +1404,9 @@ class PostplotMapWidget(QWidget):
         if self._gl_overlay.available:
             self._gl_overlay.sync_geometry()
         if self._gl_line_layers and not self._clip_items:
+            if not self._interacting:
+                self._interacting = True
+                self._enter_gl_motion_mode()
             self._gl_settle_timer.start()
             return
         if not self._has_motion_lod_layers():
@@ -1407,11 +1456,14 @@ class PostplotMapWidget(QWidget):
         self._frame.update()
 
     def _apply_view_clip(self) -> None:
-        """End motion LOD; refresh GL tiles / CPU clip on settle."""
+        """End motion LOD; refresh full GPU detail on settle."""
         bbox = self._view_clip_bbox()
         self._finish_pan_interaction()
         if bbox is not None:
-            self._update_overview_visibility(bbox)
+            if self._gl_line_layers and not self._clip_items:
+                self._refresh_settled_gl_detail(bbox)
+            else:
+                self._update_overview_visibility(bbox)
         if bbox is None or not self._clip_items:
             if bbox is not None:
                 self._clip_bbox = bbox

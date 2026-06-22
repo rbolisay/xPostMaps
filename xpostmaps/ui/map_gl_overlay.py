@@ -13,6 +13,15 @@ if TYPE_CHECKING:
     from pyqtgraph.opengl import GLLinePlotItem, GLViewWidget
 
 
+def _bbox_intersects(
+    a: tuple[float, float, float, float],
+    b: tuple[float, float, float, float],
+) -> bool:
+    ax0, ax1, ay0, ay1 = a
+    bx0, bx1, by0, by1 = b
+    return ax1 >= bx0 and ax0 <= bx1 and ay1 >= by0 and ay0 <= by1
+
+
 def gl_lines_available() -> bool:
     try:
         import OpenGL  # noqa: F401
@@ -72,7 +81,9 @@ class MapGlLineOverlay:
         self._available = gl_lines_available()
         self._view = _create_ortho_gl_view(parent) if self._available else None
         self._items: dict[tuple[int, int], object] = {}
+        self._run_bboxes: dict[tuple[int, int], tuple[float, float, float, float]] = {}
         self._layer_visible: dict[int, bool] = {}
+        self._viewport_cull = False
         if self._view is not None:
             self._view.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
             self._view.setAttribute(Qt.WidgetAttribute.WA_AlwaysStackOnTop, True)
@@ -122,6 +133,8 @@ class MapGlLineOverlay:
         if vb is not None:
             (x_range, y_range) = vb.viewRange()
             self._view.set_view_range(tuple(x_range), tuple(y_range))
+        if self._viewport_cull:
+            self._apply_all_visibility()
 
     def sync_view(self) -> None:
         if not self.available:
@@ -133,11 +146,33 @@ class MapGlLineOverlay:
         (x_range, y_range) = vb.viewRange()
         self._view.set_view_range(tuple(x_range), tuple(y_range))
 
-    def _apply_layer_visibility(self, layer_id: int) -> None:
-        visible = self._layer_visible.get(layer_id, True)
+    def set_viewport_cull(self, enabled: bool) -> None:
+        self._viewport_cull = enabled
+        self._apply_all_visibility()
+
+    def _view_bbox(self) -> tuple[float, float, float, float] | None:
+        vb = self._plot.getViewBox()
+        if vb is None:
+            return None
+        (x_range, y_range) = vb.viewRange()
+        x0, x1 = x_range
+        y0, y1 = y_range
+        pad_x = max((x1 - x0) * 0.02, 1.0)
+        pad_y = max((y1 - y0) * 0.02, 1.0)
+        return (x0 - pad_x, x1 + pad_x, y0 - pad_y, y1 + pad_y)
+
+    def _apply_all_visibility(self) -> None:
+        view_bbox = self._view_bbox() if self._viewport_cull else None
         for key, item in self._items.items():
-            if key[0] == layer_id:
-                item.setVisible(visible)
+            layer_id = key[0]
+            if not self._layer_visible.get(layer_id, True):
+                item.setVisible(False)
+                continue
+            run_bbox = self._run_bboxes.get(key)
+            if view_bbox is None or run_bbox is None:
+                item.setVisible(True)
+                continue
+            item.setVisible(_bbox_intersects(run_bbox, view_bbox))
 
     def add_line_run(
         self,
@@ -180,15 +215,34 @@ class MapGlLineOverlay:
         )
         self._view.addItem(item)
         self._items[storage_key] = item
+        finite = np.isfinite(rx) & np.isfinite(ry)
+        if np.any(finite):
+            self._run_bboxes[storage_key] = (
+                float(np.min(rx[finite])),
+                float(np.max(rx[finite])),
+                float(np.min(ry[finite])),
+                float(np.max(ry[finite])),
+            )
         self._layer_visible.setdefault(layer_id, True)
-        item.setVisible(self._layer_visible.get(layer_id, True))
+        layer_vis = self._layer_visible.get(layer_id, True)
+        if self._viewport_cull:
+            run_bbox = self._run_bboxes.get(storage_key)
+            view_bbox = self._view_bbox()
+            if run_bbox is not None and view_bbox is not None:
+                layer_vis = layer_vis and _bbox_intersects(run_bbox, view_bbox)
+        item.setVisible(layer_vis)
         self._view.show()
 
     def set_layer_visible(self, layer_id: int, visible: bool) -> None:
         if not self.available:
             return
         self._layer_visible[layer_id] = visible
-        self._apply_layer_visibility(layer_id)
+        if self._viewport_cull:
+            self._apply_all_visibility()
+            return
+        for key, item in self._items.items():
+            if key[0] == layer_id:
+                item.setVisible(visible)
 
     def clear_layer(self, layer_id: int) -> None:
         if not self.available:
@@ -197,17 +251,22 @@ class MapGlLineOverlay:
         remove_keys = [k for k in self._items if k[0] == layer_id]
         for key in remove_keys:
             item = self._items.pop(key)
+            self._run_bboxes.pop(key, None)
             self._view.removeItem(item)
         self._layer_visible.pop(layer_id, None)
 
     def clear(self) -> None:
         if not self.available:
             self._items.clear()
+            self._run_bboxes.clear()
             self._layer_visible.clear()
+            self._viewport_cull = False
             return
         assert self._view is not None
         for item in self._items.values():
             self._view.removeItem(item)
         self._items.clear()
+        self._run_bboxes.clear()
         self._layer_visible.clear()
+        self._viewport_cull = False
         self._view.hide()
