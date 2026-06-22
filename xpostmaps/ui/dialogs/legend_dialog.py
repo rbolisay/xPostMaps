@@ -6,6 +6,7 @@ from typing import Callable
 
 from PySide6.QtCore import Qt, QTimer
 from PySide6.QtWidgets import (
+    QApplication,
     QCheckBox,
     QComboBox,
     QHBoxLayout,
@@ -194,20 +195,141 @@ def _configure_legend_table(table: QTableWidget) -> None:
     table.setWordWrap(False)
     table.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
     table.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+    table.setSizePolicy(QSizePolicy.Policy.Minimum, QSizePolicy.Policy.Minimum)
 
 
-def _set_table_viewport_rows(table: QTableWidget, visible_rows: int = 5) -> None:
-    """Size table to show *visible_rows* before vertical scrolling."""
+_LEGEND_MIN_DIALOG_WIDTH = 980
+_LEGEND_MIN_DIALOG_HEIGHT = 280
+_LEGEND_ROW_HEIGHT = 34
+_LEGEND_MAX_VISIBLE_ROWS = 5  # header + body rows shown before vertical scroll
+_LEGEND_MAX_BODY_ROWS = _LEGEND_MAX_VISIBLE_ROWS - 1
+
+
+def _legend_table_body_cap(table: QTableWidget) -> int | None:
+    """Return body-row cap before vertical scroll (header counts as one visible row)."""
+    if table.rowCount() <= _LEGEND_MAX_BODY_ROWS:
+        return None
+    return _LEGEND_MAX_BODY_ROWS
+
+
+def _table_viewport_height(table: QTableWidget, max_body_rows: int | None = None) -> int:
+    """Return the viewport height needed for *table* rows (header + body + frame)."""
     table.resizeRowsToContents()
     header_h = table.horizontalHeader().sizeHint().height()
-    row_h = table.verticalHeader().defaultSectionSize()
-    if table.rowCount() > 0:
-        row_h = max(row_h, max(table.rowHeight(r) for r in range(table.rowCount())))
+    default_row_h = max(table.verticalHeader().defaultSectionSize(), _LEGEND_ROW_HEIGHT)
     frame = table.frameWidth() * 2
-    viewport_h = header_h + row_h * visible_rows + frame
+
+    if table.rowCount() == 0:
+        body_h = default_row_h
+    else:
+        row_heights = [max(table.rowHeight(r), default_row_h) for r in range(table.rowCount())]
+        if max_body_rows is not None and len(row_heights) > max_body_rows:
+            body_h = sum(row_heights[:max_body_rows])
+        else:
+            body_h = sum(row_heights)
+
+    return header_h + body_h + frame
+
+
+def _fit_table_height(table: QTableWidget, max_body_rows: int | None = None) -> None:
+    """Apply viewport height to *table*; cap visible body rows when scrolling is required."""
+    viewport_h = _table_viewport_height(table, max_body_rows)
     table.setMinimumHeight(viewport_h)
     table.setMaximumHeight(viewport_h)
+    if max_body_rows is not None and table.rowCount() > max_body_rows:
+        table.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+    else:
+        table.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
 
+
+def _layout_chrome_height(layout: QVBoxLayout, exclude: set) -> int:
+    """Sum non-table widget heights inside *layout* (margins + spacing + chrome)."""
+    margins = layout.contentsMargins()
+    total = margins.top() + margins.bottom()
+    count = layout.count()
+    for i in range(count):
+        item = layout.itemAt(i)
+        if item is None:
+            continue
+        if i > 0:
+            total += layout.spacing()
+        widget = item.widget()
+        if widget is not None:
+            if widget not in exclude:
+                total += widget.sizeHint().height()
+            continue
+        sub = item.layout()
+        if sub is not None:
+            total += _layout_chrome_height(sub, exclude)
+    return total
+
+
+def _cap_tables_to_viewport(tables: list[QTableWidget], viewport_budget: int) -> None:
+    """Shrink visible table bodies proportionally so total table height fits *viewport_budget*."""
+    if not tables:
+        return
+    total_rows = sum(max(t.rowCount(), 1) for t in tables)
+    budget = max(viewport_budget, len(tables) * _LEGEND_ROW_HEIGHT)
+    for table in tables:
+        rows = max(table.rowCount(), 1)
+        share = max(_LEGEND_ROW_HEIGHT, budget * rows // total_rows)
+        max_visible = min(_LEGEND_MAX_BODY_ROWS, max(1, share // _LEGEND_ROW_HEIGHT))
+        _fit_table_height(table, max_body_rows=max_visible if table.rowCount() > max_visible else None)
+
+
+def _autosize_legend_dialog(
+    dialog: SingleInstanceDialog,
+    layout: QVBoxLayout,
+    tables: list[QTableWidget],
+) -> None:
+    """Grow or shrink the legend dialog so tables never overlap, capping at the screen."""
+    table_set = set(tables)
+    for table in tables:
+        _fit_table_columns(table)
+        _fit_table_height(table, max_body_rows=_legend_table_body_cap(table))
+
+    layout.activate()
+    QApplication.processEvents()
+
+    outer = dialog.layout()
+    outer_margins = outer.contentsMargins() if outer is not None else None
+    glass_margins = layout.contentsMargins()
+    pad_w = (
+        (outer_margins.left() + outer_margins.right() if outer_margins else 0)
+        + glass_margins.left()
+        + glass_margins.right()
+    )
+    pad_h = (
+        (outer_margins.top() + outer_margins.bottom() if outer_margins else 0)
+        + glass_margins.top()
+        + glass_margins.bottom()
+    )
+
+    screen = dialog.screen().availableGeometry() if dialog.screen() else None
+    if screen is None:
+        screen = QApplication.primaryScreen().availableGeometry()
+    max_w = max(screen.width() - 48, _LEGEND_MIN_DIALOG_WIDTH)
+    max_h = max(screen.height() - 48, _LEGEND_MIN_DIALOG_HEIGHT)
+
+    chrome_h = _layout_chrome_height(layout, table_set)
+    table_total = sum(t.minimumHeight() for t in tables)
+    natural_h = chrome_h + table_total + pad_h
+
+    if natural_h > max_h:
+        available_for_tables = max_h - pad_h - chrome_h
+        _cap_tables_to_viewport(tables, available_for_tables)
+        table_total = sum(t.minimumHeight() for t in tables)
+        target_h = min(chrome_h + table_total + pad_h, max_h)
+    else:
+        target_h = max(natural_h, _LEGEND_MIN_DIALOG_HEIGHT)
+
+    target_w = min(max(_LEGEND_MIN_DIALOG_WIDTH, pad_w + layout.sizeHint().width()), max_w)
+
+    dialog.setMinimumSize(_LEGEND_MIN_DIALOG_WIDTH, _LEGEND_MIN_DIALOG_HEIGHT)
+    dialog.setMaximumSize(max_w, max_h)
+    dialog.resize(target_w, target_h)
+    layout.activate()
+    QApplication.processEvents()
 
 class LegendDialog:
     KEY = "legend"
@@ -335,6 +457,14 @@ class LegendDialog:
                 ["Postplot Name", "Line Style", "Color", "P111/P190 Data", "Select Sequences", "Hide"]
             )
             _configure_legend_table(post_table)
+
+            legend_tables: list[QTableWidget] = [area_table, post_table]
+
+            def refit_legend_geometry() -> None:
+                _autosize_legend_dialog(dialog, layout, legend_tables)
+
+            def schedule_refit() -> None:
+                QTimer.singleShot(0, refit_legend_geometry)
 
             def _collect() -> LegendConfig:
                 areas: list[AreaLegendEntry] = []
@@ -520,6 +650,7 @@ class LegendDialog:
                 )
                 _apply_table_cell_button_width(custom_btn, custom_btn.text())
                 _fit_table_columns(area_table, [4])
+                schedule_refit()
 
             def apply_legend() -> None:
                 live_apply_timer.stop()
@@ -616,6 +747,7 @@ class LegendDialog:
                 _update_custom_button(row)
                 _fit_table_row(area_table, row)
                 _fit_table_columns(area_table)
+                schedule_refit()
 
             def remove_area_row() -> None:
                 row = area_table.currentRow()
@@ -623,6 +755,7 @@ class LegendDialog:
                     area_table.removeRow(row)
                     if row < len(row_custom_points):
                         del row_custom_points[row]
+                    schedule_refit()
                     apply_legend()
 
             def _postplot_names() -> list[str]:
@@ -645,6 +778,7 @@ class LegendDialog:
                     btn.setText(label)
                     _apply_table_cell_button_width(btn, label)
                 _fit_table_columns(post_table)
+                schedule_refit()
 
             def _open_sequences(row: int, name: str) -> None:
                 if not seq_list:
@@ -757,6 +891,7 @@ class LegendDialog:
                 post_table.setCellWidget(row, 5, hide_box)
                 _fit_table_row(post_table, row)
                 _fit_table_columns(post_table)
+                schedule_refit()
 
             def remove_post_row() -> None:
                 row = post_table.currentRow()
@@ -766,6 +901,7 @@ class LegendDialog:
                         del row_sequence_ids[row]
                     if row < len(row_sequence_filter_active):
                         del row_sequence_filter_active[row]
+                    schedule_refit()
                     apply_legend()
 
             # Only show area rows the user has explicitly added. Imported
@@ -801,6 +937,7 @@ class LegendDialog:
                 ]
             )
             _configure_legend_table(preplot_table)
+            legend_tables.append(preplot_table)
 
             def add_preplot_row(entry: PreplotLegendEntry | None = None) -> None:
                 row = preplot_table.rowCount()
@@ -850,11 +987,13 @@ class LegendDialog:
                 preplot_table.setCellWidget(row, 4, hide_box)
                 _fit_table_row(preplot_table, row)
                 _fit_table_columns(preplot_table)
+                schedule_refit()
 
             def remove_preplot_row() -> None:
                 row = preplot_table.currentRow()
                 if row >= 0:
                     preplot_table.removeRow(row)
+                    schedule_refit()
                     apply_legend()
 
             navplan_lbl = QLabel("Navplan")
@@ -871,6 +1010,7 @@ class LegendDialog:
                 ]
             )
             _configure_legend_table(navplan_table)
+            legend_tables.append(navplan_table)
 
             def _navplan_legend_names() -> list[str]:
                 names: list[str] = []
@@ -892,6 +1032,7 @@ class LegendDialog:
                     btn.setText(label)
                     _apply_table_cell_button_width(btn, label)
                 _fit_table_columns(navplan_table)
+                schedule_refit()
 
             def _open_navplans(row: int, name: str) -> None:
                 if not navplan_list:
@@ -920,6 +1061,7 @@ class LegendDialog:
                         else:
                             row_navplan_filter_active.append(active)
                     _refresh_navplan_select_buttons()
+                    schedule_refit()
                     apply_legend()
 
                 NavplansDialog.open(
@@ -992,6 +1134,7 @@ class LegendDialog:
                 navplan_table.setCellWidget(row, 4, hide_box)
                 _fit_table_row(navplan_table, row)
                 _fit_table_columns(navplan_table)
+                schedule_refit()
 
             def remove_navplan_row() -> None:
                 row = navplan_table.currentRow()
@@ -1001,6 +1144,7 @@ class LegendDialog:
                         del row_navplan_indices[row]
                     if row < len(row_navplan_filter_active):
                         del row_navplan_filter_active[row]
+                    schedule_refit()
                     apply_legend()
 
             for entry in legend.preplot_lines:
@@ -1067,20 +1211,6 @@ class LegendDialog:
             layout.addLayout(post_btns)
             layout.addWidget(post_table)
 
-            _set_table_viewport_rows(area_table, 5)
-            _set_table_viewport_rows(preplot_table, 4)
-            _set_table_viewport_rows(navplan_table, 4)
-            _set_table_viewport_rows(post_table, 5)
-
-            def refit_all_legend_tables() -> None:
-                _fit_table_columns(area_table)
-                _fit_table_columns(preplot_table)
-                _fit_table_columns(navplan_table)
-                _fit_table_columns(post_table)
-
-            refit_all_legend_tables()
-            QTimer.singleShot(0, refit_all_legend_tables)
-
             if not seq_list:
                 note = QLabel("Load P111/P190 files to enable sequence selection.")
                 note.setStyleSheet("color: #94a3b8; font-size: 11px;")
@@ -1107,4 +1237,14 @@ class LegendDialog:
             # All rows built: enable live updates for subsequent user edits.
             live["on"] = True
 
-        SingleInstanceDialog.show_dialog(cls.KEY, "Legend", build, parent, width=980, height=1040)
+            refit_legend_geometry()
+            schedule_refit()
+
+        SingleInstanceDialog.show_dialog(
+            cls.KEY,
+            "Legend",
+            build,
+            parent,
+            width=_LEGEND_MIN_DIALOG_WIDTH,
+            height=_LEGEND_MIN_DIALOG_HEIGHT,
+        )
