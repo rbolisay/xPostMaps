@@ -85,6 +85,32 @@ def _apply_table_cell_button_width(btn: QPushButton, text: str | None = None) ->
     btn.setMinimumWidth(btn.fontMetrics().horizontalAdvance(label) + pad)
 
 
+_TABLE_CELL_HORIZONTAL_PAD = 16  # QTableWidget::item padding (8px each side)
+
+
+def _widget_content_width(widget) -> int:
+    """Best-effort width for a table cell widget including style chrome."""
+    widget.ensurePolished()
+    if isinstance(widget, QPushButton):
+        _apply_table_cell_button_width(widget)
+    elif isinstance(widget, QLineEdit):
+        _apply_name_edit_width(widget)
+    elif isinstance(widget, QComboBox):
+        metrics = widget.fontMetrics()
+        text_w = max(
+            (metrics.horizontalAdvance(widget.itemText(i)) for i in range(widget.count())),
+            default=0,
+        )
+        widget.setMinimumWidth(text_w + 36)  # arrow + padding + border
+    else:
+        widget.adjustSize()
+    return max(
+        widget.minimumWidth(),
+        widget.minimumSizeHint().width(),
+        widget.sizeHint().width(),
+    )
+
+
 def _table_name_edit(text: str = "") -> QLineEdit:
     edit = QLineEdit(text)
     edit.setSizePolicy(QSizePolicy.Policy.Minimum, QSizePolicy.Policy.Fixed)
@@ -102,7 +128,7 @@ def _apply_name_edit_width(edit: QLineEdit, text: str | None = None) -> None:
 def _connect_name_edit(table: QTableWidget, edit: QLineEdit, col: int = 0) -> None:
     def sync_name_width(_text: str = "") -> None:
         _apply_name_edit_width(edit)
-        _fit_table_column(table, col)
+        _fit_table_columns(table, [col])
 
     edit.textChanged.connect(sync_name_width)
 
@@ -118,45 +144,38 @@ def _column_content_width(table: QTableWidget, col: int) -> int:
         if item is not None:
             width = max(width, item.sizeHint().width())
         widget = table.cellWidget(row, col)
-        if widget is None:
+        if widget is not None:
+            width = max(width, _widget_content_width(widget))
+    return max(width + _TABLE_CELL_HORIZONTAL_PAD, 48)
+
+
+def _fit_table_columns(table: QTableWidget, cols: list[int] | None = None) -> None:
+    """Size columns to the widest row content and lock widths so widgets do not overlap."""
+    if cols is None:
+        cols = list(range(table.columnCount()))
+    header = table.horizontalHeader()
+    for col in cols:
+        if col < 0 or col >= table.columnCount():
             continue
-        if isinstance(widget, QPushButton):
-            _apply_table_cell_button_width(widget)
-            width = max(width, widget.minimumWidth(), widget.sizeHint().width())
-        elif isinstance(widget, QLineEdit):
-            _apply_name_edit_width(widget)
-            width = max(width, widget.minimumWidth(), widget.sizeHint().width())
-        else:
-            widget.adjustSize()
-            width = max(width, widget.sizeHint().width())
-    return max(width + 12, 48)
+        header.setSectionResizeMode(col, QHeaderView.ResizeMode.Fixed)
+        table.setColumnWidth(col, _column_content_width(table, col))
 
 
 def _fit_table_column(table: QTableWidget, col: int) -> None:
-    """Size a column to fit header text and the widest cell widget/content."""
-    if col < 0 or col >= table.columnCount():
-        return
-    table.setColumnWidth(col, _column_content_width(table, col))
+    _fit_table_columns(table, [col])
 
 
 def _fit_table_action_column(table: QTableWidget, col: int) -> None:
-    """Ensure action-button columns fit the widest button and header text."""
-    _fit_table_column(table, col)
+    _fit_table_columns(table, [col])
 
 
 def _fit_table_name_column(table: QTableWidget, col: int = 0) -> None:
-    """Ensure name columns fit the widest QLineEdit and header text."""
-    _fit_table_column(table, col)
+    _fit_table_columns(table, [col])
 
 
 def _fit_table_row(table: QTableWidget, row: int) -> None:
     table.resizeRowToContents(row)
     table.setRowHeight(row, max(table.rowHeight(row), 34))
-    for col in range(table.columnCount()):
-        table.resizeColumnToContents(col)
-        measured = _column_content_width(table, col)
-        if table.columnWidth(col) < measured:
-            table.setColumnWidth(col, measured)
 
 
 def _hide_checkbox(hidden: bool) -> QCheckBox:
@@ -170,9 +189,8 @@ def _configure_legend_table(table: QTableWidget) -> None:
     table.verticalHeader().setVisible(False)
     table.verticalHeader().setMinimumSectionSize(34)
     table.verticalHeader().setDefaultSectionSize(34)
-    table.horizontalHeader().setSectionResizeMode(
-        QHeaderView.ResizeMode.ResizeToContents
-    )
+    header = table.horizontalHeader()
+    header.setSectionResizeMode(QHeaderView.ResizeMode.Fixed)
     table.setWordWrap(False)
     table.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
     table.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
@@ -500,7 +518,8 @@ class LegendDialog:
                 custom_btn.setText(
                     f"Edit Points ({count})" if count else "Edit Points"
                 )
-                _fit_table_row(area_table, row)
+                _apply_table_cell_button_width(custom_btn, custom_btn.text())
+                _fit_table_columns(area_table, [4])
 
             def apply_legend() -> None:
                 live_apply_timer.stop()
@@ -596,7 +615,7 @@ class LegendDialog:
                 area_table.setCellWidget(row, 5, hide_box)
                 _update_custom_button(row)
                 _fit_table_row(area_table, row)
-                _fit_table_name_column(area_table, 0)
+                _fit_table_columns(area_table)
 
             def remove_area_row() -> None:
                 row = area_table.currentRow()
@@ -625,8 +644,7 @@ class LegendDialog:
                     label = f"Select Sequences ({count})" if count else "Select Sequences"
                     btn.setText(label)
                     _apply_table_cell_button_width(btn, label)
-                    _fit_table_row(post_table, row)
-                _fit_table_action_column(post_table, 4)
+                _fit_table_columns(post_table)
 
             def _open_sequences(row: int, name: str) -> None:
                 if not seq_list:
@@ -738,8 +756,7 @@ class LegendDialog:
                 hide_box.toggled.connect(live_apply)
                 post_table.setCellWidget(row, 5, hide_box)
                 _fit_table_row(post_table, row)
-                _fit_table_name_column(post_table, 0)
-                _fit_table_action_column(post_table, 4)
+                _fit_table_columns(post_table)
 
             def remove_post_row() -> None:
                 row = post_table.currentRow()
@@ -755,7 +772,7 @@ class LegendDialog:
             # polygons, preplots and survey perimeters are NOT auto-added.
             for entry in non_imported_polygon_entries(legend.areas):
                 add_area_row(entry)
-            _fit_table_name_column(area_table, 0)
+            _fit_table_columns(area_table)
 
             area_btns = QHBoxLayout()
             add_area_btn = QPushButton("Add Area Row")
@@ -832,7 +849,7 @@ class LegendDialog:
                 hide_box.toggled.connect(live_apply)
                 preplot_table.setCellWidget(row, 4, hide_box)
                 _fit_table_row(preplot_table, row)
-                _fit_table_name_column(preplot_table, 0)
+                _fit_table_columns(preplot_table)
 
             def remove_preplot_row() -> None:
                 row = preplot_table.currentRow()
@@ -874,8 +891,7 @@ class LegendDialog:
                     label = f"Select Navplans ({count})" if count else "Select Navplans"
                     btn.setText(label)
                     _apply_table_cell_button_width(btn, label)
-                    _fit_table_row(navplan_table, row)
-                _fit_table_action_column(navplan_table, 3)
+                _fit_table_columns(navplan_table)
 
             def _open_navplans(row: int, name: str) -> None:
                 if not navplan_list:
@@ -975,8 +991,7 @@ class LegendDialog:
                 hide_box.toggled.connect(live_apply)
                 navplan_table.setCellWidget(row, 4, hide_box)
                 _fit_table_row(navplan_table, row)
-                _fit_table_name_column(navplan_table, 0)
-                _fit_table_action_column(navplan_table, 3)
+                _fit_table_columns(navplan_table)
 
             def remove_navplan_row() -> None:
                 row = navplan_table.currentRow()
@@ -990,7 +1005,7 @@ class LegendDialog:
 
             for entry in legend.preplot_lines:
                 add_preplot_row(entry)
-            _fit_table_name_column(preplot_table, 0)
+            _fit_table_columns(preplot_table)
 
             preplot_btns = QHBoxLayout()
             add_preplot_btn = QPushButton("Add Preplot Row")
@@ -1013,8 +1028,7 @@ class LegendDialog:
 
             for entry in legend.navplan_lines:
                 add_navplan_row(entry)
-            _fit_table_name_column(navplan_table, 0)
-            _fit_table_action_column(navplan_table, 3)
+            _fit_table_columns(navplan_table)
 
             navplan_btns = QHBoxLayout()
             add_navplan_btn = QPushButton("Add Navplan Row")
@@ -1040,8 +1054,7 @@ class LegendDialog:
             if not legend.postplot_lines:
                 add_post_row(PostplotLegendEntry(name="Up Line", color="#ef4444"))
                 add_post_row(PostplotLegendEntry(name="Down Line", color="#3b82f6"))
-            _fit_table_name_column(post_table, 0)
-            _fit_table_action_column(post_table, 4)
+            _fit_table_columns(post_table)
 
             post_btns = QHBoxLayout()
             add_post_btn = QPushButton("Add PostPlot Row")
@@ -1058,6 +1071,15 @@ class LegendDialog:
             _set_table_viewport_rows(preplot_table, 4)
             _set_table_viewport_rows(navplan_table, 4)
             _set_table_viewport_rows(post_table, 5)
+
+            def refit_all_legend_tables() -> None:
+                _fit_table_columns(area_table)
+                _fit_table_columns(preplot_table)
+                _fit_table_columns(navplan_table)
+                _fit_table_columns(post_table)
+
+            refit_all_legend_tables()
+            QTimer.singleShot(0, refit_all_legend_tables)
 
             if not seq_list:
                 note = QLabel("Load P111/P190 files to enable sequence selection.")
