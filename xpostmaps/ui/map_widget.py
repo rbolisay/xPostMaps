@@ -43,7 +43,7 @@ from xpostmaps.ui.map_batch import (
 from xpostmaps.ui.map_view_box import MapViewBox
 from xpostmaps.ui.map_clip_worker import MapClipWorker
 from xpostmaps.ui.map_gl_overlay import MapGlLineOverlay
-from xpostmaps.ui.map_tiled_layer import TiledLineLayer
+from xpostmaps.ui.map_gl_resident_layer import ResidentGlLineLayer
 from xpostmaps.ui.theme import (
     BG_MAP_PRINT,
     DOWN_LINE,
@@ -55,12 +55,16 @@ from xpostmaps.ui.theme import (
 )
 from xpostmaps.utils.spatial_clip import (
     SpatialGridIndex,
+    MOTION_SCATTER_BUDGET,
+    MOTION_VIEW_ZOOM_RATIO,
+    SCREEN_LINE_HARD_CAP,
+    SCREEN_OVERVIEW_BUDGET,
     build_coarse_preview,
-    clip_arrays_to_bbox,
     clip_and_prepare_items,
+    clip_arrays_to_bbox,
     clip_items_to_bbox,
-    motion_line_geometry,
     prepare_screen_clip_results,
+    screen_line_budget_for_view,
     screen_line_geometry,
     screen_scatter_geometry,
 )
@@ -90,17 +94,13 @@ _CLIP_REGISTER_MIN = 6_000
 # short pan does not blank the line edges before the debounced reclip fires.
 _CLIP_MARGIN = 0.6
 # Faster restore after pan stops (still debounced through wheel bursts).
-_CLIP_SETTLE_MS = 50
-# QGIS-style motion LOD: shape-preserving RDP paths stay on screen while panning.
-# Full view-clipped detail is rebuilt asynchronously when motion stops.
-_MOTION_LINE_BUDGET = 32_000
-_MOTION_SCATTER_BUDGET = 12_000
-# When the view span is below this fraction of the layer extent, clip to view
-# before RDP so zoomed-in pans keep curve detail instead of sparse overview LOD.
-_MOTION_VIEW_ZOOM_RATIO = 0.45
-# Settled view: full view-clipped detail up to this cap per layer.
-_SCREEN_LINE_HARD_CAP = 400_000
-_SCREEN_SCATTER_BUDGET = 40_000
+_CLIP_SETTLE_MS = 16
+# QGIS-style motion LOD: shape-preserving RDP paths; layers hidden while panning.
+_MOTION_LINE_BUDGET = MOTION_SCATTER_BUDGET
+_MOTION_SCATTER_BUDGET = MOTION_SCATTER_BUDGET
+# Settled view: overview uses the same cap as dotted scatter; zoomed-in allows more.
+_SCREEN_LINE_HARD_CAP = SCREEN_LINE_HARD_CAP
+_SCREEN_SCATTER_BUDGET = SCREEN_OVERVIEW_BUDGET
 # PDF deliverables should use print-weight lines, not the heavier on-screen
 # minimum needed for interactive visibility.
 _EXPORT_LINE_WIDTH_SCALE = 0.35
@@ -416,7 +416,9 @@ class PostplotMapWidget(QWidget):
         # million-point surveys) without the monotonic-x assumption that breaks
         # pyqtgraph's built-in clipToView for weaving survey lines.
         self._clip_items: list[dict] = []
-        self._tiled_layers: list[TiledLineLayer] = []
+        self._gl_line_layers: list[ResidentGlLineLayer] = []
+        self._overview_cpu_items: list[pg.PlotCurveItem] = []
+        self._overview_strokes: list[tuple[np.ndarray, np.ndarray, tuple[int, int, int, int]]] = []
         self._clip_bbox: tuple[float, float, float, float] | None = None
         # True while the user is actively panning/zooming; dense layers keep their
         # last clipped geometry on screen for a sharp, snappy interaction.
@@ -484,7 +486,7 @@ class PostplotMapWidget(QWidget):
         self._plot.setRenderHint(QPainter.RenderHint.Antialiasing, False)
         layout.addWidget(self._plot)
 
-        self._gl_overlay = MapGlLineOverlay(self._plot, parent=self)
+        self._gl_overlay = MapGlLineOverlay(self._plot, parent=self._plot)
 
         self._frame = MapFrameOverlay(self._plot, self._plot_item)
         self._frame_timer = QTimer(self)
@@ -509,9 +511,13 @@ class PostplotMapWidget(QWidget):
         # pauses mid-drag, short enough to feel instant once the user stops.
         self._clip_timer.setInterval(_CLIP_SETTLE_MS)
         self._clip_timer.timeout.connect(self._apply_view_clip)
-        self._clip_apply_timer = QTimer(self)
-        self._clip_apply_timer.setSingleShot(True)
-        self._clip_apply_timer.timeout.connect(self._apply_next_clip_layer)
+        self._gl_upload_timer = QTimer(self)
+        self._gl_upload_timer.setSingleShot(True)
+        self._gl_upload_timer.timeout.connect(self._apply_next_gl_upload)
+        self._gl_settle_timer = QTimer(self)
+        self._gl_settle_timer.setSingleShot(True)
+        self._gl_settle_timer.setInterval(_CLIP_SETTLE_MS)
+        self._gl_settle_timer.timeout.connect(self._on_gl_view_settled)
         self._pending_clip_bbox: tuple[float, float, float, float] | None = None
         self._pending_clip_layers: list[tuple[dict, tuple[np.ndarray, np.ndarray]]] = []
         self._pending_clip_layer_index = 0
@@ -588,10 +594,12 @@ class PostplotMapWidget(QWidget):
         """
         if full_detail:
             self._gl_overlay.hide_for_export()
+            for item in self._overview_cpu_items:
+                item.setVisible(False)
             bbox = self._view_clip_bbox()
             if bbox is not None:
-                for layer in self._tiled_layers:
-                    layer.update_visibility(bbox, for_export=True)
+                for layer in self._gl_line_layers:
+                    layer.prepare_export(bbox)
             self._restore_export_detail()
         else:
             self._restore_screen_pens()
@@ -607,12 +615,13 @@ class PostplotMapWidget(QWidget):
         self._clip_bbox = None
         for rec in self._clip_items:
             rec.pop("_clip_sig", None)
-        bbox = self._view_clip_bbox()
-        if bbox is not None:
-            for layer in self._tiled_layers:
-                layer.update_visibility(bbox, for_export=False)
         if self._gl_overlay.available:
             self._gl_overlay.sync_geometry()
+        bbox = self._view_clip_bbox()
+        if bbox is not None:
+            for layer in self._gl_line_layers:
+                layer.end_export()
+            self._update_overview_visibility(bbox)
         if self._clip_items:
             self._apply_view_clip()
 
@@ -677,71 +686,89 @@ class PostplotMapWidget(QWidget):
         self._scatter_items.clear()
         self._postplot_nav_items.clear()
         self._clip_items.clear()
-        for layer in self._tiled_layers:
+        for layer in self._gl_line_layers:
             layer.clear()
-        self._tiled_layers.clear()
+        self._gl_line_layers.clear()
+        self._overview_cpu_items.clear()
+        self._overview_strokes.clear()
         self._gl_overlay.clear()
         self._clip_bbox = None
         self._pending_clip_layers.clear()
         self._pending_clip_bbox = None
         self._pending_clip_layer_index = 0
-        self._clip_apply_timer.stop()
+        self._gl_upload_timer.stop()
+        self._gl_settle_timer.stop()
         self._interacting = False
         self._motion_lod_generation += 1
 
     def _has_motion_lod_layers(self) -> bool:
-        return bool(self._postplot_nav_items) or bool(self._tiled_layers)
+        return bool(self._postplot_nav_items) or bool(self._clip_items)
 
-    def _motion_line_data(self, rec: dict) -> tuple[np.ndarray, np.ndarray]:
-        """Return motion LOD for a line layer — overview RDP or view-clipped when zoomed."""
-        xs = rec["xs"]
-        ys = rec["ys"]
-        coarse_x = rec.get("coarse_xs")
-        coarse_y = rec.get("coarse_ys")
-        if coarse_x is None or coarse_y is None:
-            return build_coarse_preview(xs, ys, max_points=_MOTION_LINE_BUDGET)
-        if not rec.get("motion_lod_ready"):
-            return coarse_x, coarse_y
-
+    def _on_gl_view_settled(self) -> None:
         bbox = self._view_clip_bbox()
-        if bbox is None:
-            return coarse_x, coarse_y
+        if bbox is not None:
+            self._update_overview_visibility(bbox)
 
+    def _is_overview_zoom(
+        self,
+        bbox: tuple[float, float, float, float] | None = None,
+    ) -> bool:
+        bbox = bbox or self._view_clip_bbox()
+        if bbox is None or not self._overview_strokes:
+            return False
         bx0, bx1, by0, by1 = bbox
         view_span = max(bx1 - bx0, by1 - by0, 1.0)
+        xs = np.concatenate([s[0] for s in self._overview_strokes if s[0].size])
+        ys = np.concatenate([s[1] for s in self._overview_strokes if s[1].size])
         finite = np.isfinite(xs) & np.isfinite(ys)
         if not np.any(finite):
-            return coarse_x, coarse_y
-        fx = xs[finite]
-        fy = ys[finite]
+            return False
         data_span = max(
-            float(fx.max() - fx.min()),
-            float(fy.max() - fy.min()),
+            float(np.max(xs[finite]) - np.min(xs[finite])),
+            float(np.max(ys[finite]) - np.min(ys[finite])),
             1.0,
         )
-        if view_span >= data_span * _MOTION_VIEW_ZOOM_RATIO:
-            return coarse_x, coarse_y
+        return view_span >= data_span * MOTION_VIEW_ZOOM_RATIO
 
-        cx, cy = clip_arrays_to_bbox(
-            xs,
-            ys,
-            bbox,
-            kind="line",
-            grid=rec.get("grid"),
-        )
-        if cx.size < 2:
-            return coarse_x, coarse_y
-        return motion_line_geometry(cx, cy, budget=_MOTION_LINE_BUDGET)
+    def _update_overview_visibility(
+        self,
+        bbox: tuple[float, float, float, float] | None = None,
+    ) -> None:
+        if not self._gl_line_layers and not self._overview_cpu_items:
+            return
+        overview = self._is_overview_zoom(bbox)
+        for item in self._overview_cpu_items:
+            item.setVisible(overview)
+        for layer in self._gl_line_layers:
+            layer.set_gl_visible(not overview)
+
+    def _start_gl_upload_pump(self) -> None:
+        if not self._gl_line_layers:
+            return
+        self._gl_upload_timer.start(0)
+
+    def _apply_next_gl_upload(self) -> None:
+        pending = False
+        for layer in self._gl_line_layers:
+            if layer.has_pending_uploads:
+                layer.upload_pending_batch()
+                if layer.has_pending_uploads:
+                    pending = True
+        if pending:
+            self._gl_upload_timer.start(0)
+        else:
+            bbox = self._view_clip_bbox()
+            if bbox is not None:
+                self._update_overview_visibility(bbox)
+            self._frame.update()
 
     def _enter_motion_lod(self) -> None:
-        """QGIS-style: swap to precomputed coarse paths + device cache (lines stay visible)."""
+        """Keep line geometry on screen during pan; hide scatter markers only."""
         self._clip_worker.next_generation()
-        self._clip_apply_timer.stop()
         self._pending_clip_layers.clear()
         self._pending_clip_bbox = None
         self._pending_clip_layer_index = 0
         for rec in self._clip_items:
-            rec.pop("_clip_sig", None)
             if rec.get("motion_active"):
                 continue
             rec["motion_active"] = True
@@ -749,8 +776,6 @@ class PostplotMapWidget(QWidget):
             if rec["kind"] == "scatter":
                 item.setVisible(False)
                 continue
-            mx, my = self._motion_line_data(rec)
-            item.setData(mx, my)
             item.setVisible(True)
             item.setCacheMode(QGraphicsItem.CacheMode.DeviceCoordinateCache)
 
@@ -957,38 +982,67 @@ class PostplotMapWidget(QWidget):
             lx, ly = local_parts[0]
         else:
             lx, ly = concat_polylines(local_parts)
-        dense_layer = (
-            layer in ("postplot", "navplan")
-            and clipable
+
+        dense_solid = (
+            clipable
+            and layer in ("postplot", "navplan")
             and lx.size > _CLIP_REGISTER_MIN
+            and line_style == LineStyle.SOLID
         )
-        if dense_layer:
+        if dense_solid and self._gl_overlay.available:
             export_pen = _make_export_pen(rgba, width_mm, line_style)
-            use_gl = (
-                line_style == LineStyle.SOLID
-                and self._gl_overlay.available
+            overview_x, overview_y = screen_line_geometry(
+                lx,
+                ly,
+                budget=SCREEN_OVERVIEW_BUDGET,
             )
-            tiled = TiledLineLayer(
-                xs=lx,
-                ys=ly,
+            overview_curve = pg.PlotCurveItem(
+                overview_x,
+                overview_y,
+                pen=pen,
+                connect="finite",
+                antialias=False,
+                skipFiniteCheck=True,
+            )
+            overview_curve.setSegmentedLineMode("off")
+            overview_curve.setCacheMode(QGraphicsItem.CacheMode.DeviceCoordinateCache)
+            self._register_plot_item(overview_curve, layer=layer)
+            self._overview_cpu_items.append(overview_curve)
+            self._overview_strokes.append((lx, ly, rgba))
+            gl_layer = ResidentGlLineLayer(
+                parts=local_parts,
                 pen=pen,
                 export_pen=export_pen,
                 plot_item=self._plot_item,
                 gl_overlay=self._gl_overlay,
-                use_gl=use_gl,
                 line_items=self._line_items,
                 plot_items=self._plot_items,
             )
-            self._tiled_layers.append(tiled)
+            self._gl_line_layers.append(gl_layer)
+            self._start_gl_upload_pump()
             bbox = self._view_clip_bbox()
             if bbox is not None:
-                tiled.update_visibility(bbox)
+                self._update_overview_visibility(bbox)
             return
 
-        display_x, display_y = screen_line_geometry(lx, ly, budget=_SCREEN_LINE_HARD_CAP)
+        display_budget = screen_line_budget_for_view(
+            lx,
+            ly,
+            self._view_clip_bbox(),
+        )
+        clip_bbox = self._view_clip_bbox()
+        if display_budget is None and clip_bbox is not None:
+            display_x, display_y = clip_arrays_to_bbox(
+                lx,
+                ly,
+                clip_bbox,
+                kind="line",
+            )
+        elif display_budget is None:
+            display_x, display_y = lx, ly
+        else:
+            display_x, display_y = screen_line_geometry(lx, ly, budget=display_budget)
         curve = pg.PlotCurveItem(
-            display_x,
-            display_y,
             pen=pen,
             connect="finite",
             antialias=False,
@@ -1006,6 +1060,14 @@ class PostplotMapWidget(QWidget):
                 "export_pen": _make_export_pen(rgba, width_mm, line_style),
             }
         )
+
+        def _apply_line_geometry() -> None:
+            curve.setData(display_x, display_y)
+
+        if lx.size > _CLIP_REGISTER_MIN:
+            QTimer.singleShot(0, _apply_line_geometry)
+        else:
+            _apply_line_geometry()
         if (
             clipable
             and layer in ("postplot", "navplan")
@@ -1197,8 +1259,7 @@ class PostplotMapWidget(QWidget):
         for rec in self._clip_items:
             rec["motion_active"] = False
             rec["item"].setCacheMode(QGraphicsItem.CacheMode.NoCache)
-            if rec["kind"] == "scatter":
-                rec["item"].setVisible(True)
+            rec["item"].setVisible(True)
 
     def _view_clip_bbox(self) -> tuple[float, float, float, float] | None:
         vb = self._plot.getViewBox()
@@ -1233,45 +1294,12 @@ class PostplotMapWidget(QWidget):
         for rec, (cx, cy) in zip(self._clip_items, results):
             sig = (bbox, int(cx.size))
             if rec.get("_clip_sig") == sig:
+                rec["item"].setVisible(True)
                 continue
             rec["_clip_sig"] = sig
             rec["item"].setData(cx, cy)
             rec["item"].setVisible(True)
-
-    def _schedule_incremental_clip_apply(
-        self,
-        bbox: tuple[float, float, float, float],
-        results: list[tuple[np.ndarray, np.ndarray]],
-    ) -> None:
-        """Apply one layer per event-loop turn — keeps pan responsive between layers."""
-        self._clip_apply_timer.stop()
-        self._pending_clip_bbox = bbox
-        self._pending_clip_layers = list(zip(self._clip_items, results))
-        self._pending_clip_layer_index = 0
-        self._clip_apply_timer.start(0)
-
-    def _apply_next_clip_layer(self) -> None:
-        if self._interacting or self._pending_clip_bbox is None:
-            self._pending_clip_layers.clear()
-            self._pending_clip_bbox = None
-            return
-        bbox = self._pending_clip_bbox
-        while self._pending_clip_layer_index < len(self._pending_clip_layers):
-            rec, (cx, cy) = self._pending_clip_layers[self._pending_clip_layer_index]
-            self._pending_clip_layer_index += 1
-            sig = (bbox, int(cx.size))
-            if rec.get("_clip_sig") != sig:
-                rec["_clip_sig"] = sig
-                rec["item"].setData(cx, cy)
-            rec["item"].setVisible(True)
-            rec["motion_active"] = False
-            if self._pending_clip_layer_index < len(self._pending_clip_layers):
-                self._clip_apply_timer.start(0)
-                return
-        self._pending_clip_layers.clear()
-        self._pending_clip_bbox = None
         self._clear_pan_render_cache()
-        self._frame.update()
 
     def _sync_clip_to_bbox(
         self,
@@ -1281,7 +1309,11 @@ class PostplotMapWidget(QWidget):
     ) -> None:
         results = clip_items_to_bbox(self._clip_items, bbox)
         if not for_export:
-            results = prepare_screen_clip_results(self._clip_items, results)
+            results = prepare_screen_clip_results(
+                self._clip_items,
+                results,
+                bbox=bbox,
+            )
         self._apply_clipped_data(bbox, results)
 
     def _submit_prepare_motion(self) -> None:
@@ -1310,14 +1342,6 @@ class PostplotMapWidget(QWidget):
             rec["coarse_xs"] = coarse_x
             rec["coarse_ys"] = coarse_y
             rec["motion_lod_ready"] = True
-            if rec.get("kind") != "line":
-                continue
-            item = rec["item"]
-            if self._interacting and rec.get("motion_active"):
-                mx, my = self._motion_line_data(rec)
-                item.setData(mx, my)
-            elif rec.get("_clip_sig") is None:
-                item.setData(coarse_x, coarse_y)
 
     def _submit_screen_clip(self) -> None:
         """Refresh on-screen geometry off the UI thread (clip math only)."""
@@ -1330,24 +1354,17 @@ class PostplotMapWidget(QWidget):
         generation = self._clip_worker.next_generation()
         self._clip_worker.submit(generation, self._clip_items, bbox)
 
-    def _update_tiled_visibility(
-        self,
-        bbox: tuple[float, float, float, float] | None,
-        *,
-        for_export: bool = False,
-    ) -> None:
-        if bbox is None or not self._tiled_layers:
-            return
-        for layer in self._tiled_layers:
-            layer.update_visibility(bbox, for_export=for_export)
-
     def _on_view_range_changed(self, *_args) -> None:
         if self._gl_overlay.available:
-            self._gl_overlay.sync_view()
+            self._gl_overlay.sync_geometry()
+        if self._gl_line_layers and not self._clip_items:
+            self._gl_settle_timer.start()
+            return
         if not self._has_motion_lod_layers():
             return
         if not self._interacting:
             self._interacting = True
+        if self._clip_items:
             self._enter_motion_lod()
         self._clip_timer.start()
 
@@ -1386,28 +1403,26 @@ class PostplotMapWidget(QWidget):
             return
         if not isinstance(results, list):
             return
-        self._schedule_incremental_clip_apply(bbox, results)
+        self._apply_clipped_data(bbox, results)
+        self._frame.update()
 
     def _apply_view_clip(self) -> None:
-        """End motion LOD; refresh tile visibility and scatter clip on settle."""
+        """End motion LOD; refresh GL tiles / CPU clip on settle."""
         bbox = self._view_clip_bbox()
-        motion_active = any(rec.get("motion_active") for rec in self._clip_items)
         self._finish_pan_interaction()
         if bbox is not None:
-            self._update_tiled_visibility(bbox)
+            self._update_overview_visibility(bbox)
         if bbox is None or not self._clip_items:
             if bbox is not None:
                 self._clip_bbox = bbox
+            self._clear_pan_render_cache()
             self._frame.update()
             return
 
         prev = self._clip_bbox
         self._clip_bbox = bbox
-        if (
-            not motion_active
-            and prev is not None
-            and self._should_skip_reclip(prev, bbox)
-        ):
+        if prev is not None and self._should_skip_reclip(prev, bbox):
+            self._clear_pan_render_cache()
             self._frame.update()
             return
 
@@ -1786,10 +1801,11 @@ class PostplotMapWidget(QWidget):
             )
 
         self._reposition_overlays()
-        if self._tiled_layers:
+        if self._gl_line_layers:
             bbox = self._view_clip_bbox()
             if bbox is not None:
-                self._update_tiled_visibility(bbox)
+                self._update_overview_visibility(bbox)
+            self._start_gl_upload_pump()
         if self._clip_items:
             bbox = self._view_clip_bbox()
             if bbox is not None:

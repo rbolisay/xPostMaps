@@ -9,6 +9,8 @@ from numba import njit
 
 # Target finite points per grid cell when auto-sizing the index.
 _TARGET_POINTS_PER_CELL = 8_000
+# Finer grid for GPU/CPU resident tiles — smaller cells, full vertex spans per tile.
+_TILE_TARGET_POINTS_PER_CELL = 3_500
 
 
 @njit(cache=True)
@@ -193,6 +195,7 @@ class SpatialGridIndex:
         *,
         cell_size: float | None = None,
         min_points_for_index: int = 50_000,
+        target_points_per_cell: int | None = None,
     ) -> None:
         xs = np.asarray(xs, dtype=np.float64)
         ys = np.asarray(ys, dtype=np.float64)
@@ -218,7 +221,8 @@ class SpatialGridIndex:
         span_y = max(ymax - ymin, 1.0)
 
         if cell_size is None or cell_size <= 0.0:
-            target_cells = max(1, int(math.ceil(finite_count / _TARGET_POINTS_PER_CELL)))
+            per_cell = target_points_per_cell or _TARGET_POINTS_PER_CELL
+            target_cells = max(1, int(math.ceil(finite_count / per_cell)))
             side = max(1, int(math.ceil(math.sqrt(target_cells))))
             cell_size = max(span_x / side, span_y / side, 1.0)
 
@@ -295,6 +299,37 @@ class SpatialGridIndex:
                 if (ix, iy) in self._cells:
                     keys.add((ix, iy))
         return keys
+
+    def cell_indices(self, key: tuple[int, int]) -> np.ndarray:
+        """Ordered vertex indices assigned to a grid cell."""
+        if not self.use_index:
+            return np.arange(0, 0, dtype=np.int64)
+        chunk = self._cells.get(key)
+        if chunk is None or chunk.size == 0:
+            return np.arange(0, 0, dtype=np.int64)
+        return chunk
+
+    def iter_cell_keys(self):
+        """Yield populated grid cell keys."""
+        if not self.use_index:
+            yield (0, 0)
+            return
+        yield from self._cells
+
+    def cell_bbox(
+        self,
+        key: tuple[int, int],
+        *,
+        padding: float = 0.0,
+    ) -> tuple[float, float, float, float]:
+        ix, iy = key
+        size = self._cell_size
+        return (
+            self._x0 + ix * size - padding,
+            self._x0 + (ix + 1) * size + padding,
+            self._y0 + iy * size - padding,
+            self._y0 + (iy + 1) * size + padding,
+        )
 
     def query_candidate_indices(
         self,
@@ -389,12 +424,16 @@ def clip_items_to_bbox(
 
 # --- Screen LOD (shape-preserving lines, uniform scatter pick) ----------------
 
-# Solid lines: use full view-clipped detail up to this cap when motion stops.
-# Simplification (RDP) only runs above the cap — e.g. million-point edge cases.
+# Overview (full survey in view): same interactive cap as dotted scatter markers.
+SCREEN_OVERVIEW_BUDGET = 40_000
+# Zoomed in: full view-clipped detail up to this cap when motion stops.
 SCREEN_LINE_HARD_CAP = 400_000
-SCREEN_SCATTER_BUDGET = 40_000
+SCREEN_SCATTER_BUDGET = SCREEN_OVERVIEW_BUDGET
 # Shape-preserving Douglas–Peucker budget for pan/zoom motion LOD (not uniform pick).
-MOTION_LINE_BUDGET = 32_000
+MOTION_LINE_BUDGET = 12_000
+MOTION_SCATTER_BUDGET = 12_000
+# View span / data span above this → overview simplification (40K). Below → full clip.
+MOTION_VIEW_ZOOM_RATIO = 0.90
 # Only pre-filter before RDP on extremely large single runs (keeps RDP fast).
 _LINE_PREFILTER_MIN = 900_000
 
@@ -581,6 +620,50 @@ def screen_line_geometry(
     return np.concatenate(chunks_x), np.concatenate(chunks_y)
 
 
+def screen_line_budget_for_view(
+    xs: np.ndarray,
+    ys: np.ndarray,
+    bbox: tuple[float, float, float, float] | None,
+    *,
+    overview_budget: int = SCREEN_OVERVIEW_BUDGET,
+    zoom_ratio: float = MOTION_VIEW_ZOOM_RATIO,
+) -> int | None:
+    """Overview → capped simplification; zoomed in → ``None`` (full view-clipped detail)."""
+    if bbox is None:
+        return overview_budget
+    bx0, bx1, by0, by1 = bbox
+    view_span = max(bx1 - bx0, by1 - by0, 1.0)
+    xs = np.asarray(xs, dtype=np.float64)
+    ys = np.asarray(ys, dtype=np.float64)
+    finite = np.isfinite(xs) & np.isfinite(ys)
+    if not np.any(finite):
+        return overview_budget
+    fx = xs[finite]
+    fy = ys[finite]
+    data_span = max(
+        float(fx.max() - fx.min()),
+        float(fy.max() - fy.min()),
+        1.0,
+    )
+    if view_span >= data_span * zoom_ratio:
+        return overview_budget
+    return None
+
+
+def prepare_line_screen_geometry(
+    cx: np.ndarray,
+    cy: np.ndarray,
+    full_xs: np.ndarray,
+    full_ys: np.ndarray,
+    bbox: tuple[float, float, float, float] | None,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Apply overview RDP only when zoomed out; pass through clipped detail when zoomed in."""
+    budget = screen_line_budget_for_view(full_xs, full_ys, bbox)
+    if budget is None:
+        return cx, cy
+    return screen_line_geometry(cx, cy, budget=budget)
+
+
 def screen_scatter_geometry(
     xs: np.ndarray,
     ys: np.ndarray,
@@ -598,6 +681,8 @@ def screen_scatter_geometry(
 def prepare_screen_clip_results(
     items: list[dict],
     results: list[tuple[np.ndarray, np.ndarray]],
+    *,
+    bbox: tuple[float, float, float, float] | None = None,
 ) -> list[tuple[np.ndarray, np.ndarray]]:
     """Convert clipped full-resolution arrays to screen-safe geometry off the UI thread."""
     prepared: list[tuple[np.ndarray, np.ndarray]] = []
@@ -605,7 +690,13 @@ def prepare_screen_clip_results(
         if rec.get("kind") == "scatter":
             cx, cy = screen_scatter_geometry(cx, cy)
         else:
-            cx, cy = screen_line_geometry(cx, cy)
+            cx, cy = prepare_line_screen_geometry(
+                cx,
+                cy,
+                rec["xs"],
+                rec["ys"],
+                bbox,
+            )
         prepared.append((cx, cy))
     return prepared
 
@@ -615,7 +706,11 @@ def clip_and_prepare_items(
     bbox: tuple[float, float, float, float],
 ) -> list[tuple[np.ndarray, np.ndarray]]:
     """Clip to view then build screen LOD in one worker pass."""
-    return prepare_screen_clip_results(items, clip_items_to_bbox(items, bbox))
+    return prepare_screen_clip_results(
+        items,
+        clip_items_to_bbox(items, bbox),
+        bbox=bbox,
+    )
 
 
 def prepare_motion_lod(

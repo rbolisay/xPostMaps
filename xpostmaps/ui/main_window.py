@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import date
 from pathlib import Path
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, QTimer
 from PySide6.QtWidgets import (
     QFileDialog,
     QHBoxLayout,
@@ -393,7 +393,11 @@ class MainWindow(QMainWindow):
         self._settings.legend_config = legend_from_dict(legend_to_dict(legend))
         self._sync_map_data_preplot_order()
         self._map.set_legend(self._settings.legend_config)
-        self._map.render(self._map_data)
+        # Defer the heavy map rebuild so the legend dialog stays responsive.
+        QTimer.singleShot(0, self._complete_legend_apply)
+
+    def _complete_legend_apply(self) -> None:
+        self._map.render(self._map_data, force=True)
         self._right.update_from_project(self._settings, self._map_data)
         self._ensure_project_name()
         if self._settings.name.strip():
