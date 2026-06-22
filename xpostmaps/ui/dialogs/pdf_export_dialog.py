@@ -7,7 +7,7 @@ import sys
 from pathlib import Path
 
 from PySide6.QtCore import Qt, QTimer
-from PySide6.QtGui import QPixmap
+from PySide6.QtGui import QImage, QPixmap
 from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
@@ -37,12 +37,12 @@ from xpostmaps.core.pdf_export import (
     SCALE_MODES,
     PdfExportOptions,
     capture_export_images,
+    compose_pdf_vector_from_captures,
     default_pdf_filename,
     effective_raster_dpi,
     raster_dpi_clamped,
     render_sheet_preview,
     resolve_output_path,
-    write_pdf_vector,
 )
 from xpostmaps.core.pdf_export_worker import PdfExportCapture, PdfExportWorker
 from xpostmaps.ui.dialogs.base_dialog import SingleInstanceDialog
@@ -146,7 +146,7 @@ class PdfExportDialog:
             scale_host.setLayout(scale_row)
             left_form.addRow("Scale", scale_host)
 
-            vector_mode = QCheckBox("Scalable vector PDF (recommended)")
+            vector_mode = QCheckBox("High-quality PDF layout (recommended)")
             vector_mode.setChecked(True)
             left_form.addRow("", vector_mode)
 
@@ -155,9 +155,9 @@ class PdfExportDialog:
             left_form.addRow("", open_after)
 
             hint = QLabel(
-                "Vector mode keeps lines, dots and text infinitely sharp when zoomed "
-                "(DPI is ignored). Uncheck for a flat raster image; raster detail is "
-                "capped at 500 DPI for speed."
+                "The map is exported exactly as it appears on screen (same detail level). "
+                "The right pane is re-rendered at print resolution for sharp text. "
+                "Raster mode caps compositing at 500 DPI for speed."
             )
             hint.setWordWrap(True)
             hint.setStyleSheet("color: #8b949e; font-size: 11px;")
@@ -310,6 +310,28 @@ class PdfExportDialog:
                     f"Could not write PDF:\n{message}",
                 )
 
+            def _capture_with_map_visible(
+                export_options: PdfExportOptions,
+            ) -> tuple[QImage, QImage]:
+                host = dialog.parent()
+                dialog.hide()
+                if host is not None:
+                    host.raise_()
+                    host.activateWindow()
+                for _ in range(4):
+                    QApplication.processEvents()
+                try:
+                    return capture_export_images(
+                        map_widget,
+                        right_pane,
+                        export_options,
+                        use_screen_grab=True,
+                    )
+                finally:
+                    dialog.show()
+                    dialog.raise_()
+                    dialog.activateWindow()
+
             def do_export() -> None:
                 nonlocal export_worker, progress
                 if export_worker is not None and export_worker.isRunning():
@@ -334,9 +356,18 @@ class PdfExportDialog:
                         return
 
                 if vector_mode.isChecked():
+                    try:
+                        map_image, pane_image = _capture_with_map_visible(opts)
+                    except Exception as exc:  # noqa: BLE001
+                        _fail_export(str(exc))
+                        return
+                    if map_image.isNull() or pane_image.isNull():
+                        _fail_export("Could not capture map or right pane.")
+                        return
+
                     _set_export_busy(True)
                     progress = QProgressDialog(
-                        "Writing scalable PDF…",
+                        "Writing PDF…",
                         None,
                         0,
                         0,
@@ -349,7 +380,12 @@ class PdfExportDialog:
                     progress.show()
                     QApplication.processEvents()
                     try:
-                        write_pdf_vector(out_path, map_widget, right_pane, opts)
+                        compose_pdf_vector_from_captures(
+                            out_path,
+                            map_image,
+                            pane_image,
+                            opts,
+                        )
                     except Exception as exc:  # noqa: BLE001
                         _fail_export(str(exc))
                         return
@@ -365,8 +401,18 @@ class PdfExportDialog:
                     )
 
                 _set_export_busy(True)
+                try:
+                    map_image, pane_image = _capture_with_map_visible(opts)
+                except Exception as exc:  # noqa: BLE001
+                    _fail_export(str(exc))
+                    return
+
+                if map_image.isNull() or pane_image.isNull():
+                    _fail_export("Could not capture map or right pane.")
+                    return
+
                 progress = QProgressDialog(
-                    "Capturing map and legend…",
+                    "Writing PDF…",
                     None,
                     0,
                     0,
@@ -377,23 +423,6 @@ class PdfExportDialog:
                 progress.setMinimumDuration(0)
                 progress.setCancelButton(None)
                 progress.show()
-                QApplication.processEvents()
-
-                try:
-                    map_image, pane_image = capture_export_images(
-                        map_widget,
-                        right_pane,
-                        opts,
-                    )
-                except Exception as exc:  # noqa: BLE001
-                    _fail_export(str(exc))
-                    return
-
-                if map_image.isNull() or pane_image.isNull():
-                    _fail_export("Could not capture map or right pane.")
-                    return
-
-                progress.setLabelText("Writing PDF…")
                 QApplication.processEvents()
 
                 capture = PdfExportCapture(map_image=map_image, pane_image=pane_image)

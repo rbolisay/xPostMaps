@@ -9,7 +9,8 @@ import numpy as np
 import pyqtgraph as pg
 from pyqtgraph import functions as fn
 from pyqtgraph.Point import Point
-from PySide6.QtCore import Qt, QTimer, Signal
+from PySide6.QtCore import Qt, QTimer, QRectF, Signal
+from PySide6.QtGui import QColor, QImage, QPainter
 from PySide6.QtWidgets import QVBoxLayout, QWidget
 
 from xpostmaps.core.models import GeoBounds
@@ -128,6 +129,28 @@ class MinimapWidget(QWidget):
         self._coast_pen = pg.mkPen(MINIMAP_COAST, width=self._coast_width())
         self._refresh_visible_coastlines()
         self._rebuild_marker_items()
+
+    def capture_image(self) -> QImage:
+        """Render the pyqtgraph minimap scene (``QWidget.render`` misses plot items)."""
+        plot = self._plot
+        width = max(plot.width(), 1)
+        height = max(plot.height(), 1)
+        image = QImage(width, height, QImage.Format.Format_ARGB32)
+        image.fill(QColor(MINIMAP_OCEAN))
+        scene = plot.scene()
+        if scene is None:
+            return image
+        source = plot.mapToScene(plot.viewport().rect()).boundingRect()
+        painter = QPainter(image)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        scene.render(
+            painter,
+            QRectF(0, 0, width, height),
+            source,
+            Qt.AspectRatioMode.IgnoreAspectRatio,
+        )
+        painter.end()
+        return image
 
     def _rebuild_marker_items(self) -> None:
         """Recreate marker + area items with the current pen widths / antialiasing."""

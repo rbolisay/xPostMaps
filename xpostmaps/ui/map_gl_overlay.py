@@ -7,7 +7,8 @@ from typing import TYPE_CHECKING
 import numpy as np
 import pyqtgraph as pg
 from PySide6.QtCore import Qt
-from PySide6.QtGui import QMatrix4x4
+from PySide6.QtGui import QImage, QMatrix4x4
+from PySide6.QtWidgets import QApplication
 
 if TYPE_CHECKING:
     from pyqtgraph.opengl import GLLinePlotItem, GLViewWidget
@@ -118,6 +119,42 @@ class MapGlLineOverlay:
     def hide_for_export(self) -> None:
         if self._view is not None:
             self._view.hide()
+
+    def capture_image(self) -> QImage | None:
+        """Grab the GL overlay as a bitmap (for PDF export compositing)."""
+        if not self.available or self._view is None or not self._view.isVisible():
+            return None
+        self._view.update()
+        self._view.repaint()
+        make_current = getattr(self._view, "makeCurrent", None)
+        if callable(make_current):
+            make_current()
+        app = QApplication.instance()
+        if app is not None:
+            for _ in range(6):
+                app.processEvents()
+        grab_fb = getattr(self._view, "grabFramebuffer", None)
+        if callable(grab_fb):
+            image = grab_fb()
+            if not image.isNull() and self._image_has_content(image):
+                return image
+        pixmap = self._view.grab()
+        if pixmap.isNull():
+            return None
+        return pixmap.toImage()
+
+    @staticmethod
+    def _image_has_content(image: QImage, *, sample_step: int = 12) -> bool:
+        if image.isNull():
+            return False
+        visible = 0
+        total = 0
+        for y in range(0, image.height(), sample_step):
+            for x in range(0, image.width(), sample_step):
+                total += 1
+                if image.pixelColor(x, y).alpha() > 8:
+                    visible += 1
+        return visible / max(total, 1) > 0.02
 
     def sync_geometry(self) -> None:
         if not self.available:

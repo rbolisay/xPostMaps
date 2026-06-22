@@ -6,7 +6,7 @@ import math
 from pathlib import Path
 
 from PySide6.QtCore import Qt, Signal
-from PySide6.QtGui import QPixmap
+from PySide6.QtGui import QImage, QPainter, QPixmap
 from PySide6.QtWidgets import QLabel, QScrollArea, QVBoxLayout, QWidget
 
 # Qt maximum widget dimension (same role as QWIDGETSIZE_MAX).
@@ -214,6 +214,32 @@ class RightPane(PrintPanel):
         cached = self._card._last_args
         bounds = cached[1] if cached and cached[1].is_valid else map_data.bounds
         self._card.update_info_section(info, bounds)
+
+    def render_for_export(self, target_height: int) -> QImage:
+        """Render the pane with sharp text and a correctly painted minimap."""
+        from xpostmaps.core.pdf_export import render_widget_to_height
+
+        image = render_widget_to_height(self, target_height)
+        mini = self._minimap.capture_image()
+        if mini.isNull() or image.isNull():
+            return image
+
+        src_h = max(self.height(), 1)
+        scale = target_height / src_h
+        geo = self._minimap.geometry()
+        mini_w = max(int(round(geo.width() * scale)), 1)
+        mini_h = max(int(round(geo.height() * scale)), 1)
+        mini_scaled = mini.scaled(
+            mini_w,
+            mini_h,
+            Qt.AspectRatioMode.IgnoreAspectRatio,
+            Qt.TransformationMode.SmoothTransformation,
+        )
+        painter = QPainter(image)
+        painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
+        painter.drawImage(int(round(geo.x() * scale)), int(round(geo.y() * scale)), mini_scaled)
+        painter.end()
+        return image
 
     def prepare_export_snapshot(self, map_height: int | None = None) -> None:
         """Prepare right pane for PDF capture at true aspect (same height as map)."""

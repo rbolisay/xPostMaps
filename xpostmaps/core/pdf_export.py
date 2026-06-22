@@ -15,7 +15,7 @@ from PySide6.QtGui import (
     QPixmap,
     QRegion,
 )
-from PySide6.QtWidgets import QWidget
+from PySide6.QtWidgets import QApplication, QWidget
 
 # Portrait width × height in millimetres (ISO / common North American sizes).
 PAPER_SIZES_MM: dict[str, tuple[float, float]] = {
@@ -122,6 +122,43 @@ def strip_target_height(options: "PdfExportOptions", raster_dpi: int) -> int:
     return max(page_h_px - 2 * margin_px, 1)
 
 
+def render_map_wysiwyg(
+    widget: QWidget,
+    target_height: int,
+    *,
+    use_screen_grab: bool = False,
+) -> QImage:
+    """Capture the map exactly as displayed, scaled to ``target_height``.
+
+    Composites the pyqtgraph scene, OpenGL overlay and frame overlays so export
+    matches on-screen detail (a plain ``QWidget.grab`` misses GL line layers).
+    """
+    capture = getattr(widget, "capture_wysiwyg_image", None)
+    if callable(capture):
+        return capture(target_height, use_screen_grab=use_screen_grab)
+    target_height = max(int(target_height), 1)
+    app = QApplication.instance()
+    if app is not None:
+        app.processEvents()
+    pixmap = widget.grab()
+    if pixmap.isNull():
+        return QImage()
+    if pixmap.height() == target_height:
+        return pixmap.toImage()
+    return pixmap.toImage().scaledToHeight(
+        target_height,
+        Qt.TransformationMode.SmoothTransformation,
+    )
+
+
+def render_pane_for_export(right_pane: QWidget, target_height: int) -> QImage:
+    """Render the right pane with sharp text and a painted minimap."""
+    render = getattr(right_pane, "render_for_export", None)
+    if callable(render):
+        return render(target_height)
+    return render_widget_to_height(right_pane, target_height)
+
+
 def render_widget_to_height(widget: QWidget, target_height: int) -> QImage:
     """Re-render a widget (vector-sharp) scaled so its height equals ``target_height``.
 
@@ -173,27 +210,31 @@ def capture_export_images(
     options: "PdfExportOptions",
     *,
     preview: bool = False,
+    use_screen_grab: bool | None = None,
 ) -> tuple[QImage, QImage]:
     """Render map and right pane on the UI thread at the final print resolution."""
+    if use_screen_grab is None:
+        use_screen_grab = not preview
     raster_dpi = effective_raster_dpi(options.dpi, preview=preview)
     target_h = strip_target_height(options, raster_dpi)
     map_height = max(map_widget.height(), 1)
-    # Preview is a small thumbnail: keep the live screen geometry so opening or
-    # adjusting the dialog never forces the full dataset onto the UI thread.
-    # A real export uses full-resolution geometry for crisp deliverables.
     prepare = getattr(map_widget, "prepare_for_export", None)
     end_export = getattr(map_widget, "end_export", None)
     if callable(prepare):
-        prepare(full_detail=not preview)
+        prepare(wysiwyg=True)
     right_pane.prepare_export_snapshot(map_height=map_height)
     try:
-        map_image = render_widget_to_height(map_widget, target_h)
-        pane_image = render_widget_to_height(right_pane, target_h)
+        map_image = render_map_wysiwyg(
+            map_widget,
+            target_h,
+            use_screen_grab=use_screen_grab,
+        )
+        pane_image = render_pane_for_export(right_pane, target_h)
         return map_image, pane_image
     finally:
         right_pane.reset_export_snapshot()
         if callable(end_export):
-            end_export()
+            end_export(wysiwyg=True)
 
 
 def _scale_uniform(image: QImage, factor: float) -> QImage:
@@ -480,18 +521,13 @@ def _render_widget_into(painter: QPainter, widget: QWidget, target: QRectF) -> N
     painter.restore()
 
 
-def compose_pdf_vector(
+def compose_pdf_vector_from_captures(
     path: Path,
-    map_widget: QWidget,
-    right_pane: QWidget,
+    map_image: QImage,
+    pane_image: QImage,
     options: PdfExportOptions,
 ) -> None:
-    """Write a scalable vector PDF by painting the widgets straight onto the page.
-
-    Unlike the raster path this keeps nav lines, scatter dots, axis labels and the
-    right-pane text as true vector objects, so zooming in a PDF viewer stays sharp.
-    Must run on the UI thread (touches live widgets).
-    """
+    """Write a PDF page from pre-captured map and right-pane images."""
     path.parent.mkdir(parents=True, exist_ok=True)
     device_dpi = min(max(options.dpi, 150), VECTOR_DEVICE_DPI)
     layout = page_layout_for(options.paper, options.landscape)
@@ -511,13 +547,11 @@ def compose_pdf_vector(
     ox = float(page_rect.x())
     oy = float(page_rect.y())
 
-    map_w = max(map_widget.width(), 1)
-    map_h = max(map_widget.height(), 1)
-    pane_w = max(right_pane.width(), 1)
-    pane_h = max(right_pane.height(), 1)
+    map_w = max(map_image.width(), 1)
+    map_h = max(map_image.height(), 1)
+    pane_w = max(pane_image.width(), 1)
+    pane_h = max(pane_image.height(), 1)
 
-    # Both widgets occupy the printable height (pane optionally smaller), side by side
-    # at true aspect, then the whole strip is fit uniformly onto the page.
     base_h = inner_h
     map_disp_w = map_w * (base_h / map_h)
     pane_disp_h = base_h * PANE_PDF_SCALE
@@ -543,23 +577,23 @@ def compose_pdf_vector(
         pane_disp_h * fit,
     )
 
-    # Map renders its graphics scene as true vector; pane is drawn as a high-res
-    # raster (it embeds a pyqtgraph minimap that cannot vectorise cleanly, and a
-    # crisp bitmap matches the GUI without the blur seen from a scaled widget render).
-    render_vector = getattr(map_widget, "render_vector", None)
-    if callable(render_vector):
+    if not map_image.isNull():
         painter.fillRect(map_rect, Qt.GlobalColor.white)
-        render_vector(painter, map_rect)
-    else:
-        _render_widget_into(painter, map_widget, map_rect)
-
-    pane_px_h = min(max(int(pane_rect.height()), 1), 3200)
-    pane_image = render_widget_to_height(right_pane, pane_px_h)
+        painter.drawImage(map_rect, map_image)
     if not pane_image.isNull():
         painter.drawImage(pane_rect, pane_image)
-    else:
-        _render_widget_into(painter, right_pane, pane_rect)
     painter.end()
+
+
+def compose_pdf_vector(
+    path: Path,
+    map_widget: QWidget,
+    right_pane: QWidget,
+    options: PdfExportOptions,
+) -> None:
+    """Write a PDF with WYSIWYG map capture and a sharp-rendered right pane."""
+    map_image, pane_image = capture_export_images(map_widget, right_pane, options)
+    compose_pdf_vector_from_captures(path, map_image, pane_image, options)
 
 
 def write_pdf_vector(
@@ -569,12 +603,5 @@ def write_pdf_vector(
     options: PdfExportOptions,
 ) -> None:
     """Prepare widgets and write a scalable vector PDF (UI thread only)."""
-    map_height = max(map_widget.height(), 1)
-    right_pane.prepare_export_snapshot(map_height=map_height)
-    try:
-        compose_pdf_vector(path, map_widget, right_pane, options)
-    finally:
-        right_pane.reset_export_snapshot()
-        end_export = getattr(map_widget, "end_export", None)
-        if callable(end_export):
-            end_export()
+    map_image, pane_image = capture_export_images(map_widget, right_pane, options)
+    compose_pdf_vector_from_captures(path, map_image, pane_image, options)

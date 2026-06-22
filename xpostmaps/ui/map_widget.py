@@ -6,8 +6,9 @@ import math
 
 import pyqtgraph as pg
 import numpy as np
+import time
 from PySide6.QtCore import Qt, QTimer, QPoint, QPointF, QRect, QRectF, Signal
-from PySide6.QtGui import QColor, QFont, QImage, QPainter, QPen, QPolygonF, QRegion
+from PySide6.QtGui import QColor, QFont, QGuiApplication, QImage, QPainter, QPen, QPixmap, QPolygonF, QRegion
 from PySide6.QtWidgets import QApplication, QGraphicsItem, QGraphicsView, QVBoxLayout, QWidget
 
 from xpostmaps.core.area_utils import resolve_area_polygon
@@ -586,34 +587,38 @@ class PostplotMapWidget(QWidget):
         self._legend = legend
         self._cached_signature = None
 
-    def prepare_for_export(self, *, full_detail: bool = True) -> None:
+    def prepare_for_export(self, *, wysiwyg: bool = True) -> None:
         """Refresh map overlays before PDF/raster capture.
 
-        ``full_detail=True`` (real export) swaps in full-resolution visible
-        geometry for crisp deliverables. ``full_detail=False`` (low-DPI preview)
-        keeps the current screen geometry so opening/adjusting the export dialog
-        stays snappy and never bogs the live map down with the full dataset.
+        ``wysiwyg=True`` (default) leaves geometry, pens, GL layers and LOD
+        exactly as on screen so the PDF matches what the user sees.
+        ``wysiwyg=False`` swaps in full-resolution CPU geometry for legacy
+        vector export (not used by the default PDF path).
         """
-        if full_detail:
-            self._gl_overlay.hide_for_export()
-            for item in self._overview_cpu_items:
-                item.setVisible(False)
-            bbox = self._view_clip_bbox()
-            if bbox is not None:
-                for layer in self._gl_line_layers:
-                    layer.prepare_export(bbox)
-                for layer in self._gl_scatter_layers:
-                    layer.prepare_export(bbox)
-            self._restore_export_detail()
-        else:
-            self._restore_screen_pens()
-            self._restore_screen_scatter_sizes()
+        if wysiwyg:
+            self.ensure_settled_for_capture()
+            self._reposition_overlays()
+            self._frame.update()
+            self.repaint()
+            return
+        self._gl_overlay.hide_for_export()
+        for item in self._overview_cpu_items:
+            item.setVisible(False)
+        bbox = self._view_clip_bbox()
+        if bbox is not None:
+            for layer in self._gl_line_layers:
+                layer.prepare_export(bbox)
+            for layer in self._gl_scatter_layers:
+                layer.prepare_export(bbox)
+        self._restore_export_detail()
         self._reposition_overlays()
         self._frame.update()
         self.repaint()
 
-    def end_export(self) -> None:
-        """Restore interactive screen detail and pens after a PDF/raster capture."""
+    def end_export(self, *, wysiwyg: bool = True) -> None:
+        """Restore interactive screen detail after a PDF/raster capture."""
+        if wysiwyg:
+            return
         self._restore_screen_pens()
         self._restore_screen_scatter_sizes()
         self._clip_bbox = None
@@ -630,6 +635,209 @@ class PostplotMapWidget(QWidget):
             self._update_overview_visibility(bbox)
         if self._clip_items:
             self._apply_view_clip()
+
+    def ensure_settled_for_capture(self, *, max_wait_ms: int = 3000) -> None:
+        """Wait for pan/zoom to finish and GL layers to show settled detail."""
+        self._clip_timer.stop()
+        self._gl_settle_timer.stop()
+        self._finish_pan_interaction()
+        if self._gl_overlay.available and self._all_gl_layers():
+            bbox = self._view_clip_bbox()
+            if bbox is not None:
+                self._refresh_settled_gl_detail(bbox)
+                self._update_overview_visibility(bbox)
+        elif self._clip_items:
+            bbox = self._view_clip_bbox()
+            if bbox is not None:
+                self._sync_clip_to_bbox(bbox, for_export=False)
+
+        app = QApplication.instance()
+        if app is None:
+            return
+        deadline = time.perf_counter() + max_wait_ms / 1000.0
+        while time.perf_counter() < deadline:
+            if not self._interacting and (
+                not self._all_gl_layers() or self._gl_layers_ready()
+            ):
+                break
+            app.processEvents()
+            time.sleep(0.005)
+
+        self._gl_overlay.sync_geometry()
+        gl_view = getattr(self._gl_overlay, "_view", None)
+        if gl_view is not None:
+            gl_view.update()
+            gl_view.repaint()
+        self._plot.viewport().update()
+        self.repaint()
+        for _ in range(10):
+            app.processEvents()
+
+    @staticmethod
+    def _pixmap_has_map_content(pixmap: QPixmap, *, sample_step: int = 10) -> bool:
+        """True when a grab contains survey linework, not just background or extent."""
+        if pixmap.isNull():
+            return False
+        image = pixmap.toImage()
+        if image.isNull():
+            return False
+        bg = QColor(BG_MAP_PRINT)
+        dark = 0
+        total = 0
+        for y in range(0, image.height(), sample_step):
+            for x in range(0, image.width(), sample_step):
+                total += 1
+                color = image.pixelColor(x, y)
+                if color.lightness() < 95:
+                    dark += 1
+                    continue
+                if (
+                    abs(color.red() - bg.red()) > 18
+                    or abs(color.green() - bg.green()) > 18
+                    or abs(color.blue() - bg.blue()) > 18
+                ) and max(color.red(), color.green(), color.blue()) - min(
+                    color.red(), color.green(), color.blue()
+                ) > 50:
+                    dark += 1
+        return dark / max(total, 1) > 0.004
+
+    def _screen_grab_pixmap(self) -> QPixmap:
+        """Grab displayed desktop pixels (includes OpenGL compositing)."""
+        if not self.isVisible() or self.width() < 1 or self.height() < 1:
+            return QPixmap()
+        screen = QGuiApplication.primaryScreen()
+        if screen is None:
+            return self.grab()
+        top_left = self.mapToGlobal(QPoint(0, 0))
+        pixmap = screen.grabWindow(
+            0,
+            top_left.x(),
+            top_left.y(),
+            self.width(),
+            self.height(),
+        )
+        if pixmap.isNull():
+            window = self.window()
+            if window is None:
+                return self.grab()
+            origin = self.mapTo(window, QPoint(0, 0))
+            pixmap = screen.grabWindow(
+                int(window.winId()),
+                origin.x(),
+                origin.y(),
+                self.width(),
+                self.height(),
+            )
+        if pixmap.isNull():
+            return self.grab()
+        return pixmap
+
+    @staticmethod
+    def _scale_pixmap_to_height(pixmap: QPixmap, target_height: int) -> QImage:
+        target_height = max(int(target_height), 1)
+        if pixmap.height() == target_height:
+            return pixmap.toImage()
+        return pixmap.toImage().scaledToHeight(
+            target_height,
+            Qt.TransformationMode.SmoothTransformation,
+        )
+
+    def _composite_capture_image(self, target_height: int) -> QImage:
+        """Fallback: paint CPU scene + GL overlay + frame widgets into one image."""
+        target_height = max(int(target_height), 1)
+        src_w = max(self.width(), 1)
+        src_h = max(self.height(), 1)
+        scale = target_height / src_h
+        out_w = max(int(round(src_w * scale)), 1)
+
+        image = QImage(out_w, target_height, QImage.Format.Format_ARGB32)
+        image.fill(QColor(BG_MAP_PRINT))
+        painter = QPainter(image)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        painter.setRenderHint(QPainter.RenderHint.TextAntialiasing, True)
+        painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
+        painter.scale(scale, scale)
+
+        plot = self._plot
+        plot_w = max(plot.width(), 1)
+        plot_h = max(plot.height(), 1)
+        plot_x = plot.x()
+        plot_y = plot.y()
+
+        scene = plot.scene()
+        if scene is not None:
+            source = plot.mapToScene(plot.viewport().rect()).boundingRect()
+            painter.save()
+            painter.translate(plot_x, plot_y)
+            scene.render(
+                painter,
+                QRectF(0, 0, plot_w, plot_h),
+                source,
+                Qt.AspectRatioMode.IgnoreAspectRatio,
+            )
+            painter.restore()
+
+        gl_rect = self._gl_overlay._viewbox_widget_rect()
+        gl_image = self._gl_overlay.capture_image()
+        if gl_rect is not None and gl_image is not None and not gl_image.isNull():
+            gx, gy, gw, gh = gl_rect
+            painter.drawImage(
+                plot_x + gx,
+                plot_y + gy,
+                gl_image.scaled(
+                    gw,
+                    gh,
+                    Qt.AspectRatioMode.IgnoreAspectRatio,
+                    Qt.TransformationMode.SmoothTransformation,
+                ),
+            )
+
+        for overlay in (self._frame, self._north):
+            if overlay is None or not overlay.isVisible():
+                continue
+            painter.save()
+            painter.translate(plot_x + overlay.x(), plot_y + overlay.y())
+            QWidget.render(
+                overlay,
+                painter,
+                QPoint(0, 0),
+                QRegion(overlay.rect()),
+                QWidget.RenderFlag.DrawWindowBackground | QWidget.RenderFlag.DrawChildren,
+            )
+            painter.restore()
+
+        painter.end()
+        return image
+
+    def capture_wysiwyg_image(
+        self,
+        target_height: int,
+        *,
+        use_screen_grab: bool = False,
+    ) -> QImage:
+        """Composite the on-screen map (CPU scene + GL overlay + frame) for PDF export."""
+        screen_pix = QPixmap()
+        if use_screen_grab:
+            screen_pix = self._screen_grab_pixmap()
+            if self._pixmap_has_map_content(screen_pix):
+                return self._scale_pixmap_to_height(screen_pix, target_height)
+
+        composite = self._composite_capture_image(target_height)
+        if self._pixmap_has_map_content(QPixmap.fromImage(composite)):
+            return composite
+
+        if self._all_gl_layers():
+            self.prepare_for_export(wysiwyg=False)
+            try:
+                fallback = self._composite_capture_image(target_height)
+            finally:
+                self.end_export(wysiwyg=False)
+            if self._pixmap_has_map_content(QPixmap.fromImage(fallback)):
+                return fallback
+
+        if use_screen_grab and not screen_pix.isNull():
+            return self._scale_pixmap_to_height(screen_pix, target_height)
+        return composite
 
     def render_vector(self, painter: QPainter, target: QRectF) -> None:
         """Paint the map as scalable vector content into ``target`` (PDF export).
@@ -648,7 +856,7 @@ class PostplotMapWidget(QWidget):
             scene.render(painter, target, source, Qt.AspectRatioMode.IgnoreAspectRatio)
         finally:
             painter.restore()
-            self.end_export()
+            self.end_export(wysiwyg=False)
 
         plot_w = max(plot.width(), 1)
         plot_h = max(plot.height(), 1)
