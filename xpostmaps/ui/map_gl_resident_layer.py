@@ -52,6 +52,7 @@ class ResidentGlLineLayer:
         pen: QPen,
         export_pen: QPen,
         line_style: LineStyle = LineStyle.SOLID,
+        map_layer: str = "postplot",
         plot_item: pg.PlotItem,
         gl_overlay: MapGlLineOverlay,
         line_items: list[dict],
@@ -60,6 +61,7 @@ class ResidentGlLineLayer:
         self._layer_id = ResidentGlLineLayer._next_layer_id
         ResidentGlLineLayer._next_layer_id += 1
         self._parts = parts
+        self._map_layer = map_layer
         index_x, index_y = concat_polylines(parts)
         self._index_x = index_x
         self._index_y = index_y
@@ -92,6 +94,10 @@ class ResidentGlLineLayer:
     @property
     def layer_id(self) -> int:
         return self._layer_id
+
+    @property
+    def map_layer(self) -> str:
+        return self._map_layer
 
     @property
     def has_pending_uploads(self) -> bool:

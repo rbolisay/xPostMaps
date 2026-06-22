@@ -410,8 +410,8 @@ class PostplotMapWidget(QWidget):
         self._plot_items: list[pg.GraphicsItem] = []
         self._line_items: list[dict] = []
         self._scatter_items: list[dict] = []
-        # Postplot + navplan layers — hidden during pan/zoom, view-clipped on settle.
-        self._postplot_nav_items: list[pg.GraphicsItem] = []
+        # Preplot + navplan — hidden during pan/zoom; postplot stays on screen.
+        self._preplot_navplan_items: list[pg.GraphicsItem] = []
         # Dense nav line items keep their full coordinate arrays here so the map
         # can paint only the portion inside the current view (fast pan/zoom on
         # million-point surveys) without the monotonic-x assumption that breaks
@@ -690,7 +690,7 @@ class PostplotMapWidget(QWidget):
         self._plot_items.clear()
         self._line_items.clear()
         self._scatter_items.clear()
-        self._postplot_nav_items.clear()
+        self._preplot_navplan_items.clear()
         self._clip_items.clear()
         for layer in self._gl_line_layers:
             layer.clear()
@@ -711,12 +711,57 @@ class PostplotMapWidget(QWidget):
         self._motion_lod_generation += 1
 
     def _has_motion_lod_layers(self) -> bool:
-        return bool(self._postplot_nav_items) or bool(self._clip_items)
+        return (
+            bool(self._preplot_navplan_items)
+            or bool(self._clip_items)
+            or bool(self._all_gl_layers())
+        )
+
+    @staticmethod
+    def _is_reference_map_layer(map_layer: str) -> bool:
+        return map_layer in ("preplot", "navplan")
+
+    def _hide_reference_layers(self) -> None:
+        """Hide preplot/navplan while the user pans or zooms."""
+        for item in self._preplot_navplan_items:
+            item.setVisible(False)
+        for layer in self._gl_line_layers:
+            if self._is_reference_map_layer(layer.map_layer):
+                layer.clear_settled_detail()
+                layer.set_gl_visible(False)
+        for layer in self._gl_scatter_layers:
+            if self._is_reference_map_layer(layer.map_layer):
+                layer.set_gl_visible(False)
+
+    def _show_reference_layers(self) -> None:
+        """Restore preplot/navplan after pan/zoom settles."""
+        for item in self._preplot_navplan_items:
+            item.setVisible(True)
+        bbox = self._view_clip_bbox()
+        if bbox is None or not self._gl_layers_ready():
+            for layer in self._all_gl_layers():
+                if self._is_reference_map_layer(layer.map_layer):
+                    layer.set_gl_visible(True)
+            return
+        overview = self._is_overview_zoom(bbox)
+        zoomed_in = not overview
+        for layer in self._gl_line_layers:
+            if not self._is_reference_map_layer(layer.map_layer):
+                continue
+            if layer._line_style == LineStyle.DASH and zoomed_in:
+                layer.apply_settled_detail(bbox, zoomed_in=True)
+            else:
+                layer.set_gl_visible(True)
+        for layer in self._gl_scatter_layers:
+            if self._is_reference_map_layer(layer.map_layer):
+                layer.set_gl_visible(True)
 
     def _on_gl_view_settled(self) -> None:
+        self._finish_pan_interaction()
         bbox = self._view_clip_bbox()
         if bbox is not None:
             self._refresh_settled_gl_detail(bbox)
+        self._show_reference_layers()
 
     def _all_gl_layers(self) -> list[ResidentGlLineLayer | ResidentGlScatterLayer]:
         return [*self._gl_line_layers, *self._gl_scatter_layers]
@@ -751,6 +796,7 @@ class PostplotMapWidget(QWidget):
         """Fast placeholder while dragging; full GPU detail restores on settle."""
         if not self._gl_layers_ready():
             return
+        self._hide_reference_layers()
         for layer in self._gl_line_layers:
             layer.clear_settled_detail()
         bbox = self._view_clip_bbox()
@@ -803,9 +849,15 @@ class PostplotMapWidget(QWidget):
             for item in self._overview_cpu_items:
                 item.setVisible(False)
             for layer in self._gl_line_layers:
-                layer.set_gl_visible(True)
+                if self._interacting and self._is_reference_map_layer(layer.map_layer):
+                    layer.set_gl_visible(False)
+                else:
+                    layer.set_gl_visible(True)
             for layer in self._gl_scatter_layers:
-                layer.set_gl_visible(True)
+                if self._interacting and self._is_reference_map_layer(layer.map_layer):
+                    layer.set_gl_visible(False)
+                else:
+                    layer.set_gl_visible(True)
             return
         overview = self._is_overview_zoom(bbox)
         for item in self._overview_cpu_items:
@@ -838,6 +890,7 @@ class PostplotMapWidget(QWidget):
 
     def _enter_motion_lod(self) -> None:
         """Keep line and scatter geometry on screen during pan."""
+        self._hide_reference_layers()
         self._clip_worker.next_generation()
         self._pending_clip_layers.clear()
         self._pending_clip_bbox = None
@@ -935,8 +988,8 @@ class PostplotMapWidget(QWidget):
     def _register_plot_item(self, item: pg.GraphicsItem, *, layer: str) -> None:
         self._plot_item.addItem(item)
         self._plot_items.append(item)
-        if layer in ("postplot", "navplan"):
-            self._postplot_nav_items.append(item)
+        if layer in ("preplot", "navplan"):
+            self._preplot_navplan_items.append(item)
 
     def _add_batched_segments(
         self,
@@ -1022,6 +1075,7 @@ class PostplotMapWidget(QWidget):
                     rgba=rgba,
                     screen_size=screen_size,
                     export_size=export_size,
+                    map_layer=layer,
                     plot_item=self._plot_item,
                     gl_overlay=self._gl_overlay,
                     scatter_items=self._scatter_items,
@@ -1122,6 +1176,7 @@ class PostplotMapWidget(QWidget):
                 pen=pen,
                 export_pen=export_pen,
                 line_style=line_style,
+                map_layer=layer,
                 plot_item=self._plot_item,
                 gl_overlay=self._gl_overlay,
                 line_items=self._line_items,
@@ -1470,14 +1525,19 @@ class PostplotMapWidget(QWidget):
             if not self._interacting:
                 self._interacting = True
                 self._enter_gl_motion_mode()
+            else:
+                self._hide_reference_layers()
             self._gl_settle_timer.start()
             return
         if not self._has_motion_lod_layers():
             return
         if not self._interacting:
             self._interacting = True
+            self._hide_reference_layers()
         if self._clip_items:
             self._enter_motion_lod()
+        else:
+            self._hide_reference_layers()
         self._clip_timer.start()
 
     def _restore_export_detail(self, *, use_export_pens: bool = False) -> None:
@@ -1527,6 +1587,7 @@ class PostplotMapWidget(QWidget):
                 self._refresh_settled_gl_detail(bbox)
             else:
                 self._update_overview_visibility(bbox)
+        self._show_reference_layers()
         if bbox is None or not self._clip_items:
             if bbox is not None:
                 self._clip_bbox = bbox

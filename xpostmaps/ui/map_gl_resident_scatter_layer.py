@@ -24,6 +24,7 @@ class ResidentGlScatterLayer:
         rgba: tuple[int, int, int, int],
         screen_size: float,
         export_size: float,
+        map_layer: str = "postplot",
         plot_item: pg.PlotItem,
         gl_overlay,
         scatter_items: list[dict],
@@ -32,6 +33,7 @@ class ResidentGlScatterLayer:
         self._layer_id = ResidentGlScatterLayer._next_layer_id
         ResidentGlScatterLayer._next_layer_id += 1
         self._parts = parts
+        self._map_layer = map_layer
         self._rgba = rgba
         self._screen_size = screen_size
         self._export_size = export_size
@@ -58,6 +60,10 @@ class ResidentGlScatterLayer:
     @property
     def layer_id(self) -> int:
         return self._layer_id
+
+    @property
+    def map_layer(self) -> str:
+        return self._map_layer
 
     @property
     def has_pending_uploads(self) -> bool:
