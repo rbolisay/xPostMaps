@@ -43,6 +43,10 @@ from xpostmaps.core.polygon_import_service import (
     imported_polygon_entries,
     non_imported_polygon_entries,
 )
+from xpostmaps.core.navplan_catalog_utils import (
+    assignments_to_row_navplan_indices,
+    row_navplan_indices_to_assignments,
+)
 from xpostmaps.core.preplot_catalog_utils import preplot_source_labels
 from xpostmaps.core.sequence_utils import (
     assignments_to_row_sequence_ids,
@@ -71,14 +75,78 @@ def _table_cell_button(text: str) -> QPushButton:
     btn = QPushButton(text)
     btn.setObjectName("tableCellBtn")
     btn.setSizePolicy(QSizePolicy.Policy.Minimum, QSizePolicy.Policy.Fixed)
+    _apply_table_cell_button_width(btn, text)
     return btn
 
 
-def _hide_checkbox(hidden: bool) -> QCheckBox:
-    box = QCheckBox("")
-    box.setChecked(hidden)
-    box.setToolTip("Hide")
-    return box
+def _apply_table_cell_button_width(btn: QPushButton, text: str | None = None) -> None:
+    label = text if text is not None else btn.text()
+    pad = 24  # tableCellBtn horizontal padding + border
+    btn.setMinimumWidth(btn.fontMetrics().horizontalAdvance(label) + pad)
+
+
+def _table_name_edit(text: str = "") -> QLineEdit:
+    edit = QLineEdit(text)
+    edit.setSizePolicy(QSizePolicy.Policy.Minimum, QSizePolicy.Policy.Fixed)
+    _apply_name_edit_width(edit, text)
+    return edit
+
+
+def _apply_name_edit_width(edit: QLineEdit, text: str | None = None) -> None:
+    label = text if text is not None else edit.text()
+    sample = label if label.strip() else " "
+    pad = 28  # QTableWidget QLineEdit horizontal padding + border
+    edit.setMinimumWidth(edit.fontMetrics().horizontalAdvance(sample) + pad)
+
+
+def _connect_name_edit(table: QTableWidget, edit: QLineEdit, col: int = 0) -> None:
+    def sync_name_width(_text: str = "") -> None:
+        _apply_name_edit_width(edit)
+        _fit_table_column(table, col)
+
+    edit.textChanged.connect(sync_name_width)
+
+
+def _column_content_width(table: QTableWidget, col: int) -> int:
+    header = table.horizontalHeader()
+    width = 0
+    header_item = table.horizontalHeaderItem(col)
+    if header_item is not None:
+        width = header.fontMetrics().horizontalAdvance(header_item.text()) + 20
+    for row in range(table.rowCount()):
+        item = table.item(row, col)
+        if item is not None:
+            width = max(width, item.sizeHint().width())
+        widget = table.cellWidget(row, col)
+        if widget is None:
+            continue
+        if isinstance(widget, QPushButton):
+            _apply_table_cell_button_width(widget)
+            width = max(width, widget.minimumWidth(), widget.sizeHint().width())
+        elif isinstance(widget, QLineEdit):
+            _apply_name_edit_width(widget)
+            width = max(width, widget.minimumWidth(), widget.sizeHint().width())
+        else:
+            widget.adjustSize()
+            width = max(width, widget.sizeHint().width())
+    return max(width + 12, 48)
+
+
+def _fit_table_column(table: QTableWidget, col: int) -> None:
+    """Size a column to fit header text and the widest cell widget/content."""
+    if col < 0 or col >= table.columnCount():
+        return
+    table.setColumnWidth(col, _column_content_width(table, col))
+
+
+def _fit_table_action_column(table: QTableWidget, col: int) -> None:
+    """Ensure action-button columns fit the widest button and header text."""
+    _fit_table_column(table, col)
+
+
+def _fit_table_name_column(table: QTableWidget, col: int = 0) -> None:
+    """Ensure name columns fit the widest QLineEdit and header text."""
+    _fit_table_column(table, col)
 
 
 def _fit_table_row(table: QTableWidget, row: int) -> None:
@@ -86,6 +154,16 @@ def _fit_table_row(table: QTableWidget, row: int) -> None:
     table.setRowHeight(row, max(table.rowHeight(row), 34))
     for col in range(table.columnCount()):
         table.resizeColumnToContents(col)
+        measured = _column_content_width(table, col)
+        if table.columnWidth(col) < measured:
+            table.setColumnWidth(col, measured)
+
+
+def _hide_checkbox(hidden: bool) -> QCheckBox:
+    box = QCheckBox("")
+    box.setChecked(hidden)
+    box.setToolTip("Hide")
+    return box
 
 
 def _configure_legend_table(table: QTableWidget) -> None:
@@ -221,7 +299,7 @@ class LegendDialog:
             area_table = QTableWidget(0, 6)
             area_table.setHorizontalHeaderLabels(
                 [
-                    "Area Polygon Names",
+                    "Polygon Name",
                     "Polygon Source",
                     "Border Style",
                     "Border Color",
@@ -236,7 +314,7 @@ class LegendDialog:
 
             post_table = QTableWidget(0, 6)
             post_table.setHorizontalHeaderLabels(
-                ["Name", "Line Style", "Color", "P111/P190 Data", "Select Sequences", "Hide"]
+                ["Postplot Name", "Line Style", "Color", "P111/P190 Data", "Select Sequences", "Hide"]
             )
             _configure_legend_table(post_table)
 
@@ -461,8 +539,9 @@ class LegendDialog:
             def add_area_row(entry: AreaLegendEntry | None = None) -> None:
                 row = area_table.rowCount()
                 area_table.insertRow(row)
-                name_edit = QLineEdit(entry.name if entry else "")
+                name_edit = _table_name_edit(entry.name if entry else "")
                 name_edit.editingFinished.connect(live_apply)
+                _connect_name_edit(area_table, name_edit, 0)
                 area_table.setCellWidget(row, 0, name_edit)
 
                 source_combo = QComboBox()
@@ -517,6 +596,7 @@ class LegendDialog:
                 area_table.setCellWidget(row, 5, hide_box)
                 _update_custom_button(row)
                 _fit_table_row(area_table, row)
+                _fit_table_name_column(area_table, 0)
 
             def remove_area_row() -> None:
                 row = area_table.currentRow()
@@ -542,10 +622,11 @@ class LegendDialog:
                     if not isinstance(btn, QPushButton):
                         continue
                     count = len(row_sequence_ids[row]) if row < len(row_sequence_ids) else 0
-                    btn.setText(
-                        f"Select Sequences ({count})" if count else "Select Sequences"
-                    )
+                    label = f"Select Sequences ({count})" if count else "Select Sequences"
+                    btn.setText(label)
+                    _apply_table_cell_button_width(btn, label)
                     _fit_table_row(post_table, row)
+                _fit_table_action_column(post_table, 4)
 
             def _open_sequences(row: int, name: str) -> None:
                 if not seq_list:
@@ -596,8 +677,9 @@ class LegendDialog:
                 row = post_table.rowCount()
                 post_table.insertRow(row)
                 name = entry.name if entry else ""
-                post_name = QLineEdit(name)
+                post_name = _table_name_edit(name)
                 post_name.editingFinished.connect(live_apply)
+                _connect_name_edit(post_table, post_name, 0)
                 post_table.setCellWidget(row, 0, post_name)
 
                 style_combo = QComboBox()
@@ -656,6 +738,8 @@ class LegendDialog:
                 hide_box.toggled.connect(live_apply)
                 post_table.setCellWidget(row, 5, hide_box)
                 _fit_table_row(post_table, row)
+                _fit_table_name_column(post_table, 0)
+                _fit_table_action_column(post_table, 4)
 
             def remove_post_row() -> None:
                 row = post_table.currentRow()
@@ -671,6 +755,7 @@ class LegendDialog:
             # polygons, preplots and survey perimeters are NOT auto-added.
             for entry in non_imported_polygon_entries(legend.areas):
                 add_area_row(entry)
+            _fit_table_name_column(area_table, 0)
 
             area_btns = QHBoxLayout()
             add_area_btn = QPushButton("Add Area Row")
@@ -703,8 +788,9 @@ class LegendDialog:
             def add_preplot_row(entry: PreplotLegendEntry | None = None) -> None:
                 row = preplot_table.rowCount()
                 preplot_table.insertRow(row)
-                pp_name = QLineEdit(entry.name if entry else "")
+                pp_name = _table_name_edit(entry.name if entry else "")
                 pp_name.editingFinished.connect(live_apply)
+                _connect_name_edit(preplot_table, pp_name, 0)
                 preplot_table.setCellWidget(row, 0, pp_name)
 
                 source_combo = QComboBox()
@@ -746,6 +832,7 @@ class LegendDialog:
                 hide_box.toggled.connect(live_apply)
                 preplot_table.setCellWidget(row, 4, hide_box)
                 _fit_table_row(preplot_table, row)
+                _fit_table_name_column(preplot_table, 0)
 
             def remove_preplot_row() -> None:
                 row = preplot_table.currentRow()
@@ -768,43 +855,63 @@ class LegendDialog:
             )
             _configure_legend_table(navplan_table)
 
+            def _navplan_legend_names() -> list[str]:
+                names: list[str] = []
+                for row in range(navplan_table.rowCount()):
+                    name_w = navplan_table.cellWidget(row, 0)
+                    if isinstance(name_w, QLineEdit):
+                        name = name_w.text().strip()
+                        if name:
+                            names.append(name)
+                return names
+
+            def _refresh_navplan_select_buttons() -> None:
+                for row in range(navplan_table.rowCount()):
+                    btn = navplan_table.cellWidget(row, 3)
+                    if not isinstance(btn, QPushButton):
+                        continue
+                    count = len(row_navplan_indices[row]) if row < len(row_navplan_indices) else 0
+                    label = f"Select Navplans ({count})" if count else "Select Navplans"
+                    btn.setText(label)
+                    _apply_table_cell_button_width(btn, label)
+                    _fit_table_row(navplan_table, row)
+                _fit_table_action_column(navplan_table, 3)
+
             def _open_navplans(row: int, name: str) -> None:
                 if not navplan_list:
                     return
+                legend_names = _navplan_legend_names()
+                current_assignments = row_navplan_indices_to_assignments(
+                    legend_names,
+                    row_navplan_indices,
+                )
 
-                def on_changed(indices: list[int]) -> None:
-                    if row < len(row_navplan_indices):
-                        row_navplan_indices[row] = indices
-                    else:
-                        while len(row_navplan_indices) <= row:
-                            row_navplan_indices.append([])
-                        row_navplan_indices[row] = indices
-                    if row < len(row_navplan_filter_active):
-                        row_navplan_filter_active[row] = True
-                    else:
-                        while len(row_navplan_filter_active) <= row:
-                            row_navplan_filter_active.append(False)
-                        row_navplan_filter_active[row] = True
-                    btn = navplan_table.cellWidget(row, 3)
-                    if isinstance(btn, QPushButton):
-                        btn.setText(
-                            f"Select Navplans ({len(indices)})"
-                            if indices
-                            else "Select Navplans"
+                def on_assignments_changed(updated: dict[int, str]) -> None:
+                    names = _navplan_legend_names()
+                    new_row_indices = assignments_to_row_navplan_indices(names, updated)
+                    row_navplan_indices.clear()
+                    row_navplan_indices.extend(new_row_indices)
+                    while len(row_navplan_indices) < navplan_table.rowCount():
+                        row_navplan_indices.append([])
+                    while len(row_navplan_filter_active) < navplan_table.rowCount():
+                        row_navplan_filter_active.append(False)
+                    for idx in range(navplan_table.rowCount()):
+                        active = bool(
+                            row_navplan_indices[idx] if idx < len(row_navplan_indices) else []
                         )
-                        _fit_table_row(navplan_table, row)
+                        if idx < len(row_navplan_filter_active):
+                            row_navplan_filter_active[idx] = active
+                        else:
+                            row_navplan_filter_active.append(active)
+                    _refresh_navplan_select_buttons()
                     apply_legend()
 
                 NavplansDialog.open(
                     parent=dialog,
-                    legend_row_name=name,
                     catalog=navplan_list,
-                    selected_indices=(
-                        row_navplan_indices[row]
-                        if row < len(row_navplan_indices)
-                        else []
-                    ),
-                    on_changed=on_changed,
+                    navplan_legend_names=legend_names,
+                    assignments=current_assignments,
+                    on_assignments_changed=on_assignments_changed,
                     row_key=str(row),
                 )
 
@@ -812,8 +919,9 @@ class LegendDialog:
                 row = navplan_table.rowCount()
                 navplan_table.insertRow(row)
                 name = entry.name if entry else ""
-                nav_name = QLineEdit(name)
+                nav_name = _table_name_edit(name)
                 nav_name.editingFinished.connect(live_apply)
+                _connect_name_edit(navplan_table, nav_name, 0)
                 navplan_table.setCellWidget(row, 0, nav_name)
 
                 style_combo = QComboBox()
@@ -867,6 +975,8 @@ class LegendDialog:
                 hide_box.toggled.connect(live_apply)
                 navplan_table.setCellWidget(row, 4, hide_box)
                 _fit_table_row(navplan_table, row)
+                _fit_table_name_column(navplan_table, 0)
+                _fit_table_action_column(navplan_table, 3)
 
             def remove_navplan_row() -> None:
                 row = navplan_table.currentRow()
@@ -880,6 +990,7 @@ class LegendDialog:
 
             for entry in legend.preplot_lines:
                 add_preplot_row(entry)
+            _fit_table_name_column(preplot_table, 0)
 
             preplot_btns = QHBoxLayout()
             add_preplot_btn = QPushButton("Add Preplot Row")
@@ -902,6 +1013,8 @@ class LegendDialog:
 
             for entry in legend.navplan_lines:
                 add_navplan_row(entry)
+            _fit_table_name_column(navplan_table, 0)
+            _fit_table_action_column(navplan_table, 3)
 
             navplan_btns = QHBoxLayout()
             add_navplan_btn = QPushButton("Add Navplan Row")
@@ -927,6 +1040,8 @@ class LegendDialog:
             if not legend.postplot_lines:
                 add_post_row(PostplotLegendEntry(name="Up Line", color="#ef4444"))
                 add_post_row(PostplotLegendEntry(name="Down Line", color="#3b82f6"))
+            _fit_table_name_column(post_table, 0)
+            _fit_table_action_column(post_table, 4)
 
             post_btns = QHBoxLayout()
             add_post_btn = QPushButton("Add PostPlot Row")

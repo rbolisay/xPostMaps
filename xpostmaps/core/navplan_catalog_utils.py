@@ -238,3 +238,37 @@ def navplan_catalog_from_json(data: list[dict] | None) -> list[NavplanCatalogEnt
         )
         for item in data
     ]
+
+
+def row_navplan_indices_to_assignments(
+    navplan_legend_names: list[str],
+    row_navplan_indices: list[list[int]],
+) -> dict[int, str]:
+    """Map each navplan source index to its assigned legend row name."""
+    assignments: dict[int, str] = {}
+    for name, indices in zip(navplan_legend_names, row_navplan_indices):
+        if not name:
+            continue
+        for source_index in indices:
+            assignments[int(source_index)] = name
+    return assignments
+
+
+def assignments_to_row_navplan_indices(
+    navplan_legend_names: list[str],
+    assignments: dict[int, str],
+) -> list[list[int]]:
+    """Rebuild per-legend-row navplan source index lists from a flat assignment map."""
+    result: list[list[int]] = [[] for _ in navplan_legend_names]
+    index_by_name = {
+        name: index for index, name in enumerate(navplan_legend_names) if name
+    }
+    for source_index, legend_name in assignments.items():
+        row_index = index_by_name.get(legend_name)
+        if row_index is None:
+            continue
+        bucket = result[row_index]
+        idx = int(source_index)
+        if idx not in bucket:
+            bucket.append(idx)
+    return result

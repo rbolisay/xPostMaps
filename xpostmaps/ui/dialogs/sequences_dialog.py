@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Callable
 
-from PySide6.QtCore import QPoint, Qt
+from PySide6.QtCore import QPoint, Qt, QTimer
 from PySide6.QtWidgets import (
     QComboBox,
     QHBoxLayout,
@@ -50,6 +50,10 @@ def _numeric_sort_key(value: str) -> float:
         return float("inf")
 
 
+def _text_sort_key(value: str) -> str:
+    return value.casefold().strip()
+
+
 def _assignment_display(name: str) -> str:
     return name if name else _UNASSIGNED_LABEL
 
@@ -92,10 +96,12 @@ class SequencesDialog:
 
             table_holder: dict[str, QTableWidget | None] = {"table": None}
             postplot_options = [name for name in postplot_names if name.strip()]
+            pending_assignments: dict[str, str] = dict(assignments)
 
             def _assignment_combo(
                 assigned_name: str,
                 sort_item: _SortableTableWidgetItem,
+                seq_id: str,
             ) -> QComboBox:
                 combo = QComboBox()
                 combo.addItem(_UNASSIGNED_LABEL, "")
@@ -105,9 +111,13 @@ class SequencesDialog:
                 index = combo.findData(target)
                 combo.setCurrentIndex(index if index >= 0 else 0)
 
-                def sync_sort(_index: int, item=sort_item, box=combo) -> None:
+                def sync_sort(_index: int, item=sort_item, box=combo, sid=seq_id) -> None:
                     value = str(box.currentData() or "")
                     item.set_sort_key(_assignment_sort_key(value), _assignment_display(value))
+                    if value:
+                        pending_assignments[sid] = value
+                    else:
+                        pending_assignments.pop(sid, None)
 
                 combo.currentIndexChanged.connect(sync_sort)
                 return combo
@@ -122,7 +132,7 @@ class SequencesDialog:
                 for row, seq in enumerate(seq_rows):
                     columns = [
                         (seq.sequence_no, _numeric_sort_key(seq.sequence_no)),
-                        (seq.line_name, _numeric_sort_key(seq.line_name)),
+                        (seq.line_name, _text_sort_key(seq.line_name)),
                         (seq.line_direction, _numeric_sort_key(seq.line_direction)),
                         (str(seq.first_sp), float(seq.first_sp)),
                         (str(seq.last_sp), float(seq.last_sp)),
@@ -133,7 +143,7 @@ class SequencesDialog:
                             col,
                             _SortableTableWidgetItem(text, sort_key, seq.seq_id),
                         )
-                    assigned = assignments.get(seq.seq_id, "")
+                    assigned = pending_assignments.get(seq.seq_id, "")
                     sort_item = _SortableTableWidgetItem(
                         _assignment_display(assigned),
                         _assignment_sort_key(assigned),
@@ -143,9 +153,35 @@ class SequencesDialog:
                     table.setCellWidget(
                         row,
                         5,
-                        _assignment_combo(assigned, sort_item),
+                        _assignment_combo(assigned, sort_item, seq.seq_id),
                     )
                 table.setSortingEnabled(was_sorting or True)
+
+            def _sync_assignment_widgets() -> None:
+                """Rebind dropdowns after sort; Qt keeps cell widgets on row indices."""
+                table = table_holder["table"]
+                if table is None:
+                    return
+                for row in range(table.rowCount()):
+                    id_item = table.item(row, 0)
+                    if id_item is None:
+                        continue
+                    seq_id = str(id_item.data(Qt.ItemDataRole.UserRole) or "")
+                    if not seq_id:
+                        continue
+                    sort_item = table.item(row, 5)
+                    if not isinstance(sort_item, _SortableTableWidgetItem):
+                        continue
+                    assigned = pending_assignments.get(seq_id, "")
+                    existing = table.cellWidget(row, 5)
+                    if isinstance(existing, QComboBox):
+                        assigned = str(existing.currentData() or "")
+                    table.removeCellWidget(row, 5)
+                    table.setCellWidget(
+                        row,
+                        5,
+                        _assignment_combo(assigned, sort_item, seq_id),
+                    )
 
             def _collect_assignments() -> dict[str, str]:
                 table = table_holder["table"]
@@ -235,10 +271,11 @@ class SequencesDialog:
             header.setSortIndicatorShown(True)
             header.setSectionsClickable(True)
             header.setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
+            header.sortIndicatorChanged.connect(
+                lambda _section, _order: QTimer.singleShot(0, _sync_assignment_widgets)
+            )
             table_holder["table"] = table
             _populate_table(sequences)
-
-            pending_assignments: dict[str, str] = dict(assignments)
 
             def commit_assignments() -> None:
                 pending_assignments.clear()
