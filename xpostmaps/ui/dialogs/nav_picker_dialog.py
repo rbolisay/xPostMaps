@@ -37,7 +37,7 @@ class NavFilePickerDialog(QDialog):
         super().__init__(parent)
         self.setWindowTitle(title)
         self.setModal(True)
-        self.resize(520, 420)
+        self.resize(676, 546)
         self.setStyleSheet(app_stylesheet())
 
         self._extensions = {ext.lower() for ext in (extensions or {".p111", ".p190", ".txt", ".nav"})}

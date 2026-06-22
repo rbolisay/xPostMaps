@@ -4,9 +4,10 @@ from __future__ import annotations
 
 from datetime import date
 
-from PySide6.QtCore import QSize, Qt, Signal
+from PySide6.QtCore import QSize, Qt, Signal, QTimer
 from PySide6.QtGui import QFontMetrics
 from PySide6.QtWidgets import (
+    QApplication,
     QHBoxLayout,
     QLabel,
     QLineEdit,
@@ -37,6 +38,8 @@ _COL_GAP = 14
 _LIST_FRAME_PAD = 6
 _MIN_COLUMN_WIDTH = 360
 _ROW_HPAD = 16
+_LIST_VIEWPORT_PAD = 4
+_MEASURE_LIST_HEIGHT = 4096
 
 
 def _line_edit_height(metrics: QFontMetrics) -> int:
@@ -183,9 +186,12 @@ class ProjectInfoBoard(QWidget):
         self._custom_labels: dict[str, str] = {}
         self._left = _FieldColumnList(0, self)
         self._right = _FieldColumnList(1, self)
+        self._left.setObjectName("projectInfoColumn")
+        self._right.setObjectName("projectInfoColumn")
         self._build_ui()
         self._left.model().rowsMoved.connect(self._repair_item_widgets)
         self._right.model().rowsMoved.connect(self._repair_item_widgets)
+        self._needs_show_refit = False
 
     def _build_ui(self) -> None:
         root = QVBoxLayout(self)
@@ -275,17 +281,48 @@ class ProjectInfoBoard(QWidget):
                 width = max(width, self._row_required_width(widget))
         return width + _LIST_FRAME_PAD
 
-    def _column_fitted_height(self, list_widget: QListWidget) -> int:
+    def _column_measured_height(self, list_widget: QListWidget) -> int:
+        """Measure rendered row stack; QListWidget item padding is not in sizeHint."""
         count = list_widget.count()
         if count == 0:
             return 0
-        row_h = AutoFitLineEdit.preferred_height() + _ROW_EXTRA
-        spacing = list_widget.spacing()
-        total = 0
-        for row in range(count):
-            item = list_widget.item(row)
-            total += max(item.sizeHint().height(), row_h)
-        return total + spacing * max(0, count - 1) + _LIST_FRAME_PAD
+        width = max(list_widget.width(), list_widget.minimumWidth(), _MIN_COLUMN_WIDTH)
+        list_widget.setFixedWidth(width)
+        list_widget.setFixedHeight(_MEASURE_LIST_HEIGHT)
+        list_widget.updateGeometries()
+        app = QApplication.instance()
+        if app is not None:
+            app.processEvents()
+        last_item = list_widget.item(count - 1)
+        if last_item is None:
+            return 0
+        last_bottom = list_widget.visualItemRect(last_item).bottom()
+        if last_bottom <= 0:
+            row_h = AutoFitLineEdit.preferred_height() + _ROW_EXTRA
+            spacing = list_widget.spacing()
+            return count * row_h + spacing * max(0, count - 1) + 24
+        frame = max(list_widget.frameWidth() * 2, 2)
+        return last_bottom + _LIST_VIEWPORT_PAD + frame
+
+    def _ensure_all_rows_visible(self, list_widget: QListWidget) -> int:
+        """Grow the column if stylesheet padding still clips the last row."""
+        count = list_widget.count()
+        if count == 0:
+            return list_widget.height()
+        app = QApplication.instance()
+        if app is not None:
+            app.processEvents()
+        last_item = list_widget.item(count - 1)
+        if last_item is None:
+            return list_widget.height()
+        overflow = (
+            list_widget.visualItemRect(last_item).bottom()
+            + _LIST_VIEWPORT_PAD
+            - list_widget.viewport().height()
+        )
+        if overflow > 0:
+            list_widget.setFixedHeight(list_widget.height() + overflow)
+        return list_widget.height()
 
     def apply_fitted_geometry(self) -> QSize:
         """Size columns to fit all rows and values without internal scrollbars."""
@@ -295,17 +332,34 @@ class ProjectInfoBoard(QWidget):
         self._right.setFixedWidth(right_w)
         self._sync_column_row_widths(self._left)
         self._sync_column_row_widths(self._right)
-        col_h = max(self._column_fitted_height(self._left), self._column_fitted_height(self._right))
+
+        left_h = self._column_measured_height(self._left)
+        right_h = self._column_measured_height(self._right)
+        col_h = max(left_h, right_h)
         if col_h > 0:
-            self._left.setFixedHeight(col_h)
-            self._right.setFixedHeight(col_h)
-        for list_widget in (self._left, self._right):
-            list_widget.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-            list_widget.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+            for list_widget in (self._left, self._right):
+                list_widget.setFixedHeight(col_h)
+                list_widget.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+                list_widget.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+            for list_widget in (self._left, self._right):
+                col_h = max(col_h, self._ensure_all_rows_visible(list_widget))
+            for list_widget in (self._left, self._right):
+                list_widget.setFixedHeight(col_h)
+
         board_w = left_w + right_w + _COL_GAP
         board_h = col_h if col_h > 0 else AutoFitLineEdit.preferred_height() + _ROW_EXTRA
         self.setFixedSize(board_w, board_h)
         return QSize(board_w, board_h)
+
+    def showEvent(self, event) -> None:  # noqa: N802
+        super().showEvent(event)
+        if self._needs_show_refit:
+            self._needs_show_refit = False
+            QTimer.singleShot(0, self._refit_after_show)
+
+    def _refit_after_show(self) -> None:
+        self.apply_fitted_geometry()
+        self._on_layout_edited()
 
     def _sync_column_row_widths(self, list_widget: QListWidget) -> None:
         width = max(list_widget.width(), list_widget.viewport().width(), 200)
@@ -391,6 +445,7 @@ class ProjectInfoBoard(QWidget):
                     value = date.today().isoformat()
                 self._field_values[key] = value
                 self._add_field_item(list_widget, key, label, value)
+        self._needs_show_refit = True
         self.apply_fitted_geometry()
 
     def set_header_fields(self, edits: dict[str, QLineEdit]) -> None:

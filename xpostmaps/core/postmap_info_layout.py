@@ -204,5 +204,14 @@ def info_from_board(
 
 
 def ensure_layout(info: PostmapInfo) -> None:
-    if not _parse_layout(info.extra.get(LAYOUT_KEY, "")):
+    stored = _parse_layout(info.extra.get(LAYOUT_KEY, ""))
+    if not stored:
         set_layout_storage(info, list(DEFAULT_LAYOUT), get_custom_fields(info))
+        return
+    stored_keys = {entry["key"] for entry in stored}
+    merged = list(stored)
+    for entry in DEFAULT_LAYOUT:
+        if entry["key"] not in stored_keys:
+            merged.append(dict(entry))
+    if len(merged) != len(stored):
+        set_layout_storage(info, merged, get_custom_fields(info))
