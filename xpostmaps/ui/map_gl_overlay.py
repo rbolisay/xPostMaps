@@ -83,6 +83,9 @@ class MapGlLineOverlay:
         self._items: dict[tuple[int, int], object] = {}
         self._run_bboxes: dict[tuple[int, int], tuple[float, float, float, float]] = {}
         self._layer_visible: dict[int, bool] = {}
+        self._scatter_items: dict[tuple[int, int], object] = {}
+        self._scatter_run_bboxes: dict[tuple[int, int], tuple[float, float, float, float]] = {}
+        self._scatter_layer_visible: dict[int, bool] = {}
         self._viewport_cull = False
         if self._view is not None:
             self._view.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
@@ -127,7 +130,7 @@ class MapGlLineOverlay:
         x, y, w, h = rect
         self._view.setGeometry(x, y, w, h)
         self._view.raise_()
-        if self._items:
+        if self._items or self._scatter_items:
             self._view.show()
         vb = self._plot.getViewBox()
         if vb is not None:
@@ -169,6 +172,16 @@ class MapGlLineOverlay:
                 item.setVisible(False)
                 continue
             run_bbox = self._run_bboxes.get(key)
+            if view_bbox is None or run_bbox is None:
+                item.setVisible(True)
+                continue
+            item.setVisible(_bbox_intersects(run_bbox, view_bbox))
+        for key, item in self._scatter_items.items():
+            layer_id = key[0]
+            if not self._scatter_layer_visible.get(layer_id, True):
+                item.setVisible(False)
+                continue
+            run_bbox = self._scatter_run_bboxes.get(key)
             if view_bbox is None or run_bbox is None:
                 item.setVisible(True)
                 continue
@@ -231,7 +244,6 @@ class MapGlLineOverlay:
             if run_bbox is not None and view_bbox is not None:
                 layer_vis = layer_vis and _bbox_intersects(run_bbox, view_bbox)
         item.setVisible(layer_vis)
-        self._view.show()
 
     def set_layer_visible(self, layer_id: int, visible: bool) -> None:
         if not self.available:
@@ -243,6 +255,89 @@ class MapGlLineOverlay:
         for key, item in self._items.items():
             if key[0] == layer_id:
                 item.setVisible(visible)
+
+    def add_scatter_run(
+        self,
+        layer_id: int,
+        run_index: int,
+        rx: np.ndarray,
+        ry: np.ndarray,
+        *,
+        color: tuple[float, float, float, float],
+        size: float,
+    ) -> None:
+        if not self.available:
+            return
+        from pyqtgraph.opengl import GLScatterPlotItem
+
+        assert self._view is not None
+        storage_key = (layer_id, run_index)
+        if storage_key in self._scatter_items:
+            return
+        if rx.size < 1:
+            return
+        rx = np.asarray(rx, dtype=np.float64)
+        ry = np.asarray(ry, dtype=np.float64)
+        finite = np.isfinite(rx) & np.isfinite(ry)
+        if not np.any(finite):
+            return
+        rx = rx[finite]
+        ry = ry[finite]
+        pos = np.ascontiguousarray(
+            np.column_stack(
+                [
+                    rx.astype(np.float32, copy=False),
+                    ry.astype(np.float32, copy=False),
+                    np.zeros(rx.size, dtype=np.float32),
+                ]
+            ),
+            dtype=np.float32,
+        )
+        item = GLScatterPlotItem(
+            pos=pos,
+            color=color,
+            size=max(1.0, float(size)),
+            pxMode=True,
+            glOptions="opaque",
+        )
+        self._view.addItem(item)
+        self._scatter_items[storage_key] = item
+        self._scatter_run_bboxes[storage_key] = (
+            float(np.min(rx)),
+            float(np.max(rx)),
+            float(np.min(ry)),
+            float(np.max(ry)),
+        )
+        self._scatter_layer_visible.setdefault(layer_id, True)
+        layer_vis = self._scatter_layer_visible.get(layer_id, True)
+        if self._viewport_cull:
+            run_bbox = self._scatter_run_bboxes.get(storage_key)
+            view_bbox = self._view_bbox()
+            if run_bbox is not None and view_bbox is not None:
+                layer_vis = layer_vis and _bbox_intersects(run_bbox, view_bbox)
+        item.setVisible(layer_vis)
+
+    def set_scatter_layer_visible(self, layer_id: int, visible: bool) -> None:
+        if not self.available:
+            return
+        self._scatter_layer_visible[layer_id] = visible
+        if self._viewport_cull:
+            self._apply_all_visibility()
+            return
+        for key, item in self._scatter_items.items():
+            if key[0] == layer_id:
+                item.setVisible(visible)
+
+    def clear_scatter_layer(self, layer_id: int) -> None:
+        if not self.available:
+            return
+        assert self._view is not None
+        remove_keys = [k for k in self._scatter_items if k[0] == layer_id]
+        for key in remove_keys:
+            item = self._scatter_items.pop(key)
+            self._scatter_run_bboxes.pop(key, None)
+            self._view.removeItem(item)
+        self._scatter_layer_visible.pop(layer_id, None)
 
     def clear_layer(self, layer_id: int) -> None:
         if not self.available:
@@ -260,13 +355,21 @@ class MapGlLineOverlay:
             self._items.clear()
             self._run_bboxes.clear()
             self._layer_visible.clear()
+            self._scatter_items.clear()
+            self._scatter_run_bboxes.clear()
+            self._scatter_layer_visible.clear()
             self._viewport_cull = False
             return
         assert self._view is not None
         for item in self._items.values():
             self._view.removeItem(item)
+        for item in self._scatter_items.values():
+            self._view.removeItem(item)
         self._items.clear()
         self._run_bboxes.clear()
         self._layer_visible.clear()
+        self._scatter_items.clear()
+        self._scatter_run_bboxes.clear()
+        self._scatter_layer_visible.clear()
         self._viewport_cull = False
         self._view.hide()

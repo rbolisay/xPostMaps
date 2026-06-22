@@ -44,6 +44,7 @@ from xpostmaps.ui.map_view_box import MapViewBox
 from xpostmaps.ui.map_clip_worker import MapClipWorker
 from xpostmaps.ui.map_gl_overlay import MapGlLineOverlay
 from xpostmaps.ui.map_gl_resident_layer import ResidentGlLineLayer
+from xpostmaps.ui.map_gl_resident_scatter_layer import ResidentGlScatterLayer
 from xpostmaps.ui.theme import (
     BG_MAP_PRINT,
     DOWN_LINE,
@@ -417,7 +418,8 @@ class PostplotMapWidget(QWidget):
         # pyqtgraph's built-in clipToView for weaving survey lines.
         self._clip_items: list[dict] = []
         self._gl_line_layers: list[ResidentGlLineLayer] = []
-        self._overview_cpu_items: list[pg.PlotCurveItem] = []
+        self._gl_scatter_layers: list[ResidentGlScatterLayer] = []
+        self._overview_cpu_items: list[pg.GraphicsItem] = []
         self._overview_strokes: list[tuple[np.ndarray, np.ndarray, tuple[int, int, int, int]]] = []
         self._clip_bbox: tuple[float, float, float, float] | None = None
         # True while the user is actively panning/zooming; dense layers keep their
@@ -600,6 +602,8 @@ class PostplotMapWidget(QWidget):
             if bbox is not None:
                 for layer in self._gl_line_layers:
                     layer.prepare_export(bbox)
+                for layer in self._gl_scatter_layers:
+                    layer.prepare_export(bbox)
             self._restore_export_detail()
         else:
             self._restore_screen_pens()
@@ -620,6 +624,8 @@ class PostplotMapWidget(QWidget):
         bbox = self._view_clip_bbox()
         if bbox is not None:
             for layer in self._gl_line_layers:
+                layer.end_export()
+            for layer in self._gl_scatter_layers:
                 layer.end_export()
             self._update_overview_visibility(bbox)
         if self._clip_items:
@@ -689,6 +695,9 @@ class PostplotMapWidget(QWidget):
         for layer in self._gl_line_layers:
             layer.clear()
         self._gl_line_layers.clear()
+        for layer in self._gl_scatter_layers:
+            layer.clear()
+        self._gl_scatter_layers.clear()
         self._overview_cpu_items.clear()
         self._overview_strokes.clear()
         self._gl_overlay.clear()
@@ -709,10 +718,15 @@ class PostplotMapWidget(QWidget):
         if bbox is not None:
             self._refresh_settled_gl_detail(bbox)
 
+    def _all_gl_layers(self) -> list[ResidentGlLineLayer | ResidentGlScatterLayer]:
+        return [*self._gl_line_layers, *self._gl_scatter_layers]
+
+    def _uses_gl_motion_path(self) -> bool:
+        return bool(self._all_gl_layers()) and not self._clip_items
+
     def _gl_layers_ready(self) -> bool:
-        return bool(self._gl_line_layers) and all(
-            not layer.has_pending_uploads for layer in self._gl_line_layers
-        )
+        layers = self._all_gl_layers()
+        return bool(layers) and all(not layer.has_pending_uploads for layer in layers)
 
     def _refresh_settled_gl_detail(
         self,
@@ -741,11 +755,15 @@ class PostplotMapWidget(QWidget):
                 item.setVisible(True)
             for layer in self._gl_line_layers:
                 layer.set_gl_visible(False)
+            for layer in self._gl_scatter_layers:
+                layer.set_gl_visible(False)
             return
         self._gl_overlay.set_viewport_cull(False)
         for item in self._overview_cpu_items:
             item.setVisible(False)
         for layer in self._gl_line_layers:
+            layer.set_gl_visible(True)
+        for layer in self._gl_scatter_layers:
             layer.set_gl_visible(True)
 
     def _is_overview_zoom(
@@ -773,29 +791,39 @@ class PostplotMapWidget(QWidget):
         self,
         bbox: tuple[float, float, float, float] | None = None,
     ) -> None:
-        if not self._gl_line_layers and not self._overview_cpu_items:
+        if not self._all_gl_layers() and not self._overview_cpu_items:
             return
+        bbox = bbox or self._view_clip_bbox()
         # GPU holds full vertex detail once uploaded — never keep RDP overview on screen.
         if self._gl_layers_ready():
+            overview = self._is_overview_zoom(bbox)
+            has_scatter = bool(self._gl_scatter_layers)
             for item in self._overview_cpu_items:
-                item.setVisible(False)
+                if isinstance(item, pg.ScatterPlotItem) and has_scatter:
+                    item.setVisible(overview)
+                else:
+                    item.setVisible(False)
             for layer in self._gl_line_layers:
                 layer.set_gl_visible(True)
+            for layer in self._gl_scatter_layers:
+                layer.set_gl_visible(not overview)
             return
         overview = self._is_overview_zoom(bbox)
         for item in self._overview_cpu_items:
             item.setVisible(overview)
         for layer in self._gl_line_layers:
             layer.set_gl_visible(not overview and not layer.has_pending_uploads)
+        for layer in self._gl_scatter_layers:
+            layer.set_gl_visible(not overview and not layer.has_pending_uploads)
 
     def _start_gl_upload_pump(self) -> None:
-        if not self._gl_line_layers:
+        if not self._all_gl_layers():
             return
         self._gl_upload_timer.start(0)
 
     def _apply_next_gl_upload(self) -> None:
         pending = False
-        for layer in self._gl_line_layers:
+        for layer in self._all_gl_layers():
             if layer.has_pending_uploads:
                 layer.upload_pending_batch()
                 if layer.has_pending_uploads:
@@ -810,7 +838,7 @@ class PostplotMapWidget(QWidget):
                 self._frame.update()
 
     def _enter_motion_lod(self) -> None:
-        """Keep line geometry on screen during pan; hide scatter markers only."""
+        """Keep line and scatter geometry on screen during pan."""
         self._clip_worker.next_generation()
         self._pending_clip_layers.clear()
         self._pending_clip_bbox = None
@@ -820,11 +848,9 @@ class PostplotMapWidget(QWidget):
                 continue
             rec["motion_active"] = True
             item = rec["item"]
-            if rec["kind"] == "scatter":
-                item.setVisible(False)
-                continue
             item.setVisible(True)
-            item.setCacheMode(QGraphicsItem.CacheMode.DeviceCoordinateCache)
+            if rec["kind"] == "line":
+                item.setCacheMode(QGraphicsItem.CacheMode.DeviceCoordinateCache)
 
     def _finish_pan_interaction(self) -> None:
         self._interacting = False
@@ -971,6 +997,43 @@ class PostplotMapWidget(QWidget):
             radius_mm = migrate_dot_radius_mm(key.dot_radius)
             screen_size = scatter_size_px(self._screen_dpi(), radius_mm)
             export_size = scatter_size_px(PDF_EXPORT_DPI, radius_mm)
+            dense_gl_scatter = (
+                layer in ("postplot", "navplan")
+                and xs.size > _CLIP_REGISTER_MIN
+                and self._gl_overlay.available
+            )
+            if dense_gl_scatter:
+                overview_x, overview_y = screen_scatter_geometry(
+                    xs, ys, budget=SCREEN_OVERVIEW_BUDGET
+                )
+                overview_scatter = pg.ScatterPlotItem(
+                    overview_x,
+                    overview_y,
+                    pen=None,
+                    brush=pg.mkBrush(rgba),
+                    size=screen_size,
+                    pxMode=True,
+                    symbol="o",
+                )
+                self._register_plot_item(overview_scatter, layer=layer)
+                self._overview_cpu_items.append(overview_scatter)
+                self._overview_strokes.append((xs, ys, rgba))
+                gl_layer = ResidentGlScatterLayer(
+                    parts=local_parts,
+                    rgba=rgba,
+                    screen_size=screen_size,
+                    export_size=export_size,
+                    plot_item=self._plot_item,
+                    gl_overlay=self._gl_overlay,
+                    scatter_items=self._scatter_items,
+                    plot_items=self._plot_items,
+                )
+                self._gl_scatter_layers.append(gl_layer)
+                self._start_gl_upload_pump()
+                bbox = self._view_clip_bbox()
+                if bbox is not None:
+                    self._update_overview_visibility(bbox)
+                return
             screen_x, screen_y = screen_scatter_geometry(
                 xs, ys, budget=_SCREEN_SCATTER_BUDGET
             )
@@ -1030,13 +1093,13 @@ class PostplotMapWidget(QWidget):
         else:
             lx, ly = concat_polylines(local_parts)
 
-        dense_solid = (
+        dense_gl_line = (
             clipable
             and layer in ("postplot", "navplan")
             and lx.size > _CLIP_REGISTER_MIN
-            and line_style == LineStyle.SOLID
+            and line_style in (LineStyle.SOLID, LineStyle.DASH)
         )
-        if dense_solid and self._gl_overlay.available:
+        if dense_gl_line and self._gl_overlay.available:
             export_pen = _make_export_pen(rgba, width_mm, line_style)
             overview_x, overview_y = screen_line_geometry(
                 lx,
@@ -1403,7 +1466,7 @@ class PostplotMapWidget(QWidget):
     def _on_view_range_changed(self, *_args) -> None:
         if self._gl_overlay.available:
             self._gl_overlay.sync_geometry()
-        if self._gl_line_layers and not self._clip_items:
+        if self._uses_gl_motion_path():
             if not self._interacting:
                 self._interacting = True
                 self._enter_gl_motion_mode()
@@ -1460,7 +1523,7 @@ class PostplotMapWidget(QWidget):
         bbox = self._view_clip_bbox()
         self._finish_pan_interaction()
         if bbox is not None:
-            if self._gl_line_layers and not self._clip_items:
+            if self._uses_gl_motion_path():
                 self._refresh_settled_gl_detail(bbox)
             else:
                 self._update_overview_visibility(bbox)
@@ -1853,7 +1916,7 @@ class PostplotMapWidget(QWidget):
             )
 
         self._reposition_overlays()
-        if self._gl_line_layers:
+        if self._all_gl_layers():
             bbox = self._view_clip_bbox()
             if bbox is not None:
                 self._update_overview_visibility(bbox)
