@@ -739,6 +739,8 @@ class PostplotMapWidget(QWidget):
             return
         zoomed_in = not self._is_overview_zoom(bbox)
         self._gl_overlay.set_viewport_cull(zoomed_in)
+        for layer in self._gl_line_layers:
+            layer.apply_settled_detail(bbox, zoomed_in=zoomed_in)
         self._gl_overlay.sync_geometry()
         view = self._gl_overlay._view
         if view is not None:
@@ -749,6 +751,8 @@ class PostplotMapWidget(QWidget):
         """Fast placeholder while dragging; full GPU detail restores on settle."""
         if not self._gl_layers_ready():
             return
+        for layer in self._gl_line_layers:
+            layer.clear_settled_detail()
         bbox = self._view_clip_bbox()
         if bbox is not None and self._is_overview_zoom(bbox):
             for item in self._overview_cpu_items:
@@ -796,17 +800,12 @@ class PostplotMapWidget(QWidget):
         bbox = bbox or self._view_clip_bbox()
         # GPU holds full vertex detail once uploaded — never keep RDP overview on screen.
         if self._gl_layers_ready():
-            overview = self._is_overview_zoom(bbox)
-            has_scatter = bool(self._gl_scatter_layers)
             for item in self._overview_cpu_items:
-                if isinstance(item, pg.ScatterPlotItem) and has_scatter:
-                    item.setVisible(overview)
-                else:
-                    item.setVisible(False)
+                item.setVisible(False)
             for layer in self._gl_line_layers:
                 layer.set_gl_visible(True)
             for layer in self._gl_scatter_layers:
-                layer.set_gl_visible(not overview)
+                layer.set_gl_visible(True)
             return
         overview = self._is_overview_zoom(bbox)
         for item in self._overview_cpu_items:
@@ -1122,6 +1121,7 @@ class PostplotMapWidget(QWidget):
                 parts=local_parts,
                 pen=pen,
                 export_pen=export_pen,
+                line_style=line_style,
                 plot_item=self._plot_item,
                 gl_overlay=self._gl_overlay,
                 line_items=self._line_items,

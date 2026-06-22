@@ -6,13 +6,38 @@ import numpy as np
 import pyqtgraph as pg
 from PySide6.QtGui import QPen
 
-from xpostmaps.ui.map_batch import concat_polylines
+from xpostmaps.core.models import LineStyle
+from xpostmaps.ui.map_batch import concat_polylines, normalize_line_style
 from xpostmaps.ui.map_gl_overlay import MapGlLineOverlay
 from xpostmaps.utils.spatial_clip import clip_arrays_to_bbox
 
 
 # Upload this many GL line strips per UI tick (legend apply stays responsive).
 _GL_UPLOADS_PER_TICK = 128
+
+
+def _bbox_intersects(
+    a: tuple[float, float, float, float],
+    b: tuple[float, float, float, float],
+) -> bool:
+    ax0, ax1, ay0, ay1 = a
+    bx0, bx1, by0, by1 = b
+    return ax1 >= bx0 and ax0 <= bx1 and ay1 >= by0 and ay0 <= by1
+
+
+def _run_bbox(
+    rx: np.ndarray,
+    ry: np.ndarray,
+) -> tuple[float, float, float, float] | None:
+    finite = np.isfinite(rx) & np.isfinite(ry)
+    if not np.any(finite):
+        return None
+    return (
+        float(np.min(rx[finite])),
+        float(np.max(rx[finite])),
+        float(np.min(ry[finite])),
+        float(np.max(ry[finite])),
+    )
 
 
 class ResidentGlLineLayer:
@@ -26,6 +51,7 @@ class ResidentGlLineLayer:
         parts: list[tuple[np.ndarray, np.ndarray]],
         pen: QPen,
         export_pen: QPen,
+        line_style: LineStyle = LineStyle.SOLID,
         plot_item: pg.PlotItem,
         gl_overlay: MapGlLineOverlay,
         line_items: list[dict],
@@ -39,11 +65,13 @@ class ResidentGlLineLayer:
         self._index_y = index_y
         self._pen = pen
         self._export_pen = export_pen
+        self._line_style = normalize_line_style(line_style)
         self._plot_item = plot_item
         self._gl_overlay = gl_overlay
         self._line_items = line_items
         self._plot_items = plot_items
         self._cpu_items: list[pg.PlotCurveItem] = []
+        self._settle_cpu_items: list[pg.PlotCurveItem] = []
         self._export_mode = False
         self._visible = True
         rgba = pen.color()
@@ -106,11 +134,61 @@ class ResidentGlLineLayer:
 
     def set_gl_visible(self, visible: bool) -> None:
         self._visible = visible
-        if not self._export_mode:
+        if not self._export_mode and not self._settle_cpu_items:
             self._gl_overlay.set_layer_visible(self._layer_id, visible)
+
+    def apply_settled_detail(
+        self,
+        bbox: tuple[float, float, float, float],
+        *,
+        zoomed_in: bool,
+    ) -> None:
+        """Dash lines use full-resolution CPU curves when zoomed in (GL cannot stipple)."""
+        self.clear_settled_detail()
+        if self._export_mode or self._line_style != LineStyle.DASH or not zoomed_in:
+            return
+        bx0, bx1, by0, by1 = bbox
+        pad_x = max((bx1 - bx0) * 0.02, 1.0)
+        pad_y = max((by1 - by0) * 0.02, 1.0)
+        view_bbox = (bx0 - pad_x, bx1 + pad_x, by0 - pad_y, by1 + pad_y)
+        self._gl_overlay.set_layer_visible(self._layer_id, False)
+        for px, py in self._parts:
+            px = np.asarray(px, dtype=np.float64)
+            py = np.asarray(py, dtype=np.float64)
+            run_bbox = _run_bbox(px, py)
+            if run_bbox is None or not _bbox_intersects(run_bbox, view_bbox):
+                continue
+            cx, cy = clip_arrays_to_bbox(px, py, bbox, kind="line")
+            if cx.size < 2:
+                continue
+            curve = pg.PlotCurveItem(
+                cx,
+                cy,
+                pen=self._pen,
+                connect="finite",
+                antialias=False,
+                skipFiniteCheck=True,
+            )
+            curve.setSegmentedLineMode("off")
+            self._plot_item.addItem(curve)
+            self._plot_items.append(curve)
+            self._settle_cpu_items.append(curve)
+
+    def clear_settled_detail(self) -> None:
+        for item in self._settle_cpu_items:
+            try:
+                self._plot_item.removeItem(item)
+            except Exception:  # noqa: BLE001
+                pass
+            if item in self._plot_items:
+                self._plot_items.remove(item)
+        self._settle_cpu_items.clear()
+        if not self._export_mode:
+            self._gl_overlay.set_layer_visible(self._layer_id, self._visible)
 
     def prepare_export(self, bbox: tuple[float, float, float, float]) -> None:
         """Swap to full-resolution CPU curves for PDF/vector export."""
+        self.clear_settled_detail()
         self._export_mode = True
         self._gl_overlay.set_layer_visible(self._layer_id, False)
         self._clear_cpu_items()
@@ -177,6 +255,7 @@ class ResidentGlLineLayer:
             item.setPen(target)
 
     def clear(self) -> None:
+        self.clear_settled_detail()
         self._gl_overlay.clear_layer(self._layer_id)
         self._clear_cpu_items()
         self._pending_runs.clear()

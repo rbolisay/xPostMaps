@@ -79,13 +79,14 @@ class ResidentGlScatterLayer:
             px, py = self._parts[run_index]
             px = np.asarray(px, dtype=np.float64)
             py = np.asarray(py, dtype=np.float64)
-            if px.size < 1:
+            marker_x, marker_y = shotpoint_marker_coords([(px, py)])
+            if marker_x.size < 1:
                 continue
             self._gl_overlay.add_scatter_run(
                 self._layer_id,
                 run_index,
-                px,
-                py,
+                marker_x,
+                marker_y,
                 color=self._gl_color,
                 size=self._screen_size,
             )
