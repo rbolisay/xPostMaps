@@ -1,6 +1,9 @@
-"""Build simplified Natural Earth 50m coastlines for the offline minimap.
+"""Build simplified Natural Earth 50m world assets for the offline minimap.
 
-Downloads ne_50m_coastline.geojson (once) and writes xpostmaps/assets/world_coastlines.json.
+Downloads Natural Earth coastline and land GeoJSON files once, then writes:
+- xpostmaps/assets/world_coastlines.json
+- xpostmaps/assets/world_land_polygons.json
+
 Run: python scripts/build_world_coastlines.py
 """
 
@@ -13,12 +16,18 @@ import urllib.request
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-SOURCE_URL = (
+COAST_SOURCE_URL = (
     "https://raw.githubusercontent.com/nvkelso/natural-earth-vector/master/"
     "geojson/ne_50m_coastline.geojson"
 )
-CACHE_PATH = ROOT / "data" / "ne_50m_coastline.geojson"
-OUTPUT_PATH = ROOT / "xpostmaps" / "assets" / "world_coastlines.json"
+LAND_SOURCE_URL = (
+    "https://raw.githubusercontent.com/nvkelso/natural-earth-vector/master/"
+    "geojson/ne_50m_land.geojson"
+)
+COAST_CACHE_PATH = ROOT / "data" / "ne_50m_coastline.geojson"
+LAND_CACHE_PATH = ROOT / "data" / "ne_50m_land.geojson"
+COAST_OUTPUT_PATH = ROOT / "xpostmaps" / "assets" / "world_coastlines.json"
+LAND_OUTPUT_PATH = ROOT / "xpostmaps" / "assets" / "world_land_polygons.json"
 # Degrees — ~2 km at mid-latitudes; enough detail for a 150px minimap when zoomed.
 SIMPLIFY_EPSILON = 0.02
 
@@ -64,6 +73,28 @@ def simplify_line(points: list[list[float]], epsilon: float) -> list[list[float]
     return [[lon, lat] for lon, lat in simplified]
 
 
+def simplify_ring(points: list[list[float]], epsilon: float) -> list[list[float]]:
+    if len(points) <= 4:
+        return points
+    ring = points[:-1] if points[0] == points[-1] else points
+    if len(ring) <= 3:
+        return ring
+
+    # RDP needs distinct endpoints; split closed rings at opposite longitude
+    # extremes so continents do not collapse into a single start/end point.
+    min_idx = min(range(len(ring)), key=lambda idx: ring[idx][0])
+    max_idx = max(range(len(ring)), key=lambda idx: ring[idx][0])
+    if min_idx == max_idx:
+        return ring
+    lo, hi = sorted((min_idx, max_idx))
+    first = simplify_line(ring[lo : hi + 1], epsilon)
+    second = simplify_line(ring[hi:] + ring[: lo + 1], epsilon)
+    simplified = first + second[1:]
+    if simplified and simplified[0] != simplified[-1]:
+        simplified.append(simplified[0])
+    return simplified
+
+
 def iter_linestrings(geojson: dict) -> list[list[list[float]]]:
     lines: list[list[list[float]]] = []
     for feature in geojson.get("features", []):
@@ -77,16 +108,32 @@ def iter_linestrings(geojson: dict) -> list[list[list[float]]]:
     return lines
 
 
-def download_source(path: Path) -> None:
+def iter_polygon_rings(geojson: dict) -> list[list[list[float]]]:
+    rings: list[list[list[float]]] = []
+    for feature in geojson.get("features", []):
+        geom = feature.get("geometry") or {}
+        gtype = geom.get("type")
+        coords = geom.get("coordinates") or []
+        if gtype == "Polygon":
+            if coords:
+                rings.append(coords[0])
+        elif gtype == "MultiPolygon":
+            for polygon in coords:
+                if polygon:
+                    rings.append(polygon[0])
+    return rings
+
+
+def download_source(url: str, path: Path) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    print(f"Downloading {SOURCE_URL} …")
-    urllib.request.urlretrieve(SOURCE_URL, path)
+    print(f"Downloading {url} …")
+    urllib.request.urlretrieve(url, path)
 
 
-def build() -> None:
-    if not CACHE_PATH.is_file():
-        download_source(CACHE_PATH)
-    geojson = json.loads(CACHE_PATH.read_text(encoding="utf-8"))
+def build_coastlines() -> None:
+    if not COAST_CACHE_PATH.is_file():
+        download_source(COAST_SOURCE_URL, COAST_CACHE_PATH)
+    geojson = json.loads(COAST_CACHE_PATH.read_text(encoding="utf-8"))
     raw_lines = iter_linestrings(geojson)
 
     segments: list[dict] = []
@@ -114,13 +161,56 @@ def build() -> None:
         # Legacy key for any code expecting "lines"
         "lines": [seg["p"] for seg in segments],
     }
-    OUTPUT_PATH.parent.mkdir(parents=True, exist_ok=True)
-    OUTPUT_PATH.write_text(json.dumps(payload, separators=(",", ":")), encoding="utf-8")
-    size_kb = OUTPUT_PATH.stat().st_size / 1024
+    COAST_OUTPUT_PATH.parent.mkdir(parents=True, exist_ok=True)
+    COAST_OUTPUT_PATH.write_text(json.dumps(payload, separators=(",", ":")), encoding="utf-8")
+    size_kb = COAST_OUTPUT_PATH.stat().st_size / 1024
     print(
-        f"Wrote {OUTPUT_PATH.name}: {len(segments)} segments, "
+        f"Wrote {COAST_OUTPUT_PATH.name}: {len(segments)} segments, "
         f"{total_vertices:,} vertices, {size_kb:.0f} KB"
     )
+
+
+def build_land_polygons() -> None:
+    if not LAND_CACHE_PATH.is_file():
+        download_source(LAND_SOURCE_URL, LAND_CACHE_PATH)
+    geojson = json.loads(LAND_CACHE_PATH.read_text(encoding="utf-8"))
+    raw_rings = iter_polygon_rings(geojson)
+
+    polygons: list[dict] = []
+    total_vertices = 0
+    for ring in raw_rings:
+        if len(ring) < 4:
+            continue
+        simplified = simplify_ring(ring, SIMPLIFY_EPSILON)
+        if len(simplified) < 4:
+            continue
+        lons = [pt[0] for pt in simplified]
+        lats = [pt[1] for pt in simplified]
+        polygons.append(
+            {
+                "b": [min(lons), min(lats), max(lons), max(lats)],
+                "p": simplified,
+            }
+        )
+        total_vertices += len(simplified)
+
+    payload = {
+        "source": "natural_earth_50m_land",
+        "simplify_epsilon_deg": SIMPLIFY_EPSILON,
+        "polygons": polygons,
+    }
+    LAND_OUTPUT_PATH.parent.mkdir(parents=True, exist_ok=True)
+    LAND_OUTPUT_PATH.write_text(json.dumps(payload, separators=(",", ":")), encoding="utf-8")
+    size_kb = LAND_OUTPUT_PATH.stat().st_size / 1024
+    print(
+        f"Wrote {LAND_OUTPUT_PATH.name}: {len(polygons)} polygons, "
+        f"{total_vertices:,} vertices, {size_kb:.0f} KB"
+    )
+
+
+def build() -> None:
+    build_coastlines()
+    build_land_polygons()
 
 
 if __name__ == "__main__":

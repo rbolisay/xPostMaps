@@ -10,14 +10,16 @@ import pyqtgraph as pg
 from pyqtgraph import functions as fn
 from pyqtgraph.Point import Point
 from PySide6.QtCore import Qt, QTimer, QRectF, Signal
-from PySide6.QtGui import QColor, QImage, QPainter
-from PySide6.QtWidgets import QVBoxLayout, QWidget
+from PySide6.QtGui import QBrush, QColor, QImage, QPainter, QPainterPath, QPen
+from PySide6.QtWidgets import QGraphicsPathItem, QVBoxLayout, QWidget
 
 from xpostmaps.core.models import GeoBounds
-from xpostmaps.ui.theme import MINIMAP_COAST, MINIMAP_OCEAN
+from xpostmaps.ui.theme import MINIMAP_COAST, MINIMAP_LAND, MINIMAP_OCEAN
 
 
-_ASSETS = Path(__file__).resolve().parents[1] / "assets" / "world_coastlines.json"
+_ASSETS_DIR = Path(__file__).resolve().parents[1] / "assets"
+_COAST_ASSETS = _ASSETS_DIR / "world_coastlines.json"
+_LAND_ASSETS = _ASSETS_DIR / "world_land_polygons.json"
 
 
 class MinimapViewBox(pg.ViewBox):
@@ -93,7 +95,9 @@ class MinimapWidget(QWidget):
         self._plot.setMouseEnabled(x=True, y=True)
         layout.addWidget(self._plot)
 
+        self._land_polygons: list[tuple[list[float], list[list[float]]]] = []
         self._coast_segments: list[tuple[list[float], list[list[float]]]] = []
+        self._land_items: list[QGraphicsPathItem] = []
         self._coast_items: list[pg.PlotDataItem] = []
         self._export_mode = False
         # Marker / area polygons kept so pens can be rebuilt for export without
@@ -104,13 +108,13 @@ class MinimapWidget(QWidget):
         self._coast_refresh_timer = QTimer(self)
         self._coast_refresh_timer.setSingleShot(True)
         self._coast_refresh_timer.setInterval(16)
-        self._coast_refresh_timer.timeout.connect(self._refresh_visible_coastlines)
+        self._coast_refresh_timer.timeout.connect(self._refresh_visible_world)
         self._marker: pg.PlotDataItem | None = None
         self._area_items: list[pg.PlotDataItem] = []
         self._view_box.sigRangeChanged.connect(self._schedule_coast_refresh)
         self._view_box.sigRangeChangedManually.connect(self._schedule_coast_refresh)
         self._view_box.sigRangeChangedManually.connect(self._emit_view_changed)
-        self._load_coastline_data()
+        self._load_world_data()
 
     def _coast_width(self) -> float:
         return 2.4 if self._export_mode else 0.9
@@ -127,7 +131,7 @@ class MinimapWidget(QWidget):
             return
         self._export_mode = enabled
         self._coast_pen = pg.mkPen(MINIMAP_COAST, width=self._coast_width())
-        self._refresh_visible_coastlines()
+        self._refresh_visible_world()
         self._rebuild_marker_items()
 
     def capture_image(self) -> QImage:
@@ -149,6 +153,13 @@ class MinimapWidget(QWidget):
             source,
             Qt.AspectRatioMode.IgnoreAspectRatio,
         )
+        painter.resetTransform()
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(QBrush(QColor("#111111")))
+        painter.drawRect(0, 0, width, 1)
+        painter.drawRect(0, height - 1, width, 1)
+        painter.drawRect(0, 0, 1, height)
+        painter.drawRect(width - 1, 0, 1, height)
         painter.end()
         return image
 
@@ -208,10 +219,18 @@ class MinimapWidget(QWidget):
         if not self._suppress_view_changed:
             self.view_changed.emit(self.current_view())
 
-    def _load_coastline_data(self) -> None:
-        if not _ASSETS.exists():
+    def _load_world_data(self) -> None:
+        if _LAND_ASSETS.exists():
+            land_data = json.loads(_LAND_ASSETS.read_text(encoding="utf-8"))
+            self._land_polygons = [
+                (poly["b"], poly["p"])
+                for poly in land_data.get("polygons", [])
+                if len(poly.get("p", [])) >= 3
+            ]
+
+        if not _COAST_ASSETS.exists():
             return
-        data = json.loads(_ASSETS.read_text(encoding="utf-8"))
+        data = json.loads(_COAST_ASSETS.read_text(encoding="utf-8"))
         segments = data.get("segments")
         if segments:
             self._coast_segments = [
@@ -230,10 +249,10 @@ class MinimapWidget(QWidget):
                     ([min(lons), min(lats), max(lons), max(lats)], line),
                 )
         self._plot.setRange(xRange=(-30, 45), yRange=(50, 72), padding=0.02)
-        self._refresh_visible_coastlines()
+        self._refresh_visible_world()
 
     def _schedule_coast_refresh(self, *_args) -> None:
-        if not self._coast_segments:
+        if not self._coast_segments and not self._land_polygons:
             return
         self._coast_refresh_timer.start()
 
@@ -250,13 +269,33 @@ class MinimapWidget(QWidget):
             return True
         return not (b2 < x0 or b0 > x1 or b3 < y0 or b1 > y1)
 
+    def _clear_land_items(self) -> None:
+        for item in self._land_items:
+            self._plot.removeItem(item)
+        self._land_items.clear()
+
     def _clear_coast_items(self) -> None:
         for item in self._coast_items:
             self._plot.removeItem(item)
         self._coast_items.clear()
 
-    def _refresh_visible_coastlines(self) -> None:
-        if not self._coast_segments:
+    @staticmethod
+    def _make_land_item(points: list[list[float]]) -> QGraphicsPathItem | None:
+        if len(points) < 3:
+            return None
+        path = QPainterPath()
+        path.moveTo(float(points[0][0]), float(points[0][1]))
+        for lon, lat in points[1:]:
+            path.lineTo(float(lon), float(lat))
+        path.closeSubpath()
+        item = QGraphicsPathItem(path)
+        item.setBrush(QBrush(QColor(MINIMAP_LAND)))
+        item.setPen(QPen(Qt.PenStyle.NoPen))
+        item.setZValue(-20)
+        return item
+
+    def _refresh_visible_world(self) -> None:
+        if not self._coast_segments and not self._land_polygons:
             return
         x_range, y_range = self._view_box.viewRange()
         x0, x1 = float(x_range[0]), float(x_range[1])
@@ -267,6 +306,16 @@ class MinimapWidget(QWidget):
         x1 += pad_x
         y0 -= pad_y
         y1 += pad_y
+
+        self._clear_land_items()
+        for bbox, points in self._land_polygons:
+            if not self._segment_in_view(bbox, x0, x1, y0, y1):
+                continue
+            item = self._make_land_item(points)
+            if item is None:
+                continue
+            self._plot.addItem(item)
+            self._land_items.append(item)
 
         self._clear_coast_items()
         for bbox, points in self._coast_segments:
@@ -281,6 +330,7 @@ class MinimapWidget(QWidget):
                 connect="all",
                 antialias=self._export_mode,
             )
+            item.setZValue(-10)
             self._plot.addItem(item)
             self._coast_items.append(item)
 
@@ -365,4 +415,4 @@ class MinimapWidget(QWidget):
             padding=0.05,
         )
         self._suppress_view_changed = False
-        self._refresh_visible_coastlines()
+        self._refresh_visible_world()
