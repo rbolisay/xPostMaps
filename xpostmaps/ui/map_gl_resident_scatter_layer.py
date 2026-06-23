@@ -6,11 +6,13 @@ import numpy as np
 import pyqtgraph as pg
 
 from xpostmaps.ui.map_batch import shotpoint_marker_coords
+from xpostmaps.ui.map_vector_dots import VectorDotsItem
 from xpostmaps.utils.spatial_clip import clip_arrays_to_bbox
 from xpostmaps.utils.vector_export import VectorExportContext, prepare_vector_scatter_geometry
 
 
 _GL_UPLOADS_PER_TICK = 128
+_EXPORT_DOT_SIZE_SCALE = 0.5
 
 
 class ResidentGlScatterLayer:
@@ -42,7 +44,7 @@ class ResidentGlScatterLayer:
         self._gl_overlay = gl_overlay
         self._scatter_items = scatter_items
         self._plot_items = plot_items
-        self._cpu_items: list[pg.ScatterPlotItem] = []
+        self._cpu_items: list[pg.GraphicsItem] = []
         self._export_mode = False
         self._visible = True
         self._gl_color = (
@@ -115,76 +117,53 @@ class ResidentGlScatterLayer:
         *,
         vector_ctx: VectorExportContext | None = None,
         pen_scale: float = 1.0,
+        dot_budget: int | None = None,
     ) -> None:
+        """Swap GPU scatter for crisp vector circles sized to match the screen."""
         self._export_mode = True
         self._gl_overlay.set_scatter_layer_visible(self._layer_id, False)
         self._clear_cpu_items()
-        brush = pg.mkBrush(self._rgba)
-        scatter_size = (
-            self._screen_size * pen_scale
-            if vector_ctx is not None
-            else self._export_size
-        )
+        diameter_px = max(float(self._export_size) * _EXPORT_DOT_SIZE_SCALE, 1.25)
         if vector_ctx is not None:
             marker_x, marker_y = shotpoint_marker_coords(self._parts)
             cx, cy = prepare_vector_scatter_geometry(
                 marker_x,
                 marker_y,
                 vector_ctx,
-                symbol_px=scatter_size,
+                symbol_px=diameter_px,
             )
-            if cx.size < 1:
-                return
-            item = pg.ScatterPlotItem(
-                cx,
-                cy,
-                pen=None,
-                brush=brush,
-                size=scatter_size,
-                pxMode=True,
-                symbol="o",
-            )
-            self._plot_item.addItem(item)
-            self._plot_items.append(item)
-            self._cpu_items.append(item)
-            self._scatter_items.append(
-                {
-                    "item": item,
-                    "radius_mm": 0.0,
-                    "screen_size": self._screen_size,
-                    "export_size": self._export_size,
-                }
-            )
+        else:
+            xs_chunks: list[np.ndarray] = []
+            ys_chunks: list[np.ndarray] = []
+            for px, py in self._parts:
+                ax, ay = clip_arrays_to_bbox(
+                    np.asarray(px, dtype=np.float64),
+                    np.asarray(py, dtype=np.float64),
+                    bbox,
+                    kind="scatter",
+                )
+                if ax.size:
+                    xs_chunks.append(ax)
+                    ys_chunks.append(ay)
+            if xs_chunks:
+                cx = np.concatenate(xs_chunks)
+                cy = np.concatenate(ys_chunks)
+            else:
+                cx = np.empty(0, dtype=np.float64)
+                cy = np.empty(0, dtype=np.float64)
+        if cx.size < 1:
             return
-        for px, py in self._parts:
-            cx, cy = clip_arrays_to_bbox(
-                np.asarray(px, dtype=np.float64),
-                np.asarray(py, dtype=np.float64),
-                bbox,
-                kind="scatter",
-            )
-            if cx.size < 1:
-                continue
-            item = pg.ScatterPlotItem(
-                cx,
-                cy,
-                pen=None,
-                brush=brush,
-                size=scatter_size,
-                pxMode=True,
-                symbol="o",
-            )
-            self._plot_item.addItem(item)
-            self._plot_items.append(item)
-            self._cpu_items.append(item)
-            self._scatter_items.append(
-                {
-                    "item": item,
-                    "radius_mm": 0.0,
-                    "screen_size": self._screen_size,
-                    "export_size": self._export_size,
-                }
-            )
+        dots_kwargs = {} if dot_budget is None else {"max_dots": int(dot_budget)}
+        item = VectorDotsItem(
+            cx,
+            cy,
+            color=self._rgba,
+            diameter_px=diameter_px,
+            **dots_kwargs,
+        )
+        self._plot_item.addItem(item)
+        self._plot_items.append(item)
+        self._cpu_items.append(item)
 
     def end_export(self) -> None:
         self._export_mode = False

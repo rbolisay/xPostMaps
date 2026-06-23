@@ -216,11 +216,7 @@ class ResidentGlLineLayer:
         self._export_mode = True
         self._gl_overlay.set_layer_visible(self._layer_id, False)
         self._clear_cpu_items()
-        line_pen = (
-            self._pdf_line_pen(pen_scale)
-            if vector_ctx is not None
-            else self._export_pen
-        )
+        line_pen = self._export_pen
         if vector_ctx is not None:
             decimated_parts: list[tuple[np.ndarray, np.ndarray]] = []
             for px, py in self._parts:

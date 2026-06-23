@@ -46,6 +46,7 @@ from xpostmaps.ui.map_clip_worker import MapClipWorker
 from xpostmaps.ui.map_gl_overlay import MapGlLineOverlay
 from xpostmaps.ui.map_gl_resident_layer import ResidentGlLineLayer
 from xpostmaps.ui.map_gl_resident_scatter_layer import ResidentGlScatterLayer
+from xpostmaps.ui.map_vector_dots import VectorDotsItem
 from xpostmaps.ui.theme import (
     BG_MAP_PRINT,
     DOWN_LINE,
@@ -113,6 +114,10 @@ _SCREEN_SCATTER_BUDGET = SCREEN_OVERVIEW_BUDGET
 # minimum needed for interactive visibility.
 _EXPORT_LINE_WIDTH_SCALE = 0.35
 _EXPORT_MIN_LINE_WIDTH = 0.25
+_EXPORT_DOT_SIZE_SCALE = 0.5
+# Total vector dotted-circle budget per page, shared across all dotted layers so
+# dense, multi-colour surveys export fast and produce a reasonably sized PDF.
+_GLOBAL_EXPORT_DOT_BUDGET = 220_000
 
 
 def _color_with_opacity(color: str, opacity: float) -> tuple[int, int, int, int]:
@@ -152,6 +157,14 @@ def _make_export_pen(
     export_pen.setWidthF(
         max(_EXPORT_MIN_LINE_WIDTH, pen.widthF() * _EXPORT_LINE_WIDTH_SCALE)
     )
+    if normalize_line_style(line_style) == LineStyle.DASH:
+        # Qt's default dash pattern scales with pen width; with print-weight
+        # hairlines that collapses to a nearly solid stroke in PDF viewers.
+        # Use a wider explicit pattern so dashes remain visible without using
+        # thick screen-weight export lines.
+        export_pen.setStyle(Qt.PenStyle.CustomDashLine)
+        export_pen.setDashPattern([16.0, 8.0])
+        export_pen.setCapStyle(Qt.PenCapStyle.FlatCap)
     export_pen.setCosmetic(True)
     return export_pen
 
@@ -435,6 +448,9 @@ class PostplotMapWidget(QWidget):
         self._vector_export_ctx: VectorExportContext | None = None
         self._export_prepared = False
         self._pdf_pen_scale = 1.0
+        # Temporary vector dot overlays that stand in for raster scatter during
+        # export: list of (dots_item, hidden_raster_item).
+        self._export_dot_items: list[tuple[pg.GraphicsItem, pg.GraphicsItem]] = []
         self._clip_worker = MapClipWorker(self)
         self._clip_worker.signals.finished.connect(self._on_clip_finished)
         self._clip_worker.signals.motion_prepared.connect(self._on_motion_prepared)
@@ -640,6 +656,7 @@ class PostplotMapWidget(QWidget):
         self._gl_overlay.hide_for_export()
         for item in self._overview_cpu_items:
             item.setVisible(False)
+        dot_budget = self._export_dot_budget()
         bbox = self._view_clip_bbox()
         if bbox is not None:
             for layer in self._gl_line_layers:
@@ -653,6 +670,7 @@ class PostplotMapWidget(QWidget):
                     bbox,
                     vector_ctx=vector_ctx,
                     pen_scale=self._pdf_pen_scale,
+                    dot_budget=dot_budget,
                 )
         self._restore_export_detail(use_export_pens=True)
         self._export_prepared = True
@@ -667,6 +685,7 @@ class PostplotMapWidget(QWidget):
         self._pdf_pen_scale = 1.0
         if wysiwyg:
             return
+        self._remove_export_vector_dots()
         self._restore_screen_pens()
         self._restore_screen_scatter_sizes()
         self._clip_bbox = None
@@ -969,6 +988,7 @@ class PostplotMapWidget(QWidget):
         self._plot_items.clear()
         self._line_items.clear()
         self._scatter_items.clear()
+        self._export_dot_items.clear()
         self._preplot_navplan_items.clear()
         self._clip_items.clear()
         for layer in self._gl_line_layers:
@@ -1386,6 +1406,8 @@ class PostplotMapWidget(QWidget):
                     "radius_mm": radius_mm,
                     "screen_size": screen_size,
                     "export_size": export_size,
+                    "rgba": rgba,
+                    "layer": layer,
                 }
             )
             if (
@@ -1840,26 +1862,73 @@ class PostplotMapWidget(QWidget):
         self._clip_timer.stop()
         self._finish_pan_interaction()
         self._clip_bbox = None
-        use_screen_matched = use_export_pens and self._vector_export_ctx is not None
         for rec in self._line_items:
-            if use_screen_matched:
-                rec["item"].setPen(self._pdf_pen_from_screen(rec["pen"]))
-            elif use_export_pens:
+            if use_export_pens:
                 rec["item"].setPen(rec["export_pen"])
             else:
                 rec["item"].setPen(rec["pen"])
+        if self._clip_items:
+            bbox = self._view_clip_bbox()
+            if bbox is not None:
+                self._clip_bbox = bbox
+                self._sync_clip_to_bbox(bbox, for_export=True)
         if use_export_pens:
-            if use_screen_matched:
-                self._apply_pdf_scatter_sizes()
-            else:
-                self._apply_export_scatter_sizes()
-        if not self._clip_items:
-            return
-        bbox = self._view_clip_bbox()
-        if bbox is None:
-            return
-        self._clip_bbox = bbox
-        self._sync_clip_to_bbox(bbox, for_export=True)
+            self._install_export_vector_dots()
+        else:
+            self._remove_export_vector_dots()
+
+    def _export_dot_budget(self) -> int:
+        """Per-layer dot budget so total dotted output stays bounded/fast.
+
+        The global budget is split across every dotted layer (GPU scatter + raster
+        clip scatter) so surveys with many colours do not multiply the page count.
+        """
+        layers = len(self._gl_scatter_layers) + len(self._scatter_items)
+        return max(30_000, int(_GLOBAL_EXPORT_DOT_BUDGET / max(layers, 1)))
+
+    def _install_export_vector_dots(self) -> None:
+        """Replace raster (pxMode) scatter with sharp vector circles for export."""
+        self._remove_export_vector_dots()
+        dot_budget = self._export_dot_budget()
+        for rec in self._scatter_items:
+            item = rec.get("item")
+            if item is None:
+                continue
+            try:
+                xs, ys = item.getData()
+            except Exception:  # noqa: BLE001
+                continue
+            if xs is None or len(xs) == 0:
+                continue
+            diameter = max(
+                float(rec.get("export_size", 4.0)) * _EXPORT_DOT_SIZE_SCALE,
+                1.25,
+            )
+            dots = VectorDotsItem(
+                np.asarray(xs, dtype=np.float64),
+                np.asarray(ys, dtype=np.float64),
+                color=rec.get("rgba", (0, 0, 0, 255)),
+                diameter_px=diameter,
+                max_dots=dot_budget,
+            )
+            item.setVisible(False)
+            self._plot_item.addItem(dots)
+            self._plot_items.append(dots)
+            self._export_dot_items.append((dots, item))
+
+    def _remove_export_vector_dots(self) -> None:
+        for dots, raster in self._export_dot_items:
+            try:
+                self._plot_item.removeItem(dots)
+            except Exception:  # noqa: BLE001
+                pass
+            if dots in self._plot_items:
+                self._plot_items.remove(dots)
+            try:
+                raster.setVisible(True)
+            except Exception:  # noqa: BLE001
+                pass
+        self._export_dot_items.clear()
 
     def _restore_screen_pens(self) -> None:
         for rec in self._line_items:
