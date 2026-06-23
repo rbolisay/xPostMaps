@@ -434,6 +434,7 @@ class PostplotMapWidget(QWidget):
         self._interacting = False
         self._vector_export_ctx: VectorExportContext | None = None
         self._export_prepared = False
+        self._pdf_pen_scale = 1.0
         self._clip_worker = MapClipWorker(self)
         self._clip_worker.signals.finished.connect(self._on_clip_finished)
         self._clip_worker.signals.motion_prepared.connect(self._on_motion_prepared)
@@ -538,6 +539,18 @@ class PostplotMapWidget(QWidget):
     def _screen_dpi(self) -> float:
         return widget_screen_dpi(self._plot)
 
+    @staticmethod
+    def _screen_line_width_px(pen: QPen) -> float:
+        """Match on-screen GL line width (same clamp as ResidentGlLineLayer)."""
+        return max(1.0, float(pen.widthF()))
+
+    def _pdf_pen_from_screen(self, pen: QPen) -> QPen:
+        """Scale screen pen width for cosmetic PDF device coordinates."""
+        pdf_pen = QPen(pen)
+        pdf_pen.setWidthF(self._screen_line_width_px(pen) * self._pdf_pen_scale)
+        pdf_pen.setCosmetic(True)
+        return pdf_pen
+
     def _restore_screen_scatter_sizes(self) -> None:
         for rec in self._scatter_items:
             rec["item"].setSize(rec["screen_size"])
@@ -545,6 +558,10 @@ class PostplotMapWidget(QWidget):
     def _apply_export_scatter_sizes(self) -> None:
         for rec in self._scatter_items:
             rec["item"].setSize(rec["export_size"])
+
+    def _apply_pdf_scatter_sizes(self) -> None:
+        for rec in self._scatter_items:
+            rec["item"].setSize(rec["screen_size"] * self._pdf_pen_scale)
 
     def _set_coord_origin(self, map_data: MapData | None) -> None:
         """Shift large projected coordinates near zero so polylines render solid."""
@@ -600,6 +617,7 @@ class PostplotMapWidget(QWidget):
         *,
         wysiwyg: bool = True,
         vector_ctx: VectorExportContext | None = None,
+        pen_scale: float | None = None,
     ) -> None:
         """Refresh map overlays before PDF/raster capture.
 
@@ -610,6 +628,7 @@ class PostplotMapWidget(QWidget):
         if wysiwyg:
             self._vector_export_ctx = None
             self._export_prepared = False
+            self._pdf_pen_scale = 1.0
             self.ensure_settled_for_capture()
             self._reposition_overlays()
             self._frame.update()
@@ -617,15 +636,24 @@ class PostplotMapWidget(QWidget):
             return
         self._vector_export_ctx = vector_ctx
         self._export_prepared = False
+        self._pdf_pen_scale = max(float(pen_scale), 0.01) if pen_scale is not None else 1.0
         self._gl_overlay.hide_for_export()
         for item in self._overview_cpu_items:
             item.setVisible(False)
         bbox = self._view_clip_bbox()
         if bbox is not None:
             for layer in self._gl_line_layers:
-                layer.prepare_export(bbox, vector_ctx=vector_ctx)
+                layer.prepare_export(
+                    bbox,
+                    vector_ctx=vector_ctx,
+                    pen_scale=self._pdf_pen_scale,
+                )
             for layer in self._gl_scatter_layers:
-                layer.prepare_export(bbox, vector_ctx=vector_ctx)
+                layer.prepare_export(
+                    bbox,
+                    vector_ctx=vector_ctx,
+                    pen_scale=self._pdf_pen_scale,
+                )
         self._restore_export_detail(use_export_pens=True)
         self._export_prepared = True
         self._reposition_overlays()
@@ -636,6 +664,7 @@ class PostplotMapWidget(QWidget):
         """Restore interactive screen detail after a PDF/raster capture."""
         self._vector_export_ctx = None
         self._export_prepared = False
+        self._pdf_pen_scale = 1.0
         if wysiwyg:
             return
         self._restore_screen_pens()
@@ -872,7 +901,13 @@ class PostplotMapWidget(QWidget):
         plot = self._plot
         return max(plot.width(), 1), max(plot.height(), 1)
 
-    def render_vector(self, painter: QPainter, target: QRectF) -> None:
+    def render_vector(
+        self,
+        painter: QPainter,
+        target: QRectF,
+        *,
+        auto_end_export: bool = True,
+    ) -> None:
         """Paint the map as scalable vector content into ``target`` (PDF export).
 
         The pyqtgraph scene (nav lines, axes, coordinate labels) is rendered as true
@@ -890,7 +925,6 @@ class PostplotMapWidget(QWidget):
             scene.render(painter, target, source, Qt.AspectRatioMode.IgnoreAspectRatio)
         finally:
             painter.restore()
-            self.end_export(wysiwyg=False)
 
         plot_w = max(plot.width(), 1)
         plot_h = max(plot.height(), 1)
@@ -912,6 +946,9 @@ class PostplotMapWidget(QWidget):
                 QWidget.RenderFlag.DrawWindowBackground | QWidget.RenderFlag.DrawChildren,
             )
             painter.restore()
+
+        if auto_end_export:
+            self.end_export(wysiwyg=False)
 
     def clear(self) -> None:
         view_box = self._plot.getViewBox()
@@ -1725,7 +1762,7 @@ class PostplotMapWidget(QWidget):
             decimated: list[tuple[np.ndarray, np.ndarray]] = []
             for rec, (cx, cy) in zip(self._clip_items, results):
                 if rec.get("kind") == "scatter":
-                    symbol_px = float(rec.get("export_size", rec.get("screen_size", 4.0)))
+                    symbol_px = float(rec.get("screen_size", 4.0)) * self._pdf_pen_scale
                     sx, sy = prepare_vector_scatter_geometry(
                         cx,
                         cy,
@@ -1803,10 +1840,19 @@ class PostplotMapWidget(QWidget):
         self._clip_timer.stop()
         self._finish_pan_interaction()
         self._clip_bbox = None
+        use_screen_matched = use_export_pens and self._vector_export_ctx is not None
         for rec in self._line_items:
-            rec["item"].setPen(rec["export_pen"] if use_export_pens else rec["pen"])
+            if use_screen_matched:
+                rec["item"].setPen(self._pdf_pen_from_screen(rec["pen"]))
+            elif use_export_pens:
+                rec["item"].setPen(rec["export_pen"])
+            else:
+                rec["item"].setPen(rec["pen"])
         if use_export_pens:
-            self._apply_export_scatter_sizes()
+            if use_screen_matched:
+                self._apply_pdf_scatter_sizes()
+            else:
+                self._apply_export_scatter_sizes()
         if not self._clip_items:
             return
         bbox = self._view_clip_bbox()

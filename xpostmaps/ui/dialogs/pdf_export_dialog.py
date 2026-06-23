@@ -22,6 +22,7 @@ from PySide6.QtWidgets import (
     QPushButton,
     QDoubleSpinBox,
     QScrollArea,
+    QSlider,
     QSpinBox,
     QVBoxLayout,
     QWidget,
@@ -102,13 +103,13 @@ class PdfExportDialog:
 
             paper_combo = QComboBox()
             paper_combo.addItems(list(PAPER_SIZE_NAMES))
-            paper_combo.setCurrentText("A2")
+            paper_combo.setCurrentText("A3")
             left_form.addRow("Paper size", paper_combo)
 
             dpi_combo = QComboBox()
             for dpi in DPI_OPTIONS:
                 dpi_combo.addItem(f"{dpi} DPI", dpi)
-            dpi_combo.setCurrentIndex(DPI_OPTIONS.index(300))
+            dpi_combo.setCurrentIndex(DPI_OPTIONS.index(600))
             left_form.addRow("Resolution (DPI)", dpi_combo)
 
             orientation_combo = QComboBox()
@@ -152,15 +153,32 @@ class PdfExportDialog:
             vector_mode.setChecked(True)
             left_form.addRow("", vector_mode)
 
+            detail_slider = QSlider(Qt.Orientation.Horizontal)
+            detail_slider.setRange(0, 100)
+            detail_slider.setValue(100)
+            detail_slider.setTickPosition(QSlider.TickPosition.TicksBelow)
+            detail_slider.setTickInterval(25)
+            detail_value = QLabel("100")
+            detail_value.setMinimumWidth(28)
+            detail_value.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+            detail_row = QHBoxLayout()
+            detail_row.setContentsMargins(0, 0, 0, 0)
+            detail_row.addWidget(detail_slider, stretch=1)
+            detail_row.addWidget(detail_value)
+            detail_host = QWidget()
+            detail_host.setLayout(detail_row)
+            left_form.addRow("Line detail", detail_host)
+
             open_after = QCheckBox("Open folder after export")
             open_after.setChecked(True)
             left_form.addRow("", open_after)
 
             hint = QLabel(
-                "The map is exported as sharp vector linework at print resolution "
-                "(geometry decimated to the chosen DPI so export stays fast). "
+                "Postplot linework is written as true PDF vectors — zoom stays sharp, "
+                "not pixelated. Set Line detail to 100 to keep full geometry (matches "
+                "the map); lower values decimate for faster export. "
                 "The right pane is re-rendered for crisp text. "
-                "Turn off for a faster screen-capture PDF."
+                "Turn off high-quality layout for a faster screen-capture PDF."
             )
             hint.setWordWrap(True)
             hint.setStyleSheet("color: #8b949e; font-size: 11px;")
@@ -223,6 +241,14 @@ class PdfExportDialog:
             def sync_scale_controls() -> None:
                 scale_custom.setVisible(scale_combo.currentText() == "Custom")
 
+            def sync_vector_controls() -> None:
+                enabled = vector_mode.isChecked()
+                detail_slider.setEnabled(enabled)
+                detail_value.setEnabled(enabled)
+
+            def sync_detail_label() -> None:
+                detail_value.setText(str(detail_slider.value()))
+
             def current_options() -> PdfExportOptions:
                 out_dir = Path(output_edit.text().strip() or str(default_dir))
                 scale_mode, scale_percent = resolved_scale()
@@ -235,6 +261,7 @@ class PdfExportDialog:
                     margin_mm=resolved_margin_mm(),
                     scale_mode=scale_mode,
                     scale_percent=scale_percent,
+                    line_detail_percent=detail_slider.value(),
                 )
 
             def _with_map_visible(action, *, hide_dialog: bool = True):
@@ -470,9 +497,14 @@ class PdfExportDialog:
             scale_combo.currentIndexChanged.connect(sync_scale_controls)
             scale_combo.currentIndexChanged.connect(schedule_preview)
             scale_custom.valueChanged.connect(schedule_preview)
+            vector_mode.stateChanged.connect(sync_vector_controls)
             vector_mode.stateChanged.connect(schedule_preview)
+            detail_slider.valueChanged.connect(sync_detail_label)
+            detail_slider.valueChanged.connect(schedule_preview)
             sync_margin_controls()
             sync_scale_controls()
+            sync_vector_controls()
+            sync_detail_label()
 
             schedule_preview()
 

@@ -48,6 +48,33 @@ def test_scatter_grid_deduplication() -> None:
     assert cx.size > 50
 
 
+def test_line_detail_increases_vertex_count() -> None:
+    xs = np.linspace(0.0, 1000.0, 100_000, dtype=np.float64)
+    ys = np.sin(xs * 0.05) * 100.0 + 500.0
+    low = _ctx(view_span=1000.0, device_w=800.0, device_h=600.0)
+    low = VectorExportContext.from_view(
+        view_bbox=low.view_bbox,
+        clip_bbox=low.clip_bbox,
+        view_w=low.view_w,
+        view_h=low.view_h,
+        device_w=low.device_w,
+        device_h=low.device_h,
+        line_detail_percent=0,
+    )
+    high = VectorExportContext.from_view(
+        view_bbox=low.view_bbox,
+        clip_bbox=low.clip_bbox,
+        view_w=low.view_w,
+        view_h=low.view_h,
+        device_w=low.device_w,
+        device_h=low.device_h,
+        line_detail_percent=100,
+    )
+    cx_low, _ = prepare_vector_line_geometry(xs, ys, low)
+    cx_high, _ = prepare_vector_line_geometry(xs, ys, high)
+    assert cx_high.size > cx_low.size
+
+
 def test_line_pixel_decimation_reduces_vertices() -> None:
     ctx = _ctx(view_span=1000.0, device_w=800.0, device_h=600.0)
     xs = np.linspace(0.0, 1000.0, 100_000, dtype=np.float64)

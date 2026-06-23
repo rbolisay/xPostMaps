@@ -197,17 +197,30 @@ class ResidentGlLineLayer:
         if not self._export_mode:
             self._gl_overlay.set_layer_visible(self._layer_id, self._visible)
 
+    def _pdf_line_pen(self, pen_scale: float) -> QPen:
+        """Screen-matched cosmetic width for vector PDF device coordinates."""
+        pdf_pen = QPen(self._pen)
+        pdf_pen.setWidthF(max(1.0, float(self._pen.widthF())) * pen_scale)
+        pdf_pen.setCosmetic(True)
+        return pdf_pen
+
     def prepare_export(
         self,
         bbox: tuple[float, float, float, float],
         *,
         vector_ctx: VectorExportContext | None = None,
+        pen_scale: float = 1.0,
     ) -> None:
         """Swap to CPU curves for PDF/vector export (decimated at print resolution)."""
         self.clear_settled_detail()
         self._export_mode = True
         self._gl_overlay.set_layer_visible(self._layer_id, False)
         self._clear_cpu_items()
+        line_pen = (
+            self._pdf_line_pen(pen_scale)
+            if vector_ctx is not None
+            else self._export_pen
+        )
         if vector_ctx is not None:
             decimated_parts: list[tuple[np.ndarray, np.ndarray]] = []
             for px, py in self._parts:
@@ -224,7 +237,7 @@ class ResidentGlLineLayer:
                 curve = pg.PlotCurveItem(
                     lx,
                     ly,
-                    pen=self._export_pen,
+                    pen=line_pen,
                     connect="finite",
                     antialias=False,
                     skipFiniteCheck=True,
@@ -253,7 +266,7 @@ class ResidentGlLineLayer:
             curve = pg.PlotCurveItem(
                 cx,
                 cy,
-                pen=self._export_pen,
+                pen=line_pen,
                 connect="finite",
                 antialias=False,
                 skipFiniteCheck=True,

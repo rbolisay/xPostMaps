@@ -114,18 +114,24 @@ class ResidentGlScatterLayer:
         bbox: tuple[float, float, float, float],
         *,
         vector_ctx: VectorExportContext | None = None,
+        pen_scale: float = 1.0,
     ) -> None:
         self._export_mode = True
         self._gl_overlay.set_scatter_layer_visible(self._layer_id, False)
         self._clear_cpu_items()
         brush = pg.mkBrush(self._rgba)
+        scatter_size = (
+            self._screen_size * pen_scale
+            if vector_ctx is not None
+            else self._export_size
+        )
         if vector_ctx is not None:
             marker_x, marker_y = shotpoint_marker_coords(self._parts)
             cx, cy = prepare_vector_scatter_geometry(
                 marker_x,
                 marker_y,
                 vector_ctx,
-                symbol_px=self._export_size,
+                symbol_px=scatter_size,
             )
             if cx.size < 1:
                 return
@@ -134,7 +140,7 @@ class ResidentGlScatterLayer:
                 cy,
                 pen=None,
                 brush=brush,
-                size=self._export_size,
+                size=scatter_size,
                 pxMode=True,
                 symbol="o",
             )
@@ -164,7 +170,7 @@ class ResidentGlScatterLayer:
                 cy,
                 pen=None,
                 brush=brush,
-                size=self._export_size,
+                size=scatter_size,
                 pxMode=True,
                 symbol="o",
             )

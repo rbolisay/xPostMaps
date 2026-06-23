@@ -18,8 +18,9 @@ from xpostmaps.utils.spatial_clip import (
     polyline_runs,
 )
 
-# RDP tolerance in device pixels (Douglas–Peucker in pixel space).
+# RDP tolerance in device pixels (Douglas–Peucker in pixel space) at 50% line detail.
 _PIXEL_RDP_EPS = 0.45
+_DEFAULT_LINE_DETAIL_PERCENT = 70
 # Packed grid key multiplier (must exceed max device dimension).
 _GRID_KEY_STRIDE = 4_000_003
 
@@ -34,6 +35,7 @@ class VectorExportContext:
     view_h: int
     device_w: float
     device_h: float
+    line_detail_percent: int = _DEFAULT_LINE_DETAIL_PERCENT
 
     @classmethod
     def from_view(
@@ -45,6 +47,7 @@ class VectorExportContext:
         view_h: int,
         device_w: float,
         device_h: float,
+        line_detail_percent: int = _DEFAULT_LINE_DETAIL_PERCENT,
     ) -> VectorExportContext:
         return cls(
             view_bbox=view_bbox,
@@ -53,7 +56,22 @@ class VectorExportContext:
             view_h=max(int(view_h), 1),
             device_w=max(float(device_w), 1.0),
             device_h=max(float(device_h), 1.0),
+            line_detail_percent=max(0, min(100, int(line_detail_percent))),
         )
+
+    @property
+    def rdp_epsilon(self) -> float:
+        """Douglas–Peucker tolerance in device pixels (0 = keep all pixel steps)."""
+        if self.line_detail_percent >= 100:
+            return 0.0
+        return _PIXEL_RDP_EPS * (100 - self.line_detail_percent) / 50.0
+
+    @property
+    def scatter_cell_px_scale(self) -> float:
+        """Scatter grid coarseness; 0 requests minimal one-pixel deduplication."""
+        if self.line_detail_percent >= 100:
+            return 0.0
+        return max(0.25, (100 - self.line_detail_percent) / 50.0)
 
     @property
     def world_per_pixel_x(self) -> float:
@@ -204,7 +222,9 @@ def _decimate_line_run(
     if xs.size < 2:
         return xs[:0], ys[:0]
     px, py = _world_to_device(xs, ys, ctx)
-    px, py = _pixel_rdp(px, py)
+    eps = ctx.rdp_epsilon
+    if eps > 0.0:
+        px, py = _pixel_rdp(px, py, epsilon=eps)
     if px.size >= 2:
         idx = _dedupe_consecutive_pixels(px, py)
         px, py = px[idx], py[idx]
@@ -264,7 +284,10 @@ def prepare_vector_scatter_geometry(
 
     px, py = _world_to_device(cx, cy, ctx)
     # Symbols smaller than one print pixel collapse to a single representative.
-    cell_px = max(1.0, float(symbol_px) * 0.85)
+    if ctx.scatter_cell_px_scale <= 0.0:
+        cell_px = 1.0
+    else:
+        cell_px = max(1.0, float(symbol_px) * 0.85 * ctx.scatter_cell_px_scale)
     if cell_px > 1.0 or cx.size > max(ctx.device_w * ctx.device_h * 0.5, 8_000):
         idx = _dedupe_pixel_grid(px, py, cell_px=cell_px)
         px, py = px[idx], py[idx]
