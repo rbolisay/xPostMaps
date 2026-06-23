@@ -777,28 +777,29 @@ def compose_pdf_hybrid(
     device_dpi = effective_vector_dpi(options.dpi)
     map_w = max(map_widget.width(), 1)
     map_h = max(map_widget.height(), 1)
-    pane_w = max(right_pane.width(), 1)
-    pane_h = max(right_pane.height(), 1)
-    map_rect, pane_rect, _fit = _pdf_strip_layout(
-        options,
-        device_dpi,
-        map_aspect=map_w / map_h,
-        pane_aspect=pane_w / pane_h,
-    )
-
-    vector_ctx = None
-    if options.line_detail_percent < 100:
-        vector_ctx = build_vector_export_context(
-            map_widget,
-            device_w=float(map_rect.width()),
-            device_h=float(map_rect.height()),
-            line_detail_percent=options.line_detail_percent,
-        )
-    pen_scale = float(map_rect.height()) / map_h
     prepare = getattr(map_widget, "prepare_for_export", None)
     end_export = getattr(map_widget, "end_export", None)
     right_pane.prepare_export_snapshot(map_height=map_h)
     try:
+        pane_w = max(right_pane.width(), 1)
+        pane_h = max(right_pane.height(), 1)
+        map_rect, pane_rect, _fit = _pdf_strip_layout(
+            options,
+            device_dpi,
+            map_aspect=map_w / map_h,
+            pane_aspect=pane_w / pane_h,
+        )
+
+        vector_ctx = None
+        if options.line_detail_percent < 100:
+            vector_ctx = build_vector_export_context(
+                map_widget,
+                device_w=float(map_rect.width()),
+                device_h=float(map_rect.height()),
+                line_detail_percent=options.line_detail_percent,
+            )
+        pen_scale = float(map_rect.height()) / map_h
+
         if callable(prepare):
             prepare(
                 wysiwyg=False,
@@ -818,13 +819,22 @@ def compose_pdf_hybrid(
         painter.fillRect(page_rect, Qt.GlobalColor.white)
         painter.fillRect(map_rect, Qt.GlobalColor.white)
         render_vector(painter, map_rect, auto_end_export=False)
-        pane_image = render_pane_for_export(
-            right_pane,
-            max(int(round(pane_rect.height())), 1),
-        )
-        if not pane_image.isNull():
-            painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
-            painter.drawImage(pane_rect, pane_image)
+        paint_pane = getattr(right_pane, "paint_for_pdf", None)
+        if callable(paint_pane):
+            paint_pane(
+                painter,
+                pane_rect,
+                device_dpi=device_dpi,
+                max_raster_dpi=600,
+            )
+        else:
+            pane_image = render_pane_for_export(
+                right_pane,
+                max(int(round(pane_rect.height())), 1),
+            )
+            if not pane_image.isNull():
+                painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
+                painter.drawImage(pane_rect, pane_image)
         painter.end()
     finally:
         right_pane.reset_export_snapshot()

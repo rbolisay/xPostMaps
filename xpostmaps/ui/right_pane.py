@@ -5,8 +5,8 @@ from __future__ import annotations
 import math
 from pathlib import Path
 
-from PySide6.QtCore import Qt, Signal
-from PySide6.QtGui import QImage, QPainter, QPixmap
+from PySide6.QtCore import QPoint, QRectF, Qt, Signal
+from PySide6.QtGui import QColor, QImage, QPainter, QPixmap, QRegion
 from PySide6.QtWidgets import QLabel, QScrollArea, QVBoxLayout, QWidget
 
 # Qt maximum widget dimension (same role as QWIDGETSIZE_MAX).
@@ -31,8 +31,9 @@ class RightPane(PrintPanel):
     # applied in both the live GUI and the PDF export.
     _BASE_WIDTH = 432
     _TEXT_SCALE = 1.2
-    # The PDF pane is an extra 20% wider than the on-screen panel.
-    _EXPORT_WIDTH_SCALE = 1.2
+    # The PDF pane is wider than the on-screen panel so two-column metadata and
+    # legend text do not clip when painted directly into vector PDFs.
+    _EXPORT_WIDTH_SCALE = 1.35
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
@@ -241,10 +242,61 @@ class RightPane(PrintPanel):
         painter.end()
         return image
 
+    def paint_for_pdf(
+        self,
+        painter: QPainter,
+        target_rect: QRectF,
+        *,
+        device_dpi: int,
+        max_raster_dpi: int = 600,
+    ) -> None:
+        """Paint text/widgets directly to PDF, with raster-only minimap capped."""
+        src_h = max(self.height(), 1)
+        scale = target_rect.height() / src_h
+
+        painter.save()
+        painter.setClipRect(target_rect)
+        painter.translate(target_rect.left(), target_rect.top())
+        painter.scale(scale, scale)
+        QWidget.render(
+            self,
+            painter,
+            QPoint(0, 0),
+            QRegion(self.rect()),
+            QWidget.RenderFlag.DrawWindowBackground | QWidget.RenderFlag.DrawChildren,
+        )
+        painter.restore()
+
+        mini = self._minimap.capture_image()
+        if mini.isNull():
+            return
+        raster_scale = scale * min(1.0, max_raster_dpi / max(float(device_dpi), 1.0))
+        geo = self._minimap.geometry()
+        mini_rect = QRectF(
+            target_rect.left() + geo.x() * scale,
+            target_rect.top() + geo.y() * scale,
+            geo.width() * scale,
+            geo.height() * scale,
+        )
+        painter.fillRect(mini_rect, QColor(BG_PRINT))
+
+        mini_w = max(int(round(geo.width() * raster_scale)), 1)
+        mini_h = max(int(round(geo.height() * raster_scale)), 1)
+        mini_scaled = mini.scaled(
+            mini_w,
+            mini_h,
+            Qt.AspectRatioMode.IgnoreAspectRatio,
+            Qt.TransformationMode.SmoothTransformation,
+        )
+        painter.save()
+        painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
+        painter.drawImage(mini_rect, mini_scaled)
+        painter.restore()
+
     def prepare_export_snapshot(self, map_height: int | None = None) -> None:
         """Prepare right pane for PDF capture at true aspect (same height as map)."""
         self._minimap.set_export_mode(True)
-        # Widen the panel 20% for the PDF so content reflows wider (no text squeeze).
+        # Widen the panel for the PDF so content reflows wider (no text squeeze).
         self.setFixedWidth(int(round(self._BASE_WIDTH * self._EXPORT_WIDTH_SCALE)))
         # Match GUI minimap proportions: height scales with export width (432×215 ratio).
         self._minimap.setFixedHeight(
