@@ -9,7 +9,12 @@ from PySide6.QtGui import QPen
 from xpostmaps.core.models import LineStyle
 from xpostmaps.ui.map_batch import concat_polylines, normalize_line_style
 from xpostmaps.ui.map_gl_overlay import MapGlLineOverlay
-from xpostmaps.utils.spatial_clip import clip_arrays_to_bbox
+from xpostmaps.utils.spatial_clip import clip_arrays_to_bbox, polyline_runs
+from xpostmaps.utils.vector_export import (
+    VectorExportContext,
+    merge_line_parts,
+    prepare_vector_line_geometry,
+)
 
 
 # Upload this many GL line strips per UI tick (legend apply stays responsive).
@@ -192,13 +197,50 @@ class ResidentGlLineLayer:
         if not self._export_mode:
             self._gl_overlay.set_layer_visible(self._layer_id, self._visible)
 
-    def prepare_export(self, bbox: tuple[float, float, float, float]) -> None:
-        """Swap to full-resolution CPU curves for PDF/vector export."""
+    def prepare_export(
+        self,
+        bbox: tuple[float, float, float, float],
+        *,
+        vector_ctx: VectorExportContext | None = None,
+    ) -> None:
+        """Swap to CPU curves for PDF/vector export (decimated at print resolution)."""
         self.clear_settled_detail()
         self._export_mode = True
         self._gl_overlay.set_layer_visible(self._layer_id, False)
         self._clear_cpu_items()
-        bx0, bx1, by0, by1 = bbox
+        if vector_ctx is not None:
+            decimated_parts: list[tuple[np.ndarray, np.ndarray]] = []
+            for px, py in self._parts:
+                sx, sy = prepare_vector_line_geometry(
+                    np.asarray(px, dtype=np.float64),
+                    np.asarray(py, dtype=np.float64),
+                    vector_ctx,
+                )
+                for rx, ry in polyline_runs(sx, sy):
+                    if rx.size >= 2:
+                        decimated_parts.append((rx, ry))
+            if decimated_parts:
+                lx, ly = merge_line_parts(decimated_parts)
+                curve = pg.PlotCurveItem(
+                    lx,
+                    ly,
+                    pen=self._export_pen,
+                    connect="finite",
+                    antialias=False,
+                    skipFiniteCheck=True,
+                )
+                curve.setSegmentedLineMode("off")
+                self._plot_item.addItem(curve)
+                self._plot_items.append(curve)
+                self._cpu_items.append(curve)
+                self._line_items.append(
+                    {
+                        "item": curve,
+                        "pen": self._pen,
+                        "export_pen": self._export_pen,
+                    }
+                )
+            return
         for px, py in self._parts:
             cx, cy = clip_arrays_to_bbox(
                 np.asarray(px, dtype=np.float64),

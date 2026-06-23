@@ -37,6 +37,7 @@ from xpostmaps.core.pdf_export import (
     SCALE_MODES,
     PdfExportOptions,
     capture_export_images,
+    compose_pdf_hybrid,
     compose_pdf_vector_from_captures,
     default_pdf_filename,
     effective_raster_dpi,
@@ -155,9 +156,10 @@ class PdfExportDialog:
             left_form.addRow("", open_after)
 
             hint = QLabel(
-                "The map is exported exactly as it appears on screen (same detail level). "
-                "The right pane is re-rendered at print resolution for sharp text. "
-                "Raster mode caps compositing at 500 DPI for speed."
+                "The map is exported as sharp vector linework at print resolution "
+                "(geometry decimated to the chosen DPI so export stays fast). "
+                "The right pane is re-rendered for crisp text. "
+                "Turn off for a faster screen-capture PDF."
             )
             hint.setWordWrap(True)
             hint.setStyleSheet("color: #8b949e; font-size: 11px;")
@@ -234,10 +236,11 @@ class PdfExportDialog:
                     scale_percent=scale_percent,
                 )
 
-            def _with_map_visible(action):
-                """Hide the dialog so map screen-grab is unobstructed (same as export)."""
+            def _with_map_visible(action, *, hide_dialog: bool = True):
+                """Prepare the main window for map capture (hide dialog for screen grabs)."""
                 host = dialog.parent()
-                dialog.hide()
+                if hide_dialog:
+                    dialog.hide()
                 if host is not None:
                     host.raise_()
                     host.activateWindow()
@@ -246,9 +249,10 @@ class PdfExportDialog:
                 try:
                     return action()
                 finally:
-                    dialog.show()
-                    dialog.raise_()
-                    dialog.activateWindow()
+                    if hide_dialog:
+                        dialog.show()
+                        dialog.raise_()
+                        dialog.activateWindow()
 
             def refresh_preview() -> None:
                 opts = current_options()
@@ -366,15 +370,6 @@ class PdfExportDialog:
                         return
 
                 if vector_mode.isChecked():
-                    try:
-                        map_image, pane_image = _capture_with_map_visible(opts)
-                    except Exception as exc:  # noqa: BLE001
-                        _fail_export(str(exc))
-                        return
-                    if map_image.isNull() or pane_image.isNull():
-                        _fail_export("Could not capture map or right pane.")
-                        return
-
                     _set_export_busy(True)
                     progress = QProgressDialog(
                         "Writing PDF…",
@@ -390,11 +385,14 @@ class PdfExportDialog:
                     progress.show()
                     QApplication.processEvents()
                     try:
-                        compose_pdf_vector_from_captures(
-                            out_path,
-                            map_image,
-                            pane_image,
-                            opts,
+                        _with_map_visible(
+                            lambda: compose_pdf_hybrid(
+                                out_path,
+                                map_widget,
+                                right_pane,
+                                opts,
+                            ),
+                            hide_dialog=False,
                         )
                     except Exception as exc:  # noqa: BLE001
                         _fail_export(str(exc))

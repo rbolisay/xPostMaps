@@ -17,6 +17,8 @@ from PySide6.QtGui import (
 )
 from PySide6.QtWidgets import QApplication, QWidget
 
+from xpostmaps.utils.vector_export import VectorExportContext
+
 # Portrait width × height in millimetres (ISO / common North American sizes).
 PAPER_SIZES_MM: dict[str, tuple[float, float]] = {
     "A0": (841.0, 1189.0),
@@ -34,6 +36,8 @@ PAPER_SIZE_NAMES: tuple[str, ...] = tuple(PAPER_SIZES_MM.keys())
 DPI_OPTIONS: tuple[int, ...] = (150, 200, 300, 600, 1200)
 # Full widget grab + upscale above this creates multi‑GB images and freezes the UI.
 MAX_RASTER_DPI = 500
+# Hybrid vector PDF writer resolution cap (paths stay sharp when zoomed).
+VECTOR_DEVICE_DPI = 600
 
 MARGIN_PRESETS_MM: dict[str, float] = {
     "Default": 10.0,
@@ -69,6 +73,11 @@ def effective_raster_dpi(dpi: int, *, preview: bool = False) -> int:
 
 def raster_dpi_clamped(requested_dpi: int) -> bool:
     return requested_dpi > MAX_RASTER_DPI
+
+
+def effective_vector_dpi(dpi: int) -> int:
+    """DPI for hybrid vector PDF (lines as paths; capped for writer performance)."""
+    return min(max(int(dpi), 150), VECTOR_DEVICE_DPI)
 
 
 def portrait_dimensions_mm(paper: str) -> tuple[float, float]:
@@ -500,9 +509,76 @@ def write_pdf(
     compose_pdf_to_path(path, map_image, pane_image, options)
 
 
-# Vector export: resolution only sets coordinate precision / embedded-raster DPI;
-# lines, dots and text are written as scalable vector objects either way.
-VECTOR_DEVICE_DPI = 600
+
+def build_vector_export_context(
+    map_widget: QWidget,
+    map_rect: QRectF,
+) -> VectorExportContext | None:
+    """Build print-pixel context for decimating export geometry to device resolution."""
+    view_bbox_fn = getattr(map_widget, "export_view_bbox", None)
+    clip_bbox_fn = getattr(map_widget, "export_clip_bbox", None)
+    viewport_fn = getattr(map_widget, "export_plot_viewport_size", None)
+    if not callable(view_bbox_fn) or not callable(clip_bbox_fn) or not callable(viewport_fn):
+        return None
+    view_bbox = view_bbox_fn()
+    clip_bbox = clip_bbox_fn()
+    if view_bbox is None or clip_bbox is None:
+        return None
+    view_w, view_h = viewport_fn()
+    return VectorExportContext.from_view(
+        view_bbox=view_bbox,
+        clip_bbox=clip_bbox,
+        view_w=view_w,
+        view_h=view_h,
+        device_w=map_rect.width(),
+        device_h=map_rect.height(),
+    )
+
+
+def _pdf_strip_layout(
+    options: PdfExportOptions,
+    device_dpi: int,
+    *,
+    map_aspect: float,
+    pane_aspect: float,
+) -> tuple[QRectF, QRectF, float]:
+    """Return map rect, pane rect, and strip fit factor in PDF device pixels."""
+    layout = page_layout_for(options.paper, options.landscape)
+    page_rect = layout.paintRectPixels(device_dpi)
+    inner_w = float(page_rect.width())
+    inner_h = float(page_rect.height())
+    ox = float(page_rect.x())
+    oy = float(page_rect.y())
+
+    map_aspect = max(float(map_aspect), 0.01)
+    pane_aspect = max(float(pane_aspect), 0.01)
+    base_h = inner_h
+    map_disp_w = base_h * map_aspect
+    pane_disp_h = base_h * PANE_PDF_SCALE
+    pane_disp_w = pane_disp_h * pane_aspect
+    gap = max(inner_w * 0.004, 2.0)
+    strip_w = map_disp_w + gap + pane_disp_w
+
+    fit = min(inner_w / strip_w, inner_h / base_h)
+    mode = options.scale_mode.strip().lower()
+    if mode == "custom":
+        fit *= max(options.scale_percent, 1) / 100.0
+    elif mode == "actual size":
+        fit = 1.0
+
+    placed_w = strip_w * fit
+    placed_h = base_h * fit
+    x0 = ox + max(0.0, (inner_w - placed_w) / 2.0)
+    y0 = oy + max(0.0, (inner_h - placed_h) / 2.0)
+
+    map_rect = QRectF(x0, y0, map_disp_w * fit, base_h * fit)
+    pane_rect = QRectF(
+        x0 + (map_disp_w + gap) * fit,
+        y0,
+        pane_disp_w * fit,
+        pane_disp_h * fit,
+    )
+    return map_rect, pane_rect, fit
 
 
 def _render_widget_into(painter: QPainter, widget: QWidget, target: QRectF) -> None:
@@ -586,6 +662,79 @@ def compose_pdf_vector_from_captures(
     painter.end()
 
 
+def compose_pdf_hybrid(
+    path: Path,
+    map_widget: QWidget,
+    right_pane: QWidget,
+    options: PdfExportOptions,
+) -> None:
+    """Write PDF with decimated vector map paths (sharp zoom) and a sharp right pane."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    render_vector = getattr(map_widget, "render_vector", None)
+    if not callable(render_vector):
+        map_image, pane_image = capture_export_images(
+            map_widget,
+            right_pane,
+            options,
+            use_screen_grab=True,
+        )
+        compose_pdf_vector_from_captures(path, map_image, pane_image, options)
+        return
+
+    device_dpi = effective_vector_dpi(options.dpi)
+    map_w = max(map_widget.width(), 1)
+    map_h = max(map_widget.height(), 1)
+    pane_w = max(right_pane.width(), 1)
+    pane_h = max(right_pane.height(), 1)
+    map_rect, pane_rect, _fit = _pdf_strip_layout(
+        options,
+        device_dpi,
+        map_aspect=map_w / map_h,
+        pane_aspect=pane_w / pane_h,
+    )
+    vector_ctx = build_vector_export_context(map_widget, map_rect)
+    target_h = strip_target_height(options, device_dpi)
+
+    prepare = getattr(map_widget, "prepare_for_export", None)
+    end_export = getattr(map_widget, "end_export", None)
+    right_pane.prepare_export_snapshot(map_height=map_h)
+    try:
+        if callable(prepare):
+            prepare(wysiwyg=False, vector_ctx=vector_ctx)
+        pane_image = render_pane_for_export(right_pane, target_h)
+
+        layout = page_layout_for(options.paper, options.landscape)
+        writer = QPdfWriter(str(path))
+        writer.setResolution(device_dpi)
+        writer.setPageLayout(layout)
+        page_rect = layout.paintRectPixels(device_dpi)
+
+        painter = QPainter(writer)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        painter.setRenderHint(QPainter.RenderHint.TextAntialiasing, True)
+        painter.fillRect(page_rect, Qt.GlobalColor.white)
+        painter.fillRect(map_rect, Qt.GlobalColor.white)
+        render_vector(painter, map_rect)
+        if not pane_image.isNull():
+            painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
+            painter.drawImage(pane_rect, pane_image)
+        painter.end()
+    finally:
+        right_pane.reset_export_snapshot()
+        if callable(end_export):
+            end_export(wysiwyg=False)
+
+
+def write_pdf_hybrid(
+    path: Path,
+    map_widget: QWidget,
+    right_pane: QWidget,
+    options: PdfExportOptions,
+) -> None:
+    """UI-thread hybrid vector PDF export (map paths + sharp right pane)."""
+    compose_pdf_hybrid(path, map_widget, right_pane, options)
+
+
 def compose_pdf_vector(
     path: Path,
     map_widget: QWidget,
@@ -603,6 +752,5 @@ def write_pdf_vector(
     right_pane: QWidget,
     options: PdfExportOptions,
 ) -> None:
-    """Prepare widgets and write a scalable vector PDF (UI thread only)."""
-    map_image, pane_image = capture_export_images(map_widget, right_pane, options)
-    compose_pdf_vector_from_captures(path, map_image, pane_image, options)
+    """Prepare widgets and write a hybrid vector PDF (UI thread only)."""
+    compose_pdf_hybrid(path, map_widget, right_pane, options)

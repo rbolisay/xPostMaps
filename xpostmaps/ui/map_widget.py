@@ -78,6 +78,12 @@ from xpostmaps.utils.symbology_units import (
     mm_to_pixels,
     widget_screen_dpi,
 )
+from xpostmaps.utils.vector_export import (
+    VectorExportContext,
+    merge_line_parts,
+    prepare_vector_line_geometry,
+    prepare_vector_scatter_geometry,
+)
 
 
 def _configure_pyqtgraph() -> None:
@@ -426,6 +432,8 @@ class PostplotMapWidget(QWidget):
         # True while the user is actively panning/zooming; dense layers keep their
         # last clipped geometry on screen for a sharp, snappy interaction.
         self._interacting = False
+        self._vector_export_ctx: VectorExportContext | None = None
+        self._export_prepared = False
         self._clip_worker = MapClipWorker(self)
         self._clip_worker.signals.finished.connect(self._on_clip_finished)
         self._clip_worker.signals.motion_prepared.connect(self._on_motion_prepared)
@@ -587,36 +595,47 @@ class PostplotMapWidget(QWidget):
         self._legend = legend
         self._cached_signature = None
 
-    def prepare_for_export(self, *, wysiwyg: bool = True) -> None:
+    def prepare_for_export(
+        self,
+        *,
+        wysiwyg: bool = True,
+        vector_ctx: VectorExportContext | None = None,
+    ) -> None:
         """Refresh map overlays before PDF/raster capture.
 
         ``wysiwyg=True`` (default) leaves geometry, pens, GL layers and LOD
         exactly as on screen so the PDF matches what the user sees.
-        ``wysiwyg=False`` swaps in full-resolution CPU geometry for legacy
-        vector export (not used by the default PDF path).
+        ``wysiwyg=False`` swaps in print-resolution CPU geometry for vector PDF.
         """
         if wysiwyg:
+            self._vector_export_ctx = None
+            self._export_prepared = False
             self.ensure_settled_for_capture()
             self._reposition_overlays()
             self._frame.update()
             self.repaint()
             return
+        self._vector_export_ctx = vector_ctx
+        self._export_prepared = False
         self._gl_overlay.hide_for_export()
         for item in self._overview_cpu_items:
             item.setVisible(False)
         bbox = self._view_clip_bbox()
         if bbox is not None:
             for layer in self._gl_line_layers:
-                layer.prepare_export(bbox)
+                layer.prepare_export(bbox, vector_ctx=vector_ctx)
             for layer in self._gl_scatter_layers:
-                layer.prepare_export(bbox)
-        self._restore_export_detail()
+                layer.prepare_export(bbox, vector_ctx=vector_ctx)
+        self._restore_export_detail(use_export_pens=True)
+        self._export_prepared = True
         self._reposition_overlays()
         self._frame.update()
         self.repaint()
 
     def end_export(self, *, wysiwyg: bool = True) -> None:
         """Restore interactive screen detail after a PDF/raster capture."""
+        self._vector_export_ctx = None
+        self._export_prepared = False
         if wysiwyg:
             return
         self._restore_screen_pens()
@@ -839,6 +858,20 @@ class PostplotMapWidget(QWidget):
             return self._scale_pixmap_to_height(screen_pix, target_height)
         return composite
 
+    def export_view_bbox(self) -> tuple[float, float, float, float] | None:
+        vb = self._plot.getViewBox()
+        if vb is None:
+            return None
+        (x_range, y_range) = vb.viewRange()
+        return (float(x_range[0]), float(x_range[1]), float(y_range[0]), float(y_range[1]))
+
+    def export_clip_bbox(self) -> tuple[float, float, float, float] | None:
+        return self._view_clip_bbox()
+
+    def export_plot_viewport_size(self) -> tuple[int, int]:
+        plot = self._plot
+        return max(plot.width(), 1), max(plot.height(), 1)
+
     def render_vector(self, painter: QPainter, target: QRectF) -> None:
         """Paint the map as scalable vector content into ``target`` (PDF export).
 
@@ -846,7 +879,8 @@ class PostplotMapWidget(QWidget):
         vector paths/text; the zebra frame and north arrow are widget overlays drawn
         on top at the matching transform so the whole map stays sharp when zoomed.
         """
-        self._restore_export_detail(use_export_pens=True)
+        if not self._export_prepared:
+            self._restore_export_detail(use_export_pens=True)
         self._reposition_overlays()
         plot = self._plot
         scene = plot.scene()
@@ -1686,6 +1720,22 @@ class PostplotMapWidget(QWidget):
                 results,
                 bbox=bbox,
             )
+        elif self._vector_export_ctx is not None:
+            ctx = self._vector_export_ctx
+            decimated: list[tuple[np.ndarray, np.ndarray]] = []
+            for rec, (cx, cy) in zip(self._clip_items, results):
+                if rec.get("kind") == "scatter":
+                    symbol_px = float(rec.get("export_size", rec.get("screen_size", 4.0)))
+                    sx, sy = prepare_vector_scatter_geometry(
+                        cx,
+                        cy,
+                        ctx,
+                        symbol_px=symbol_px,
+                    )
+                else:
+                    sx, sy = prepare_vector_line_geometry(cx, cy, ctx)
+                decimated.append((sx, sy))
+            results = decimated
         self._apply_clipped_data(bbox, results)
 
     def _submit_prepare_motion(self) -> None:

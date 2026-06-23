@@ -7,6 +7,7 @@ import pyqtgraph as pg
 
 from xpostmaps.ui.map_batch import shotpoint_marker_coords
 from xpostmaps.utils.spatial_clip import clip_arrays_to_bbox
+from xpostmaps.utils.vector_export import VectorExportContext, prepare_vector_scatter_geometry
 
 
 _GL_UPLOADS_PER_TICK = 128
@@ -108,11 +109,47 @@ class ResidentGlScatterLayer:
         if not self._export_mode:
             self._gl_overlay.set_scatter_layer_visible(self._layer_id, visible)
 
-    def prepare_export(self, bbox: tuple[float, float, float, float]) -> None:
+    def prepare_export(
+        self,
+        bbox: tuple[float, float, float, float],
+        *,
+        vector_ctx: VectorExportContext | None = None,
+    ) -> None:
         self._export_mode = True
         self._gl_overlay.set_scatter_layer_visible(self._layer_id, False)
         self._clear_cpu_items()
         brush = pg.mkBrush(self._rgba)
+        if vector_ctx is not None:
+            marker_x, marker_y = shotpoint_marker_coords(self._parts)
+            cx, cy = prepare_vector_scatter_geometry(
+                marker_x,
+                marker_y,
+                vector_ctx,
+                symbol_px=self._export_size,
+            )
+            if cx.size < 1:
+                return
+            item = pg.ScatterPlotItem(
+                cx,
+                cy,
+                pen=None,
+                brush=brush,
+                size=self._export_size,
+                pxMode=True,
+                symbol="o",
+            )
+            self._plot_item.addItem(item)
+            self._plot_items.append(item)
+            self._cpu_items.append(item)
+            self._scatter_items.append(
+                {
+                    "item": item,
+                    "radius_mm": 0.0,
+                    "screen_size": self._screen_size,
+                    "export_size": self._export_size,
+                }
+            )
+            return
         for px, py in self._parts:
             cx, cy = clip_arrays_to_bbox(
                 np.asarray(px, dtype=np.float64),
