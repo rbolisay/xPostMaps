@@ -174,9 +174,15 @@ view_box.translateBy(x=dx_data, y=dy_data)
 
 ### 8. Export path (separate from interaction)
 
-- Hide GL overlay
-- Swap resident layers to viewport-clipped CPU curves / scatter at export DPI
-- Dash and dotted styles use proper pens / markers on CPU for PDF fidelity
+See **[pdf-export.md](pdf-export.md)** for the full PDF generation guide (dialog options, hybrid vector pipeline, Map detail, and performance).
+
+Summary:
+
+- Hide GL overlay; swap resident layers to viewport-clipped CPU geometry for `QPdfWriter`
+- **Solid / dash** → print-weight polyline vectors; dash uses explicit custom dash pattern
+- **Dotted** → `VectorDotsItem` round vector points (not raster scatter)
+- **Map detail** slider decimates at print pixel space when below 100
+- Interactive motion LOD is bypassed — export uses full visible-view detail
 
 ---
 
@@ -198,6 +204,10 @@ view_box.translateBy(x=dx_data, y=dy_data)
 | `xpostmaps/ui/map_gl_overlay.py` | Ortho GL view, line + scatter runs, viewport cull |
 | `xpostmaps/ui/map_gl_resident_layer.py` | GPU-resident solid/dash lines |
 | `xpostmaps/ui/map_gl_resident_scatter_layer.py` | GPU-resident dotted shotpoints |
+| `xpostmaps/ui/map_vector_dots.py` | Round vector shotpoints for PDF dotted export |
+| `xpostmaps/core/pdf_export.py` | Hybrid vector PDF composition |
+| `xpostmaps/ui/dialogs/pdf_export_dialog.py` | Export to PDF dialog |
+| `docs/pdf-export.md` | PDF export user + developer documentation |
 | `xpostmaps/ui/map_view_box.py` | Fast pan translation |
 | `xpostmaps/ui/map_clip_worker.py` | Background clip / motion prep |
 | `xpostmaps/utils/spatial_clip.py` | Grid index, RDP, overview budgets |
@@ -246,6 +256,7 @@ Legacy (not used for interactive display): `map_tiled_layer.py`, `map_tile_worke
 | 2026-03 | Full settle sharpness for dotted/dash matching solid; dash CPU stipple when zoomed | `8b8eb98` |
 | 2026-03 | Hide **preplot/navplan** during pan; brutal test all styles + detail parity | `8e1b753` |
 | 2026-03 | **This document** created as living optimization log | — |
+| 2026-06 | Hybrid PDF export: vector dotted points, custom dash, Map detail; see `pdf-export.md` | `f9631da` |
 
 ---
 

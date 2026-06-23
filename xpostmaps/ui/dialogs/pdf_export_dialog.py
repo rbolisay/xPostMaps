@@ -167,7 +167,7 @@ class PdfExportDialog:
             detail_row.addWidget(detail_value)
             detail_host = QWidget()
             detail_host.setLayout(detail_row)
-            left_form.addRow("Line detail", detail_host)
+            left_form.addRow("Map detail", detail_host)
 
             open_after = QCheckBox("Open folder after export")
             open_after.setChecked(True)
@@ -175,7 +175,7 @@ class PdfExportDialog:
 
             hint = QLabel(
                 "Postplot linework is written as true PDF vectors — zoom stays sharp, "
-                "not pixelated. Set Line detail to 100 to keep full geometry (matches "
+                "not pixelated. Set Map detail to 100 to keep full geometry (matches "
                 "the map); lower values decimate for faster export. "
                 "The right pane is re-rendered for crisp text. "
                 "Turn off high-quality layout for a faster screen-capture PDF."

@@ -91,7 +91,7 @@ flowchart TB
 | Full survey (≥90% extent) | Pre-baked **overview raster** (`map_overview_raster.py`) |
 | Zoomed in | **GL tiles** uploaded once per grid cell; pan = ortho projection sync |
 | No PyOpenGL | Monolithic `PlotCurveItem` + async view clip (legacy CPU path) |
-| Export/PDF | CPU vector tiles per cell (`for_export=True`) |
+| Export/PDF | Hybrid vector export — see [pdf-export.md](pdf-export.md) (CPU curves + `VectorDotsItem`; GL hidden) |
 
 **Implementation:**
 - `xpostmaps/ui/map_tiled_layer.py` — `TiledLineLayer` (GL upload, all polyline runs per cell)
@@ -138,7 +138,7 @@ flowchart TB
 **Portable checklist:**
 - [ ] Separate “camera sync” from data upload
 - [ ] Split polylines on NaN breaks (GL has no `connect="finite"`)
-- [ ] Export / print path uses CPU vector items (GL does not export to PDF scene)
+- [ ] Export / print path uses CPU vector items (GL does not export to PDF scene) — see [pdf-export.md](pdf-export.md)
 
 **Dependency:** `PyOpenGL>=3.1.0` (in `requirements.txt`)
 
