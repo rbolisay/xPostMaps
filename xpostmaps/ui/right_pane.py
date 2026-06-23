@@ -216,6 +216,9 @@ class RightPane(PrintPanel):
         bounds = cached[1] if cached and cached[1].is_valid else map_data.bounds
         self._card.update_info_section(info, bounds)
 
+    def current_minimap_view(self) -> dict[str, float]:
+        return self._minimap.current_view()
+
     def render_for_export(self, target_height: int) -> QImage:
         """Render the pane with sharp text and a correctly painted minimap."""
         from xpostmaps.core.pdf_export import render_widget_to_height

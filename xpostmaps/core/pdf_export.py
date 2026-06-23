@@ -33,7 +33,7 @@ PAPER_SIZES_MM: dict[str, tuple[float, float]] = {
 }
 
 PAPER_SIZE_NAMES: tuple[str, ...] = tuple(PAPER_SIZES_MM.keys())
-DPI_OPTIONS: tuple[int, ...] = (150, 200, 300, 600, 900, 1200)
+DPI_OPTIONS: tuple[int, ...] = (150, 200, 300, 600, 900, 1200, 2000)
 
 MARGIN_PRESETS_MM: dict[str, float] = {
     "Default": 10.0,
@@ -66,7 +66,7 @@ def effective_raster_dpi(dpi: int, *, preview: bool = False) -> int:
 
     Preview stays deliberately low-resolution so the dialog remains responsive.
     Final export uses the selected dialog DPI directly; otherwise the DPI setting
-    would be misleading, especially for 600/1200 DPI exports.
+    would be misleading, especially for 600/1200/2000 DPI exports.
     """
     if preview:
         return min(max(dpi, 72), 120)

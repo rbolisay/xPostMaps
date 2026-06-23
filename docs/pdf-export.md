@@ -31,7 +31,7 @@ For best detail and zoom sharpness on postplot linework:
 
 1. Leave **High-quality PDF layout** checked.
 2. Set **Map detail** to **100** (full visible geometry).
-3. Use **600 DPI** and **A3 landscape** for normal output; use **1200 DPI** when you need extra print-pixel detail and can accept larger files / slower export.
+3. Use **600 DPI** and **A3 landscape** for normal output; use **1200 DPI** for extra print-pixel detail, or **2000 DPI** only for extreme close-review exports where larger files / slower export are acceptable.
 4. Pan/zoom the map to the area you want before exporting — only the **current view** is exported.
 
 Typical results on `7027.db` (A3, 600 DPI, Map detail 100):
@@ -61,7 +61,7 @@ When checked, export uses `compose_pdf_hybrid`:
 
 **Result:** Postplot lines and dotted markers stay sharp when zooming inside the PDF viewer. File size stays moderate because geometry is clipped to the view and dotted markers use efficient vector points instead of per-dot Bezier ellipses or bitmap symbols.
 
-The selected **Resolution (DPI)** is used directly by `QPdfWriter`. For the same paper size, **1200 DPI gives 2× pixels per side and 4× page pixel area compared with 600 DPI**. That gives the Map detail logic and dotted marker deduplication a finer print-pixel grid, but it can increase file size and export time.
+The selected **Resolution (DPI)** is used directly by `QPdfWriter`. For the same paper size, **1200 DPI gives 2× pixels per side and 4× page pixel area compared with 600 DPI**; **2000 DPI gives about 3.33× pixels per side and 11.1× page pixel area**. That gives the Map detail logic and dotted marker deduplication a finer print-pixel grid, but it can increase file size and export time.
 
 ### High-quality off — screen capture
 

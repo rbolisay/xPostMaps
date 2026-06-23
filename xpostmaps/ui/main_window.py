@@ -306,6 +306,14 @@ class MainWindow(QMainWindow):
         self._settings.map_view = dict(view)
         self._schedule_metadata_autosave()
 
+    def _sync_current_views(self) -> None:
+        """Capture the latest live views before any database write."""
+        if self._loading_project:
+            return
+        if self._map_data is not None:
+            self._settings.map_view = self._map.current_view()
+        self._settings.minimap_view = self._right.current_minimap_view()
+
     def _on_logo_changed(self, path: str) -> None:
         self._settings.logo_path = path
         self._right.set_logo(path)
@@ -822,6 +830,7 @@ class MainWindow(QMainWindow):
     def _save_project_metadata(self, silent: bool = False) -> bool:
         if self._parsing:
             return False
+        self._sync_current_views()
         self._settings.name = self._left.project_name() or self._settings.name.strip()
         name = self._settings.name.strip()
         if not name and not self._ensure_project_name():
@@ -852,6 +861,7 @@ class MainWindow(QMainWindow):
                 )
             return False
 
+        self._sync_current_views()
         self._settings.name = self._left.project_name() or self._settings.name.strip()
         name = self._settings.name.strip()
         if not name and not self._ensure_project_name():
