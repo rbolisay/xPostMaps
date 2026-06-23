@@ -33,11 +33,7 @@ PAPER_SIZES_MM: dict[str, tuple[float, float]] = {
 }
 
 PAPER_SIZE_NAMES: tuple[str, ...] = tuple(PAPER_SIZES_MM.keys())
-DPI_OPTIONS: tuple[int, ...] = (150, 200, 300, 600, 1200)
-# Full widget grab + upscale above this creates multi‑GB images and freezes the UI.
-MAX_RASTER_DPI = 500
-# Hybrid vector PDF writer resolution cap (paths stay sharp when zoomed).
-VECTOR_DEVICE_DPI = 600
+DPI_OPTIONS: tuple[int, ...] = (150, 200, 300, 600, 900, 1200)
 
 MARGIN_PRESETS_MM: dict[str, float] = {
     "Default": 10.0,
@@ -66,19 +62,19 @@ class PdfExportOptions:
 
 
 def effective_raster_dpi(dpi: int, *, preview: bool = False) -> int:
-    """DPI used for raster compositing (capped so export stays responsive)."""
+    """DPI used for raster compositing.
+
+    Preview stays deliberately low-resolution so the dialog remains responsive.
+    Final export uses the selected dialog DPI directly; otherwise the DPI setting
+    would be misleading, especially for 600/1200 DPI exports.
+    """
     if preview:
         return min(max(dpi, 72), 120)
-    return min(max(dpi, 72), MAX_RASTER_DPI)
-
-
-def raster_dpi_clamped(requested_dpi: int) -> bool:
-    return requested_dpi > MAX_RASTER_DPI
-
+    return max(int(dpi), 72)
 
 def effective_vector_dpi(dpi: int) -> int:
-    """DPI for hybrid vector PDF (lines as paths; capped for writer performance)."""
-    return min(max(int(dpi), 150), VECTOR_DEVICE_DPI)
+    """DPI for hybrid vector PDF (lines as paths)."""
+    return max(int(dpi), 150)
 
 
 def portrait_dimensions_mm(paper: str) -> tuple[float, float]:
@@ -703,7 +699,7 @@ def compose_pdf_vector_from_captures(
 ) -> None:
     """Write a PDF page from pre-captured map and right-pane images."""
     path.parent.mkdir(parents=True, exist_ok=True)
-    device_dpi = min(max(options.dpi, 150), VECTOR_DEVICE_DPI)
+    device_dpi = effective_vector_dpi(options.dpi)
     layout = page_layout_for(options.paper, options.landscape)
     writer = QPdfWriter(str(path))
     writer.setResolution(device_dpi)

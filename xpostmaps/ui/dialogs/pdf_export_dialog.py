@@ -41,8 +41,6 @@ from xpostmaps.core.pdf_export import (
     compose_pdf_hybrid,
     compose_pdf_vector_from_captures,
     default_pdf_filename,
-    effective_raster_dpi,
-    raster_dpi_clamped,
     render_sheet_hybrid_preview,
     render_sheet_preview,
     resolve_output_path,
@@ -435,14 +433,6 @@ class PdfExportDialog:
                     _finish_export(out_path, opts, dpi_note="")
                     return
 
-                dpi_note = ""
-                if raster_dpi_clamped(opts.dpi):
-                    effective = effective_raster_dpi(opts.dpi)
-                    dpi_note = (
-                        f"Requested {opts.dpi} DPI; raster compositing uses {effective} DPI "
-                        f"so export stays responsive."
-                    )
-
                 _set_export_busy(True)
                 try:
                     map_image, pane_image = _capture_with_map_visible(opts)
@@ -473,7 +463,7 @@ class PdfExportDialog:
                 export_worker = worker
 
                 def on_ok(saved_path: str) -> None:
-                    _finish_export(Path(saved_path), opts, dpi_note=dpi_note)
+                    _finish_export(Path(saved_path), opts, dpi_note="")
 
                 def on_failed(message: str) -> None:
                     _fail_export(message)

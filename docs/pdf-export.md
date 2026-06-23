@@ -13,7 +13,7 @@ Open from the main menu: **Export to PDF**.
 | Control | Default | Purpose |
 |---------|---------|---------|
 | **Paper size** | A3 | ISO or North American sheet size |
-| **Resolution (DPI)** | 600 | Writer resolution for hybrid vector export (capped at 600 DPI) |
+| **Resolution (DPI)** | 600 | Actual export resolution for both hybrid vector and raster modes |
 | **Orientation** | Landscape | Portrait or landscape page layout |
 | **Margins** | Default (10 mm) | Presets or custom margin in millimetres |
 | **Scale** | Default | Fit content on page, actual size, or custom % |
@@ -31,7 +31,7 @@ For best detail and zoom sharpness on postplot linework:
 
 1. Leave **High-quality PDF layout** checked.
 2. Set **Map detail** to **100** (full visible geometry).
-3. Use **600 DPI** and **A3 landscape** unless a smaller sheet is required.
+3. Use **600 DPI** and **A3 landscape** for normal output; use **1200 DPI** when you need extra print-pixel detail and can accept larger files / slower export.
 4. Pan/zoom the map to the area you want before exporting — only the **current view** is exported.
 
 Typical results on `7027.db` (A3, 600 DPI, Map detail 100):
@@ -61,6 +61,8 @@ When checked, export uses `compose_pdf_hybrid`:
 
 **Result:** Postplot lines and dotted markers stay sharp when zooming inside the PDF viewer. File size stays moderate because geometry is clipped to the view and dotted markers use efficient vector points instead of per-dot Bezier ellipses or bitmap symbols.
 
+The selected **Resolution (DPI)** is used directly by `QPdfWriter`. For the same paper size, **1200 DPI gives 2× pixels per side and 4× page pixel area compared with 600 DPI**. That gives the Map detail logic and dotted marker deduplication a finer print-pixel grid, but it can increase file size and export time.
+
 ### High-quality off — screen capture
 
 When unchecked, export grabs the map as displayed (screen / composite bitmap) and embeds it in the PDF. The right pane is still re-rendered for crisp text.
@@ -68,7 +70,7 @@ When unchecked, export grabs the map as displayed (screen / composite bitmap) an
 - **Faster** for a quick WYSIWYG snapshot.
 - **Pixelates** when zoomed — not suitable for print review of linework detail.
 - **Map detail** is disabled and ignored.
-- Raster compositing DPI is capped at **500** even if 600 or 1200 is selected.
+- Raster compositing also uses the selected **Resolution (DPI)**. High DPI raster exports can create very large images, especially on A0/A1 paper.
 
 Raster export runs compositing on a background thread after capture; hybrid vector export runs on the UI thread with a progress dialog.
 
@@ -152,8 +154,6 @@ Export to PDF dialog
 
 | Constant | Location | Value | Meaning |
 |----------|----------|-------|---------|
-| `VECTOR_DEVICE_DPI` | `pdf_export.py` | 600 | Max hybrid PDF writer DPI |
-| `MAX_RASTER_DPI` | `pdf_export.py` | 500 | Max raster capture DPI |
 | `PDF_EXPORT_DPI` | `symbology_units.py` | 300 | Reference DPI for export pen/symbol sizing |
 | `_EXPORT_LINE_WIDTH_SCALE` | `map_widget.py` | 0.35 | Print line weight vs legend mm |
 | `_EXPORT_DOT_SIZE_SCALE` | `map_widget.py` | 0.5 | Dotted marker diameter scale for PDF |
