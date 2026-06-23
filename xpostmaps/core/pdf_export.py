@@ -417,6 +417,7 @@ def render_sheet_image(
         right_pane,
         capture_options,
         preview=preview,
+        use_screen_grab=False if preview else None,
     )
     return render_sheet_from_captures(
         map_image,
@@ -508,6 +509,90 @@ def write_pdf(
     map_image, pane_image = capture_export_images(map_widget, right_pane, options)
     compose_pdf_to_path(path, map_image, pane_image, options)
 
+
+
+def capture_map_vector_image(
+    map_widget: QWidget,
+    *,
+    target_height: int,
+) -> QImage:
+    """Rasterize vector export geometry to a bitmap (no screen grab)."""
+    render_vector = getattr(map_widget, "render_vector", None)
+    if not callable(render_vector):
+        return QImage()
+    map_w = max(map_widget.width(), 1)
+    map_h = max(map_widget.height(), 1)
+    target_height = max(int(target_height), 1)
+    out_w = max(int(round(target_height * map_w / map_h)), 1)
+    image = QImage(out_w, target_height, QImage.Format.Format_ARGB32)
+    image.fill(Qt.GlobalColor.white)
+    painter = QPainter(image)
+    painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+    painter.setRenderHint(QPainter.RenderHint.TextAntialiasing, True)
+    render_vector(painter, QRectF(0, 0, out_w, target_height))
+    painter.end()
+    return image
+
+
+def capture_hybrid_export_images(
+    map_widget: QWidget,
+    right_pane: QWidget,
+    options: PdfExportOptions,
+    *,
+    device_dpi: int | None = None,
+) -> tuple[QImage, QImage]:
+    """Prepare decimated vector map geometry and a sharp right-pane bitmap."""
+    dpi = device_dpi if device_dpi is not None else effective_vector_dpi(options.dpi)
+    map_w = max(map_widget.width(), 1)
+    map_h = max(map_widget.height(), 1)
+    pane_w = max(right_pane.width(), 1)
+    pane_h = max(right_pane.height(), 1)
+    map_rect, _, _ = _pdf_strip_layout(
+        options,
+        dpi,
+        map_aspect=map_w / map_h,
+        pane_aspect=pane_w / pane_h,
+    )
+    vector_ctx = build_vector_export_context(map_widget, map_rect)
+    target_h = strip_target_height(options, dpi)
+    prepare = getattr(map_widget, "prepare_for_export", None)
+    end_export = getattr(map_widget, "end_export", None)
+    right_pane.prepare_export_snapshot(map_height=map_h)
+    try:
+        if callable(prepare):
+            prepare(wysiwyg=False, vector_ctx=vector_ctx)
+        map_image = capture_map_vector_image(map_widget, target_height=target_h)
+        pane_image = render_pane_for_export(right_pane, target_h)
+        return map_image, pane_image
+    finally:
+        right_pane.reset_export_snapshot()
+        if callable(end_export):
+            end_export(wysiwyg=False)
+
+
+def render_sheet_hybrid_preview(
+    map_widget: QWidget,
+    right_pane: QWidget,
+    options: PdfExportOptions,
+) -> QImage:
+    """Build a low-DPI hybrid sheet preview without screen capture."""
+    preview_dpi = effective_raster_dpi(120, preview=True)
+    map_image, pane_image = capture_hybrid_export_images(
+        map_widget,
+        right_pane,
+        options,
+        device_dpi=preview_dpi,
+    )
+    return render_sheet_from_captures(
+        map_image,
+        pane_image,
+        paper=options.paper,
+        landscape=options.landscape,
+        raster_dpi=preview_dpi,
+        margin_mm=options.margin_mm,
+        scale_mode=options.scale_mode,
+        scale_percent=options.scale_percent,
+    )
 
 
 def build_vector_export_context(
@@ -692,37 +777,31 @@ def compose_pdf_hybrid(
         map_aspect=map_w / map_h,
         pane_aspect=pane_w / pane_h,
     )
-    vector_ctx = build_vector_export_context(map_widget, map_rect)
-    target_h = strip_target_height(options, device_dpi)
 
-    prepare = getattr(map_widget, "prepare_for_export", None)
-    end_export = getattr(map_widget, "end_export", None)
-    right_pane.prepare_export_snapshot(map_height=map_h)
-    try:
-        if callable(prepare):
-            prepare(wysiwyg=False, vector_ctx=vector_ctx)
-        pane_image = render_pane_for_export(right_pane, target_h)
+    map_image, pane_image = capture_hybrid_export_images(
+        map_widget,
+        right_pane,
+        options,
+        device_dpi=device_dpi,
+    )
 
-        layout = page_layout_for(options.paper, options.landscape)
-        writer = QPdfWriter(str(path))
-        writer.setResolution(device_dpi)
-        writer.setPageLayout(layout)
-        page_rect = layout.paintRectPixels(device_dpi)
+    layout = page_layout_for(options.paper, options.landscape)
+    writer = QPdfWriter(str(path))
+    writer.setResolution(device_dpi)
+    writer.setPageLayout(layout)
+    page_rect = layout.paintRectPixels(device_dpi)
 
-        painter = QPainter(writer)
-        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
-        painter.setRenderHint(QPainter.RenderHint.TextAntialiasing, True)
-        painter.fillRect(page_rect, Qt.GlobalColor.white)
+    painter = QPainter(writer)
+    painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+    painter.setRenderHint(QPainter.RenderHint.TextAntialiasing, True)
+    painter.fillRect(page_rect, Qt.GlobalColor.white)
+    if not map_image.isNull():
         painter.fillRect(map_rect, Qt.GlobalColor.white)
-        render_vector(painter, map_rect)
-        if not pane_image.isNull():
-            painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
-            painter.drawImage(pane_rect, pane_image)
-        painter.end()
-    finally:
-        right_pane.reset_export_snapshot()
-        if callable(end_export):
-            end_export(wysiwyg=False)
+        painter.drawImage(map_rect, map_image)
+    if not pane_image.isNull():
+        painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
+        painter.drawImage(pane_rect, pane_image)
+    painter.end()
 
 
 def write_pdf_hybrid(

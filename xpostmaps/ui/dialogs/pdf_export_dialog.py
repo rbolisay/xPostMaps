@@ -42,6 +42,7 @@ from xpostmaps.core.pdf_export import (
     default_pdf_filename,
     effective_raster_dpi,
     raster_dpi_clamped,
+    render_sheet_hybrid_preview,
     render_sheet_preview,
     resolve_output_path,
 )
@@ -237,14 +238,14 @@ class PdfExportDialog:
                 )
 
             def _with_map_visible(action, *, hide_dialog: bool = True):
-                """Prepare the main window for map capture (hide dialog for screen grabs)."""
+                """Prepare the main window for screen-grab capture (raster preview/export)."""
                 host = dialog.parent()
                 if hide_dialog:
                     dialog.hide()
                 if host is not None:
                     host.raise_()
                     host.activateWindow()
-                for _ in range(4):
+                for _ in range(6):
                     QApplication.processEvents()
                 try:
                     return action()
@@ -256,19 +257,26 @@ class PdfExportDialog:
 
             def refresh_preview() -> None:
                 opts = current_options()
-
-                def build_preview():
-                    return render_sheet_preview(
+                if vector_mode.isChecked():
+                    image = render_sheet_hybrid_preview(
                         map_widget,
                         right_pane,
-                        paper=opts.paper,
-                        landscape=opts.landscape,
-                        margin_mm=opts.margin_mm,
-                        scale_mode=opts.scale_mode,
-                        scale_percent=opts.scale_percent,
+                        opts,
                     )
+                    pix = QPixmap.fromImage(image)
+                else:
+                    def build_preview():
+                        return render_sheet_preview(
+                            map_widget,
+                            right_pane,
+                            paper=opts.paper,
+                            landscape=opts.landscape,
+                            margin_mm=opts.margin_mm,
+                            scale_mode=opts.scale_mode,
+                            scale_percent=opts.scale_percent,
+                        )
 
-                pix = _with_map_visible(build_preview)
+                    pix = _with_map_visible(build_preview)
                 if pix.isNull():
                     preview_label.setText("Preview unavailable")
                     return
@@ -462,6 +470,7 @@ class PdfExportDialog:
             scale_combo.currentIndexChanged.connect(sync_scale_controls)
             scale_combo.currentIndexChanged.connect(schedule_preview)
             scale_custom.valueChanged.connect(schedule_preview)
+            vector_mode.stateChanged.connect(schedule_preview)
             sync_margin_controls()
             sync_scale_controls()
 
