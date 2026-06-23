@@ -498,7 +498,7 @@ class PdfExportDialog:
 
             schedule_preview()
 
-        SingleInstanceDialog.show_dialog(
+        return SingleInstanceDialog.show_dialog(
             cls.KEY,
             "Export to PDF",
             build,

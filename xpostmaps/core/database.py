@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -83,6 +84,7 @@ class Database:
                 file_name TEXT NOT NULL,
                 sequence_no TEXT NOT NULL,
                 line_name TEXT NOT NULL,
+                subline TEXT DEFAULT '',
                 line_direction TEXT DEFAULT '',
                 first_sp INTEGER NOT NULL,
                 last_sp INTEGER NOT NULL,
@@ -116,6 +118,9 @@ class Database:
 
             CREATE INDEX IF NOT EXISTS idx_positions_project
                 ON positions(project_id);
+
+            CREATE INDEX IF NOT EXISTS idx_positions_sequence_lookup
+                ON positions(project_id, file_name, sequence_no, line_name);
 
             CREATE TABLE IF NOT EXISTS survey_perimeters (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -207,6 +212,10 @@ class Database:
         if "line_direction" not in seg_cols:
             self._conn.execute("ALTER TABLE segments ADD COLUMN line_direction TEXT DEFAULT ''")
 
+        seq_cols = {row[1] for row in self._conn.execute("PRAGMA table_info(line_sequences)")}
+        if "subline" not in seq_cols:
+            self._conn.execute("ALTER TABLE line_sequences ADD COLUMN subline TEXT DEFAULT ''")
+
         self._conn.execute(
             """
             CREATE TABLE IF NOT EXISTS survey_perimeters (
@@ -247,6 +256,7 @@ class Database:
         return datetime.now(timezone.utc).isoformat()
 
     def save_project(self, settings: ProjectSettings, map_data: MapData) -> int:
+        started = time.perf_counter()
         now = self._now()
         # When positions are already persisted and were not loaded/modified in
         # memory, leave the (potentially huge) positions table untouched. This
@@ -275,6 +285,19 @@ class Database:
 
         if row:
             project_id = row["id"]
+            parsed_nav_names = {
+                str(name)
+                for name in map_data.stats.get("nav_files_parsed_names", [])
+                if str(name)
+            }
+            active_nav_names = {
+                str(name)
+                for name in map_data.stats.get("nav_files_active_names", [])
+                if str(name)
+            }
+            incremental_nav = bool(active_nav_names) and bool(
+                map_data.stats.get("nav_files_skipped", 0)
+            )
             self._conn.execute(
                 """
                 UPDATE projects SET
@@ -323,10 +346,22 @@ class Database:
                     project_id,
                 ),
             )
-            self._conn.execute("DELETE FROM segments WHERE project_id=?", (project_id,))
-            self._conn.execute("DELETE FROM line_sequences WHERE project_id=?", (project_id,))
-            if not skip_positions:
-                self._conn.execute("DELETE FROM positions WHERE project_id=?", (project_id,))
+            if incremental_nav:
+                self._delete_incremental_nav_rows(
+                    int(project_id),
+                    active_nav_names,
+                    parsed_nav_names,
+                    delete_positions=not skip_positions,
+                )
+                self._conn.execute(
+                    "DELETE FROM segments WHERE project_id=? AND category IN ('overlay', 'preplot', 'navplan')",
+                    (project_id,),
+                )
+            else:
+                self._conn.execute("DELETE FROM segments WHERE project_id=?", (project_id,))
+                self._conn.execute("DELETE FROM line_sequences WHERE project_id=?", (project_id,))
+                if not skip_positions:
+                    self._conn.execute("DELETE FROM positions WHERE project_id=?", (project_id,))
             self._conn.execute("DELETE FROM survey_perimeters WHERE project_id=?", (project_id,))
         else:
             cursor = self._conn.execute(
@@ -377,16 +412,37 @@ class Database:
                 ),
             )
             project_id = cursor.lastrowid
+            incremental_nav = False
+            parsed_nav_names = set()
 
-        self._save_segments(project_id, "main", map_data.segments)
+        main_segments = (
+            [seg for seg in map_data.segments if seg.file_name in parsed_nav_names]
+            if incremental_nav
+            else map_data.segments
+        )
+        sequences = (
+            [seq for seq in map_data.sequences if seq.file_name in parsed_nav_names]
+            if incremental_nav
+            else map_data.sequences
+        )
+        positions = (
+            [pos for pos in map_data.positions if pos.file_name in parsed_nav_names]
+            if incremental_nav
+            else map_data.positions
+        )
+
+        self._save_segments(project_id, "main", main_segments)
         self._save_segments(project_id, "overlay", map_data.overlay_segments)
         self._save_segments(project_id, "preplot", map_data.preplot_segments)
         self._save_segments(project_id, "navplan", map_data.navplan_segments)
-        self._save_sequences(project_id, map_data.sequences)
+        self._save_sequences(project_id, sequences)
         if not skip_positions:
-            self._save_positions(project_id, map_data.positions)
+            self._save_positions(project_id, positions)
         self._save_survey_perimeters(project_id, map_data.survey_perimeters)
         self._conn.commit()
+        elapsed_ms = (time.perf_counter() - started) * 1000
+        mode = "incremental-nav" if incremental_nav else "full"
+        print(f"[xPostMaps timing] DB save {mode}: {elapsed_ms:.1f} ms")
         return int(project_id)
 
     def save_project_metadata(self, settings: ProjectSettings, map_data: MapData) -> int:
@@ -461,6 +517,46 @@ class Database:
                 rows,
             )
 
+    def _existing_nav_file_names(self, project_id: int) -> set[str]:
+        rows = self._conn.execute(
+            """
+            SELECT file_name FROM positions WHERE project_id=?
+            UNION
+            SELECT file_name FROM line_sequences WHERE project_id=?
+            UNION
+            SELECT file_name FROM segments WHERE project_id=? AND category='main'
+            """,
+            (project_id, project_id, project_id),
+        ).fetchall()
+        return {row["file_name"] for row in rows if row["file_name"]}
+
+    def _delete_incremental_nav_rows(
+        self,
+        project_id: int,
+        active_names: set[str],
+        parsed_names: set[str],
+        *,
+        delete_positions: bool,
+    ) -> None:
+        replace_names = (self._existing_nav_file_names(project_id) - active_names) | parsed_names
+        if not replace_names:
+            return
+        placeholders = ",".join("?" for _ in replace_names)
+        params = [project_id, *sorted(replace_names)]
+        self._conn.execute(
+            f"DELETE FROM segments WHERE project_id=? AND category='main' AND file_name IN ({placeholders})",
+            params,
+        )
+        self._conn.execute(
+            f"DELETE FROM line_sequences WHERE project_id=? AND file_name IN ({placeholders})",
+            params,
+        )
+        if delete_positions:
+            self._conn.execute(
+                f"DELETE FROM positions WHERE project_id=? AND file_name IN ({placeholders})",
+                params,
+            )
+
     def _save_sequences(self, project_id: int, sequences: list[LineSequence]) -> None:
         rows = [
             (
@@ -469,6 +565,7 @@ class Database:
                 seq.file_name,
                 seq.sequence_no,
                 seq.line_name,
+                seq.subline,
                 seq.line_direction,
                 seq.first_sp,
                 seq.last_sp,
@@ -481,8 +578,8 @@ class Database:
                 """
                 INSERT INTO line_sequences (
                     project_id, seq_key, file_name, sequence_no, line_name,
-                    line_direction, first_sp, last_sp, record_type
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    subline, line_direction, first_sp, last_sp, record_type
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 rows,
             )
@@ -750,8 +847,29 @@ class Database:
     def _load_sequences(self, project_id: int) -> list[LineSequence]:
         rows = self._conn.execute(
             """
-            SELECT seq_key, file_name, sequence_no, line_name, line_direction,
-                   first_sp, last_sp, record_type
+            SELECT
+                seq_key,
+                file_name,
+                sequence_no,
+                line_name,
+                COALESCE(
+                    NULLIF(subline, ''),
+                    (
+                        SELECT p.subline
+                        FROM positions p
+                        WHERE p.project_id = line_sequences.project_id
+                          AND p.file_name = line_sequences.file_name
+                          AND p.sequence_no = line_sequences.sequence_no
+                          AND p.line_name = line_sequences.line_name
+                          AND p.subline <> ''
+                        LIMIT 1
+                    ),
+                    ''
+                ) AS subline,
+                line_direction,
+                first_sp,
+                last_sp,
+                record_type
             FROM line_sequences WHERE project_id=?
             ORDER BY id
             """,
@@ -763,6 +881,7 @@ class Database:
                 file_name=row["file_name"],
                 sequence_no=row["sequence_no"],
                 line_name=row["line_name"],
+                subline=row["subline"] or "",
                 line_direction=row["line_direction"] or "",
                 first_sp=row["first_sp"],
                 last_sp=row["last_sp"],

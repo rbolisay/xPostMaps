@@ -1240,7 +1240,7 @@ class LegendDialog:
             refit_legend_geometry()
             schedule_refit()
 
-        SingleInstanceDialog.show_dialog(
+        return SingleInstanceDialog.show_dialog(
             cls.KEY,
             "Legend",
             build,

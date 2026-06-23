@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import time
 from datetime import date
 from pathlib import Path
 
 from PySide6.QtCore import Qt, QTimer
 from PySide6.QtWidgets import (
+    QApplication,
     QFileDialog,
     QHBoxLayout,
     QInputDialog,
@@ -77,6 +79,7 @@ class MainWindow(QMainWindow):
         self._worker: ParseWorker | None = None
         self._loading_project = False
         self._parsing = False
+        self._closing_after_parse = False
         self._autosave = AutosaveController(self._autosave_project, self, delay_ms=2000)
         self._metadata_autosave = AutosaveController(
             self._autosave_project_metadata,
@@ -306,6 +309,16 @@ class MainWindow(QMainWindow):
         self._settings.map_view = dict(view)
         self._schedule_metadata_autosave()
 
+    def _set_left_button_active(self, key: str, active: bool) -> None:
+        self._left.set_button_active(key, active)
+
+    def _track_left_dialog(self, key: str, dialog) -> None:
+        if dialog is None:
+            self._set_left_button_active(key, False)
+            return
+        self._set_left_button_active(key, True)
+        dialog.finished.connect(lambda _result=0, k=key: self._set_left_button_active(k, False))
+
     def _sync_current_views(self) -> None:
         """Capture the latest live views before any database write."""
         if self._loading_project:
@@ -320,14 +333,18 @@ class MainWindow(QMainWindow):
         self._persist_project()
 
     def _select_logo(self) -> None:
-        path, _ = QFileDialog.getOpenFileName(
-            self,
-            "Select Logo",
-            self._settings.logo_path or "",
-            "Images (*.png *.jpg *.jpeg *.svg *.bmp);;All Files (*)",
-        )
-        if path:
-            self._on_logo_changed(path)
+        self._set_left_button_active("logo", True)
+        try:
+            path, _ = QFileDialog.getOpenFileName(
+                self,
+                "Select Logo",
+                self._settings.logo_path or "",
+                "Images (*.png *.jpg *.jpeg *.svg *.bmp);;All Files (*)",
+            )
+            if path:
+                self._on_logo_changed(path)
+        finally:
+            self._set_left_button_active("logo", False)
 
     def _open_pdf_export(self) -> None:
         if not self._map_data:
@@ -338,7 +355,7 @@ class MainWindow(QMainWindow):
             )
             return
         self._right.update_from_project(self._settings, self._map_data)
-        PdfExportDialog.open(
+        dialog = PdfExportDialog.open(
             self,
             map_widget=self._map,
             right_pane=self._right,
@@ -347,10 +364,11 @@ class MainWindow(QMainWindow):
             project_name=self._settings.name,
             default_output_dir=self._db_directory,
         )
+        self._track_left_dialog("pdf", dialog)
 
     def _open_legend(self) -> None:
         perimeters = self._map_data.survey_perimeters if self._map_data else []
-        LegendDialog.open(
+        dialog = LegendDialog.open(
             self,
             self._settings.legend_config,
             on_apply=self._on_legend_apply,
@@ -362,15 +380,17 @@ class MainWindow(QMainWindow):
             map_epsg=self._current_map_epsg(),
             on_map_epsg_changed=self._on_import_map_epsg_changed,
         )
+        self._track_left_dialog("legend", dialog)
 
     def _open_import_polygons(self) -> None:
-        ImportPolygonsDialog.open(
+        dialog = ImportPolygonsDialog.open(
             self,
             self._settings.legend_config,
             self._current_map_epsg(),
             on_apply=self._on_import_polygons_apply,
             on_map_epsg_changed=self._on_import_map_epsg_changed,
         )
+        self._track_left_dialog("import_polygons", dialog)
 
     def _on_import_polygons_apply(self, legend: LegendConfig) -> None:
         self._on_legend_apply(legend)
@@ -385,6 +405,37 @@ class MainWindow(QMainWindow):
 
     def _current_sequences(self) -> list[LineSequence]:
         return list(self._map_data.sequences) if self._map_data else []
+
+    @staticmethod
+    def _summary_value(values: set[str]) -> str:
+        cleaned = {value.strip() for value in values if value.strip()}
+        if not cleaned:
+            return ""
+        if len(cleaned) == 1:
+            return next(iter(cleaned))
+        return f"{len(cleaned)} values"
+
+    def _nav_file_summaries(self) -> dict[str, tuple[str, str, str, str, str]]:
+        """Summaries for the import table from already parsed project data."""
+        if self._map_data is None:
+            return {}
+
+        grouped: dict[str, list[LineSequence]] = {}
+        for seq in self._map_data.sequences:
+            grouped.setdefault(seq.file_name, []).append(seq)
+
+        summaries: dict[str, tuple[str, str, str, str, str]] = {}
+        for file_name, sequences in grouped.items():
+            first_sp = min(seq.first_sp for seq in sequences)
+            last_sp = max(seq.last_sp for seq in sequences)
+            summaries[file_name] = (
+                self._summary_value({seq.line_name for seq in sequences}),
+                self._summary_value({seq.subline for seq in sequences}),
+                self._summary_value({seq.line_direction for seq in sequences}),
+                str(first_sp),
+                str(last_sp),
+            )
+        return summaries
 
     def _prune_legend_sequence_refs(self) -> None:
         if not self._map_data:
@@ -426,7 +477,8 @@ class MainWindow(QMainWindow):
         if self._map_data:
             self._ensure_project_info_date(self._map_data)
         info = self._map_data.postmap_info if self._map_data else PostmapInfo()
-        PostmapInfoDialog.open(self, info, on_changed=self._on_postmap_info_changed)
+        dialog = PostmapInfoDialog.open(self, info, on_changed=self._on_postmap_info_changed)
+        self._track_left_dialog("info", dialog)
 
     def _on_postmap_info_changed(self, info: PostmapInfo) -> None:
         map_data = self._ensure_map_data()
@@ -436,15 +488,16 @@ class MainWindow(QMainWindow):
         self._schedule_metadata_autosave()
 
     def _select_preplot_navplan(self) -> None:
-        PreplotNavplanDialog.open(
+        dialog = PreplotNavplanDialog.open(
             self,
             self._settings,
             on_apply=self._on_preplot_settings_changed,
             initial_dir=self._settings.preplots_dir or self._settings.p111_p190_dir or "",
         )
+        self._track_left_dialog("preplot", dialog)
 
     def _open_import_navplan(self) -> None:
-        ImportNavplanDialog.open(
+        dialog = ImportNavplanDialog.open(
             self,
             self._settings,
             on_apply=self._on_navplan_settings_changed,
@@ -453,6 +506,7 @@ class MainWindow(QMainWindow):
             or self._settings.p111_p190_dir
             or "",
         )
+        self._track_left_dialog("navplan", dialog)
 
     def _on_preplot_settings_changed(self, settings: ProjectSettings) -> None:
         self._settings.preplot_files = settings.preplot_files
@@ -498,19 +552,24 @@ class MainWindow(QMainWindow):
         self._start_parse()
 
     def _select_p111_dir(self) -> None:
-        result = NavFilePickerDialog.pick(
-            self,
-            title="Select P111/P190 Files",
-            hint="Select a folder to scan for .p111/.p190 files, or add individual files.",
-            extensions=NAV_EXTENSIONS,
-            file_filter="Navigation Files (*.p111 *.p190 *.txt *.nav);;All Files (*)",
-            initial_dir=self._settings.p111_p190_dir or "",
-            initial_files=self._settings.nav_files or None,
-            on_rescan=self._apply_nav_file_selection,
-        )
-        if result is None:
-            return
-        self._apply_nav_file_selection(*result)
+        self._set_left_button_active("p111", True)
+        try:
+            result = NavFilePickerDialog.pick(
+                self,
+                title="Select P111/P190 Files",
+                hint="Select a folder to scan for .p111/.p190 files, or add individual files.",
+                extensions=NAV_EXTENSIONS,
+                file_filter="Navigation Files (*.p111 *.p190 *.txt *.nav);;All Files (*)",
+                initial_dir=self._settings.p111_p190_dir or "",
+                initial_files=self._settings.nav_files or None,
+                file_summaries=self._nav_file_summaries(),
+            )
+            if result is None:
+                return
+            files, folder = result
+            QTimer.singleShot(0, lambda: self._apply_nav_file_selection(files, folder))
+        finally:
+            self._set_left_button_active("p111", False)
 
     def _start_parse(self) -> None:
         if self._worker and self._worker.isRunning():
@@ -531,42 +590,37 @@ class MainWindow(QMainWindow):
         self._metadata_autosave.set_enabled(False)
         self._left.set_progress(0, True)
         self._left.set_status("Parsing files…")
-        self._ensure_positions_loaded()
+        QApplication.processEvents()
         existing = self._map_data.postmap_info if self._map_data else None
+        project_name = self._settings.name.strip()
+        project_db = project_db_path(self._db_directory, project_name) if project_name else None
         self._worker = ParseWorker(
             self._settings,
             self,
             existing_postmap=existing,
             existing_map_data=self._map_data,
+            project_db_path=project_db,
+            project_name=project_name,
         )
         self._worker.progress.connect(self._on_parse_progress)
         self._worker.finished_ok.connect(self._on_parse_finished)
         self._worker.failed.connect(self._on_parse_failed)
         self._worker.start()
 
-    def _ensure_positions_loaded(self) -> None:
-        """Load persisted positions into memory before a re-parse.
-
-        Positions are skipped on project open for speed; incremental re-parsing
-        needs them to carry over records from unchanged nav files.
-        """
-        md = self._map_data
-        if md is None or md.positions or not md.positions_persisted:
-            return
-        name = self._settings.name.strip()
-        if not name:
-            return
-        try:
-            md.positions = self._db.load_positions(name)
-        except Exception:  # noqa: BLE001
-            md.positions = []
-        md.positions_persisted = False
-
     def _on_parse_progress(self, pct: int, msg: str) -> None:
         self._left.set_progress(pct)
         self._left.set_status(msg)
 
     def _on_parse_finished(self, map_data: MapData) -> None:
+        if self._closing_after_parse:
+            self._map_data = map_data
+            self._parsing = False
+            self._ensure_project_name()
+            self._save_project(silent=True)
+            self._db.close()
+            QApplication.quit()
+            return
+
         preserved = self._map_data.postmap_info if self._map_data else None
         map_data.postmap_info = self._merge_preserved_postmap_info(
             map_data.postmap_info,
@@ -614,19 +668,46 @@ class MainWindow(QMainWindow):
             f"{map_data.stats.get('preplot_files', 0)} preplot file(s), "
             f"{map_data.stats.get('navplan_files', 0)} navplan file(s){skip_note}"
         )
+        self._left.set_status("Parse complete. Rendering map…")
+        QTimer.singleShot(0, self._finish_parse_render)
+
+    def _finish_parse_render(self) -> None:
+        if self._map_data is None:
+            return
+        started = time.perf_counter()
         self._map.set_legend(self._settings.legend_config)
         self._map.set_display_mode(self._settings.display_mode)
         self._map.render(self._map_data, force=True)
+        print(f"[xPostMaps timing] Map render after parse: {(time.perf_counter() - started) * 1000:.1f} ms")
+        self._left.set_status("Map rendered. Updating right pane…")
+        QTimer.singleShot(0, self._finish_parse_right_pane)
+
+    def _finish_parse_right_pane(self) -> None:
+        if self._map_data is None:
+            return
+        started = time.perf_counter()
         self._right.update_from_project(self._settings, self._map_data)
-        self._mediator.map_data_updated.emit(map_data)
+        self._mediator.map_data_updated.emit(self._map_data)
+        print(f"[xPostMaps timing] Right pane update after parse: {(time.perf_counter() - started) * 1000:.1f} ms")
+        self._left.set_status("Saving parsed project…")
+        QTimer.singleShot(0, self._finish_parse_save)
+
+    def _finish_parse_save(self) -> None:
+        started = time.perf_counter()
         self._parsing = False
         self._autosave.set_enabled(True)
         self._metadata_autosave.set_enabled(True)
         self._ensure_project_name()
         self._autosave.save_now()
+        print(f"[xPostMaps timing] Parse-finish save dispatch: {(time.perf_counter() - started) * 1000:.1f} ms")
 
     def _on_parse_failed(self, message: str) -> None:
         self._parsing = False
+        if self._closing_after_parse:
+            self._save_close_metadata()
+            self._db.close()
+            QApplication.quit()
+            return
         self._autosave.set_enabled(True)
         self._metadata_autosave.set_enabled(True)
         self._left.set_progress(0, False)
@@ -637,7 +718,7 @@ class MainWindow(QMainWindow):
         self._map_data = map_data
 
     def _open_project_browser(self) -> None:
-        ProjectBrowserDialog.open(
+        dialog = ProjectBrowserDialog.open(
             self,
             str(self._db_directory),
             on_load=self._load_database_project,
@@ -645,6 +726,7 @@ class MainWindow(QMainWindow):
             on_new_project=self._create_new_project,
             on_directory_changed=self._on_db_directory_changed,
         )
+        self._track_left_dialog("browse_load", dialog)
 
     def _on_db_directory_changed(self, directory: str) -> None:
         self._db_directory = Path(directory)
@@ -899,13 +981,35 @@ class MainWindow(QMainWindow):
         self._mediator.project_saved.emit(name)
         return True
 
+    def _save_close_metadata(self) -> bool:
+        """Fast close-time save: latest UI metadata only, never full geometry."""
+        if not (self._settings.name.strip() or self._ensure_project_name()):
+            return False
+        self._sync_current_views()
+        self._settings.name = self._left.project_name() or self._settings.name.strip()
+        name = self._settings.name.strip()
+        if not name:
+            return False
+        target_db = project_db_path(self._db_directory, name)
+        self._db_directory.mkdir(parents=True, exist_ok=True)
+        self._switch_database(target_db)
+        if self._db.get_project_id(name) is None:
+            return False
+        try:
+            self._db.save_project_metadata(self._settings, self._ensure_map_data())
+        except Exception:  # noqa: BLE001
+            return False
+        return True
+
     def closeEvent(self, event) -> None:  # noqa: N802
         self._autosave.set_enabled(False)
         self._metadata_autosave.set_enabled(False)
         if self._worker and self._worker.isRunning():
-            self._worker.wait(120_000)
-            self._parsing = False
-        if self._settings.name.strip() or self._ensure_project_name():
-            self._save_project(silent=True)
+            self._closing_after_parse = True
+            self._save_close_metadata()
+            self.hide()
+            event.ignore()
+            return
+        self._save_close_metadata()
         self._db.close()
         super().closeEvent(event)

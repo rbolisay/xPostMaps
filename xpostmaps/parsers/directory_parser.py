@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import os
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 import numpy as np
@@ -26,6 +28,7 @@ from xpostmaps.parsers.survey_perimeter_parser import parse_survey_perimeters
 from xpostmaps.utils.numba_accel import compute_bounds
 
 NAV_EXTENSIONS = {".p111", ".p190", ".P111", ".P190", ".txt", ".nav"}
+_MAX_NAV_PARSE_WORKERS = 8
 
 
 def _detect_format(path: Path) -> str:
@@ -77,6 +80,18 @@ def _parse_nav_file(path: Path, vessel_id: str | None = None) -> list[PositionRe
         if not rec.sequence_no:
             rec.sequence_no = rec.line_name.strip() or "1"
     return records
+
+
+def _nav_parse_worker(args: tuple[int, Path, str | None]) -> tuple[int, Path, list[PositionRecord]]:
+    index, path, vessel_id = args
+    return index, path, _parse_nav_file(path, vessel_id=vessel_id)
+
+
+def _nav_parse_worker_count(file_count: int) -> int:
+    if file_count <= 1:
+        return 1
+    cpu_count = os.cpu_count() or 2
+    return max(1, min(file_count, cpu_count, _MAX_NAV_PARSE_WORKERS))
 
 
 def _records_to_segments(
@@ -242,16 +257,38 @@ def parse_navigation_directory(
     for path in main_files:
         map_data.source_files.append(str(path))
 
-    for path in files_to_parse:
+    parsed_results: dict[int, tuple[Path, list[PositionRecord]]] = {}
+    if files_to_parse:
+        worker_count = _nav_parse_worker_count(len(files_to_parse))
         if progress_callback:
-            progress_callback(int(100 * step / total_steps), f"Parsing {path.name}")
-        records = _parse_nav_file(path, vessel_id=shared_vessel_id)
+            mode = "multi-threaded" if worker_count > 1 else "single-threaded"
+            progress_callback(
+                int(100 * step / total_steps),
+                f"Parsing {len(files_to_parse)} nav file(s) ({mode}, {worker_count} worker(s))",
+            )
+
+        with ThreadPoolExecutor(max_workers=worker_count) as executor:
+            futures = [
+                executor.submit(_nav_parse_worker, (index, path, shared_vessel_id))
+                for index, path in enumerate(files_to_parse)
+            ]
+            for future in as_completed(futures):
+                index, path, records = future.result()
+                parsed_results[index] = (path, records)
+                if progress_callback:
+                    progress_callback(
+                        int(100 * step / total_steps),
+                        f"Parsed {path.name}",
+                    )
+                step += 1
+
+    for index in range(len(files_to_parse)):
+        path, records = parsed_results[index]
         all_records.extend(records)
         for rec in records:
             all_x.append(rec.x)
             all_y.append(rec.y)
         nav_cache[nav_file_cache_key(path)] = nav_file_signature(path)
-        step += 1
 
     for rec in carried_records:
         all_x.append(rec.x)
@@ -368,6 +405,8 @@ def parse_navigation_directory(
         "source_files": len(main_files),
         "nav_files_parsed": len(files_to_parse),
         "nav_files_skipped": skipped_files,
+        "nav_files_active_names": [path.name for path in main_files],
+        "nav_files_parsed_names": [path.name for path in files_to_parse],
         "preplot_files": preplot_stats.get("preplot_files", 0),
         "preplot_lines": preplot_stats.get("preplot_lines", 0),
         "navplan_files": navplan_stats.get("navplan_files", 0),

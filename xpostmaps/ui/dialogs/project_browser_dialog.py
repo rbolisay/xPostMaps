@@ -266,7 +266,7 @@ class ProjectBrowserDialog:
 
             set_directory(state["directory"])
 
-        SingleInstanceDialog.show_dialog(
+        return SingleInstanceDialog.show_dialog(
             cls.KEY,
             "Browse / Load Project Database",
             build,

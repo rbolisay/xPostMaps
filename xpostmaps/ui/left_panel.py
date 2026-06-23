@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from PySide6.QtCore import Signal
+from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
@@ -58,6 +58,7 @@ class LeftPanel(GlassPanel):
 
         self._save_btn = QPushButton("Save")
         self._save_btn.setObjectName("primaryBtn")
+        self._save_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self._save_btn.clicked.connect(self.save_project.emit)
         name_row.addWidget(self._save_btn)
 
@@ -137,6 +138,20 @@ class LeftPanel(GlassPanel):
         self._pdf_btn.clicked.connect(self.open_pdf_export.emit)
         self._info_btn.clicked.connect(self.open_postmap_info.emit)
 
+        self._active_buttons = {
+            "browse_load": self._browse_load_btn,
+            "preplot": self._preplot_btn,
+            "navplan": self._navplan_btn,
+            "p111": self._p111_btn,
+            "import_polygons": self._import_polygons_btn,
+            "logo": self._logo_btn,
+            "legend": self._legend_btn,
+            "pdf": self._pdf_btn,
+            "info": self._info_btn,
+        }
+        for button in (self._save_btn, *self._active_buttons.values()):
+            button.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+
         self._progress = QProgressBar()
         self._progress.setVisible(False)
         self._progress.setTextVisible(False)
@@ -168,6 +183,15 @@ class LeftPanel(GlassPanel):
 
     def set_import_polygons(self, summary: str) -> None:
         self._import_polygons_path.setText(summary if summary else "Not set")
+
+    def set_button_active(self, key: str, active: bool) -> None:
+        button = self._active_buttons.get(key)
+        if button is None:
+            return
+        button.setProperty("active", active)
+        button.style().unpolish(button)
+        button.style().polish(button)
+        button.update()
 
     def set_preplot_dependent_controls_enabled(self, enabled: bool) -> None:
         """Enable nav/tools only after preplot/navplan files are loaded."""

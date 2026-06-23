@@ -38,6 +38,7 @@ def build_sequences(records: list[PositionRecord]) -> list[LineSequence]:
         pnums = [r.point_num for r in group]
         direction = infer_line_direction(np.array(pnums, dtype=np.int64))
         line_dir = group[0].line_direction or _direction_label(direction, "")
+        subline = next((r.subline for r in group if r.subline), "")
         seq_id = make_sequence_id(file_name, seq_no, line_name, rtype)
         sequences.append(
             LineSequence(
@@ -45,6 +46,7 @@ def build_sequences(records: list[PositionRecord]) -> list[LineSequence]:
                 file_name=file_name,
                 sequence_no=seq_no,
                 line_name=line_name,
+                subline=subline,
                 line_direction=line_dir,
                 first_sp=min(pnums),
                 last_sp=max(pnums),
@@ -66,6 +68,7 @@ def build_display_sequences(records: list[PositionRecord]) -> list[LineSequence]
                 file_name=seq.file_name,
                 sequence_no=seq.sequence_no,
                 line_name=seq.line_name,
+                subline=seq.subline,
                 line_direction=seq.line_direction,
                 first_sp=seq.first_sp,
                 last_sp=seq.last_sp,
@@ -75,6 +78,8 @@ def build_display_sequences(records: list[PositionRecord]) -> list[LineSequence]
             existing = merged[group_id]
             existing.first_sp = min(existing.first_sp, seq.first_sp)
             existing.last_sp = max(existing.last_sp, seq.last_sp)
+            if not existing.subline and seq.subline:
+                existing.subline = seq.subline
             if not existing.line_direction and seq.line_direction:
                 existing.line_direction = seq.line_direction
     return sorted(

@@ -246,7 +246,7 @@ class PostmapInfoDialog:
 
                 dialog.showEvent = show_event  # type: ignore[method-assign]
 
-        SingleInstanceDialog.show_dialog(
+        return SingleInstanceDialog.show_dialog(
             cls.KEY,
             "Project Information",
             build,

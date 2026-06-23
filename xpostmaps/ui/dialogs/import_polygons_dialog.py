@@ -230,7 +230,7 @@ class ImportPolygonsDialog:
         summary = QLabel("")
         table = QTableWidget()
 
-        SingleInstanceDialog.show_dialog(
+        return SingleInstanceDialog.show_dialog(
             cls.KEY,
             "Import Polygons",
             build,

@@ -115,6 +115,7 @@ def app_stylesheet() -> str:
         padding: 9px 14px;
         color: {TEXT_PRIMARY};
         font-weight: 500;
+        outline: none;
     }}
     QPushButton:hover {{
         background: rgba(59, 130, 246, 0.32);
@@ -122,6 +123,18 @@ def app_stylesheet() -> str:
     }}
     QPushButton:pressed {{
         background: rgba(37, 99, 235, 0.45);
+    }}
+    QPushButton:focus {{
+        outline: none;
+    }}
+    QPushButton[active="true"] {{
+        background: rgba(59, 130, 246, 0.55);
+        border: 1px solid rgba(147, 197, 253, 0.95);
+        color: #ffffff;
+    }}
+    QPushButton[active="true"]:hover {{
+        background: rgba(59, 130, 246, 0.68);
+        border-color: #bfdbfe;
     }}
     QPushButton:disabled {{
         color: #6b7280;
@@ -131,12 +144,20 @@ def app_stylesheet() -> str:
     QPushButton#primaryBtn {{
         background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
             stop:0 {ACCENT}, stop:1 #6366f1);
-        border: none;
+        border: 1px solid rgba(147, 197, 253, 0.7);
         font-weight: 600;
     }}
     QPushButton#primaryBtn:hover {{
         background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
             stop:0 {ACCENT_HOVER}, stop:1 #4f46e5);
+        border: 1px solid #bfdbfe;
+    }}
+    QPushButton#primaryBtn:pressed {{
+        background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
+            stop:0 #1d4ed8, stop:1 #4338ca);
+        border: 1px solid #dbeafe;
+        padding-top: 10px;
+        padding-bottom: 8px;
     }}
     QPushButton#dirBtn {{
         text-align: center;

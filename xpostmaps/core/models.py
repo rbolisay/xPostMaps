@@ -211,6 +211,7 @@ class LineSequence:
     file_name: str
     sequence_no: str
     line_name: str
+    subline: str
     line_direction: str
     first_sp: int
     last_sp: int

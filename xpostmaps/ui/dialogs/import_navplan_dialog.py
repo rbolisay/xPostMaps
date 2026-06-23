@@ -227,7 +227,7 @@ class ImportNavplanDialog:
         summary = QLabel("")
         table = QTableWidget()
 
-        SingleInstanceDialog.show_dialog(
+        return SingleInstanceDialog.show_dialog(
             cls.KEY,
             "Import Navplan",
             build,

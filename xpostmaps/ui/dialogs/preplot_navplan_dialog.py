@@ -242,7 +242,7 @@ class PreplotNavplanDialog:
         summary = QLabel("")
         table = QTableWidget()
 
-        SingleInstanceDialog.show_dialog(
+        return SingleInstanceDialog.show_dialog(
             cls.KEY,
             "Import Preplot",
             build,
