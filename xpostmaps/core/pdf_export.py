@@ -214,7 +214,8 @@ def capture_export_images(
 ) -> tuple[QImage, QImage]:
     """Render map and right pane on the UI thread at the final print resolution."""
     if use_screen_grab is None:
-        use_screen_grab = not preview
+        # Screen grab matches on-screen GPU compositing; manual composite misses GL colours.
+        use_screen_grab = True
     raster_dpi = effective_raster_dpi(options.dpi, preview=preview)
     target_h = strip_target_height(options, raster_dpi)
     map_height = max(map_widget.height(), 1)

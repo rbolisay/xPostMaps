@@ -234,17 +234,37 @@ class PdfExportDialog:
                     scale_percent=scale_percent,
                 )
 
+            def _with_map_visible(action):
+                """Hide the dialog so map screen-grab is unobstructed (same as export)."""
+                host = dialog.parent()
+                dialog.hide()
+                if host is not None:
+                    host.raise_()
+                    host.activateWindow()
+                for _ in range(4):
+                    QApplication.processEvents()
+                try:
+                    return action()
+                finally:
+                    dialog.show()
+                    dialog.raise_()
+                    dialog.activateWindow()
+
             def refresh_preview() -> None:
                 opts = current_options()
-                pix = render_sheet_preview(
-                    map_widget,
-                    right_pane,
-                    paper=opts.paper,
-                    landscape=opts.landscape,
-                    margin_mm=opts.margin_mm,
-                    scale_mode=opts.scale_mode,
-                    scale_percent=opts.scale_percent,
-                )
+
+                def build_preview():
+                    return render_sheet_preview(
+                        map_widget,
+                        right_pane,
+                        paper=opts.paper,
+                        landscape=opts.landscape,
+                        margin_mm=opts.margin_mm,
+                        scale_mode=opts.scale_mode,
+                        scale_percent=opts.scale_percent,
+                    )
+
+                pix = _with_map_visible(build_preview)
                 if pix.isNull():
                     preview_label.setText("Preview unavailable")
                     return
@@ -313,24 +333,14 @@ class PdfExportDialog:
             def _capture_with_map_visible(
                 export_options: PdfExportOptions,
             ) -> tuple[QImage, QImage]:
-                host = dialog.parent()
-                dialog.hide()
-                if host is not None:
-                    host.raise_()
-                    host.activateWindow()
-                for _ in range(4):
-                    QApplication.processEvents()
-                try:
-                    return capture_export_images(
+                return _with_map_visible(
+                    lambda: capture_export_images(
                         map_widget,
                         right_pane,
                         export_options,
                         use_screen_grab=True,
                     )
-                finally:
-                    dialog.show()
-                    dialog.raise_()
-                    dialog.activateWindow()
+                )
 
             def do_export() -> None:
                 nonlocal export_worker, progress
