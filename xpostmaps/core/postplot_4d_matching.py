@@ -59,6 +59,7 @@ class Postplot4DMatchRow:
     last_sp: int
     line_direction: str
     sequence_id: str = ""
+    baseline_file_name: str = ""
 
     @property
     def has_match(self) -> bool:
@@ -303,6 +304,7 @@ def build_postplot_4d_rows(
                     last_sp=seq.last_sp,
                     line_direction=seq.line_direction,
                     sequence_id=seq.seq_id,
+                    baseline_file_name=candidate.file_name,
                 )
             )
     return rows

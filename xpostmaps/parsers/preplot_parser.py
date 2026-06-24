@@ -43,8 +43,8 @@ _V_RECORD_RE = re.compile(
 
 _S_PREPLOT_LAT_RE = re.compile(r"^(\d{1,6})\s*(\d{6}\.\d{2}[NS])")
 _S_PREPLOT_LAT_TIGHT_RE = re.compile(r"^(\d{1,6})(\d{6}\.\d{2}[NS])")
-_S_LON_RE = re.compile(r"(\d{6}\.\d{2}[EW])\s+(.+)")
-_S_LON_TIGHT_RE = re.compile(r"(\d{6}\.\d{2}[EW])(.+)")
+_S_LON_RE = re.compile(r"(\d+\.\d{2}[EW])\s+(.+)")
+_S_LON_TIGHT_RE = re.compile(r"(\d+\.\d{2}[EW])(.+)")
 _EN_PAIR_RE = re.compile(r"(\d+\.\d)(\d+\.\d)")
 _S_SOURCE_RE = re.compile(
     r"^S(?P<line>.{12}).*?"
@@ -225,6 +225,37 @@ def _parse_p190_s_record_preplot(line: str) -> dict | None:
     line_name = line[1:13].strip()
     if not line_name:
         return None
+
+    remainder = line[18:].lstrip()
+    sp_lat_match = _S_PREPLOT_LAT_RE.match(remainder) or _S_PREPLOT_LAT_TIGHT_RE.match(remainder)
+    if sp_lat_match:
+        shotpoint = sp_lat_match.group(1)
+        after_lat = remainder[sp_lat_match.end() :].lstrip()
+        lon_match = _S_LON_RE.match(after_lat) or _S_LON_TIGHT_RE.match(after_lat)
+        if not lon_match:
+            return None
+        after_lon = lon_match.group(2).strip()
+        en_match = _EN_PAIR_RE.search(after_lon)
+        if en_match:
+            easting = _to_float(en_match.group(1))
+            northing = _to_float(en_match.group(2))
+        else:
+            parts = re.findall(r"\d+\.\d+", after_lon)
+            if len(parts) < 2:
+                return None
+            easting = _to_float(parts[0])
+            northing = _to_float(parts[1])
+        if not (easting == easting and northing == northing):
+            return None
+        return {
+            "line_name": line_name,
+            "shotpoint": shotpoint,
+            "easting": easting,
+            "northing": northing,
+            "latitude": sp_lat_match.group(2).strip(),
+            "longitude": lon_match.group(1).strip(),
+        }
+
     source_match = _S_SOURCE_RE.match(line)
     if source_match:
         shotpoint = source_match.group("shotpoint")
@@ -246,35 +277,10 @@ def _parse_p190_s_record_preplot(line: str) -> dict | None:
             "shotpoint": shotpoint,
             "easting": easting,
             "northing": northing,
+            "latitude": source_match.group("lat").strip(),
+            "longitude": source_match.group("lon").strip(),
         }
-    remainder = line[19:].lstrip()
-    sp_lat_match = _S_PREPLOT_LAT_RE.match(remainder) or _S_PREPLOT_LAT_TIGHT_RE.match(remainder)
-    if not sp_lat_match:
-        return None
-    shotpoint = sp_lat_match.group(1)
-    after_lat = remainder[sp_lat_match.end() :].lstrip()
-    lon_match = _S_LON_RE.match(after_lat) or _S_LON_TIGHT_RE.match(after_lat)
-    if not lon_match:
-        return None
-    after_lon = lon_match.group(2).strip()
-    en_match = _EN_PAIR_RE.search(after_lon)
-    if en_match:
-        easting = _to_float(en_match.group(1))
-        northing = _to_float(en_match.group(2))
-    else:
-        parts = re.findall(r"\d+\.\d+", after_lon)
-        if len(parts) < 2:
-            return None
-        easting = _to_float(parts[0])
-        northing = _to_float(parts[1])
-    if not (easting == easting and northing == northing):
-        return None
-    return {
-        "line_name": line_name,
-        "shotpoint": shotpoint,
-        "easting": easting,
-        "northing": northing,
-    }
+    return None
 
 
 def _points_to_segment(
@@ -303,6 +309,8 @@ def _points_to_segment(
                 point_num=sp,
                 x=p["easting"],
                 y=p["northing"],
+                latitude=str(p.get("latitude", "")),
+                longitude=str(p.get("longitude", "")),
             )
         )
     direction = infer_line_direction(np.array(pnums, dtype=np.int64)) if pnums else 1

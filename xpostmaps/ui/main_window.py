@@ -33,6 +33,7 @@ from xpostmaps.core.models import (
     LegendConfig,
     LineSequence,
     MapData,
+    PositionRecord,
     PostmapInfo,
     ProjectSettings,
 )
@@ -381,6 +382,9 @@ class MainWindow(QMainWindow):
             self._settings,
             self._map_data,
             on_baseline_changed=self._on_postplot_4d_baseline_changed,
+            project_name=self._settings.name,
+            positions_provider=self._current_positions,
+            database=self._db,
         )
         self._track_left_dialog("postplot_4d", dialog)
 
@@ -426,6 +430,29 @@ class MainWindow(QMainWindow):
 
     def _current_sequences(self) -> list[LineSequence]:
         return list(self._map_data.sequences) if self._map_data else []
+
+    def _current_positions(self) -> list[PositionRecord]:
+        if self._map_data is None:
+            return []
+        if self._map_data.positions:
+            return list(self._map_data.positions)
+        name = self._settings.name.strip()
+        if not name:
+            return []
+        positions = self._db.load_positions(name)
+        self._map_data.positions = positions
+        self._map_data.positions_persisted = bool(positions)
+        return positions
+
+    def _invalidate_postplot_4d_diffs(self, map_data: MapData) -> None:
+        name = self._settings.name.strip()
+        if not name:
+            return
+        parsed_names = map_data.stats.get("nav_files_parsed_names") or []
+        if not parsed_names and map_data.sequences:
+            parsed_names = sorted({seq.file_name for seq in map_data.sequences if seq.file_name})
+        if parsed_names:
+            self._db.delete_postplot_4d_diffs_for_files(name, set(parsed_names))
 
     @staticmethod
     def _summary_value(values: set[str]) -> str:
@@ -650,6 +677,7 @@ class MainWindow(QMainWindow):
 
         self._map_data = map_data
         self._ensure_project_info_date(map_data)
+        self._invalidate_postplot_4d_diffs(map_data)
         self._prune_legend_sequence_refs()
         if self._settings.preplot_files:
             self._settings.preplot_catalog = build_preplot_catalog_from_segments(

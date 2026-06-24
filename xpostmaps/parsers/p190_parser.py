@@ -7,6 +7,7 @@ from pathlib import Path
 
 from xpostmaps.core.models import PositionRecord, RecordType
 
+from xpostmaps.core.coord_format import parse_geo_value
 
 _NUMERIC_VALUE_RE = re.compile(r"[-+]?\d+(?:\.\d+)?")
 _LINE_SUBLINE_FILENAME_RE = re.compile(
@@ -177,6 +178,13 @@ def parse_p190_line(
     depth_str = _slice_field(line, 65, 70)
     depth = _parse_float(depth_str) if depth_str else None
 
+    lat_raw = _slice_field(line, 26, 35)
+    lon_raw = _slice_field(line, 36, 46)
+    lat_val = parse_geo_value(lat_raw, is_latitude=True)
+    lon_val = parse_geo_value(lon_raw, is_latitude=False)
+    latitude = f"{lat_val}" if lat_val is not None else lat_raw
+    longitude = f"{lon_val}" if lon_val is not None else lon_raw
+
     return PositionRecord(
         file_name=file_name,
         record_type=record_type,
@@ -187,8 +195,8 @@ def parse_p190_line(
         x=x,
         y=y,
         depth=depth if depth == depth else None,
-        latitude=_slice_field(line, 26, 35),
-        longitude=_slice_field(line, 36, 46),
+        latitude=latitude,
+        longitude=longitude,
         sequence_no=sequence_no,
         line_direction=line_direction,
         subline=subline,

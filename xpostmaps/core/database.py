@@ -14,6 +14,7 @@ from xpostmaps.core.navplan_catalog_utils import (
     navplan_catalog_to_json,
 )
 from xpostmaps.core.preplot_catalog_utils import catalog_from_json, catalog_to_json
+from xpostmaps.core.postplot_4d_diff import Postplot4DDiffRow, diff_row_from_dict
 from xpostmaps.core.sequence_utils import nav_cache_from_json, nav_cache_to_json
 from xpostmaps.core.models import (
     DisplayMode,
@@ -239,6 +240,38 @@ class Database:
             """
             CREATE INDEX IF NOT EXISTS idx_survey_perimeters_project
                 ON survey_perimeters(project_id)
+            """
+        )
+        self._conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS postplot_4d_diffs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                project_id INTEGER NOT NULL,
+                baseline_kind TEXT NOT NULL,
+                baseline_name TEXT NOT NULL,
+                sequence_id TEXT NOT NULL,
+                shotpoint INTEGER NOT NULL,
+                baseline_x REAL NOT NULL,
+                baseline_y REAL NOT NULL,
+                baseline_latitude TEXT DEFAULT '',
+                baseline_longitude TEXT DEFAULT '',
+                source_x REAL NOT NULL,
+                source_y REAL NOT NULL,
+                source_latitude TEXT DEFAULT '',
+                source_longitude TEXT DEFAULT '',
+                crossline_m REAL NOT NULL,
+                inline_m REAL NOT NULL,
+                radial_m REAL NOT NULL,
+                updated_at TEXT NOT NULL,
+                FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE,
+                UNIQUE(project_id, baseline_kind, sequence_id, shotpoint)
+            )
+            """
+        )
+        self._conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_postplot_4d_diffs_project
+                ON postplot_4d_diffs(project_id)
             """
         )
 
@@ -958,6 +991,123 @@ class Database:
                 )
             )
         return perimeters
+
+    def save_postplot_4d_diffs(
+        self,
+        project_name: str,
+        baseline_kind: str,
+        baseline_name: str,
+        sequence_id: str,
+        rows: list[Postplot4DDiffRow],
+    ) -> None:
+        project_id = self.get_project_id(project_name)
+        if project_id is None:
+            return
+        now = self._now()
+        self._conn.execute(
+            """
+            DELETE FROM postplot_4d_diffs
+            WHERE project_id=? AND baseline_kind=? AND sequence_id=?
+            """,
+            (project_id, baseline_kind, sequence_id),
+        )
+        if not rows:
+            self._conn.commit()
+            return
+        self._conn.executemany(
+            """
+            INSERT INTO postplot_4d_diffs (
+                project_id, baseline_kind, baseline_name, sequence_id, shotpoint,
+                baseline_x, baseline_y, baseline_latitude, baseline_longitude,
+                source_x, source_y, source_latitude, source_longitude,
+                crossline_m, inline_m, radial_m, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            [
+                (
+                    project_id,
+                    baseline_kind,
+                    baseline_name,
+                    sequence_id,
+                    row.shotpoint,
+                    row.baseline_x,
+                    row.baseline_y,
+                    row.baseline_latitude,
+                    row.baseline_longitude,
+                    row.source_x,
+                    row.source_y,
+                    row.source_latitude,
+                    row.source_longitude,
+                    row.crossline_m,
+                    row.inline_m,
+                    row.radial_m,
+                    now,
+                )
+                for row in rows
+            ],
+        )
+        self._conn.commit()
+
+    def load_postplot_4d_diffs(
+        self,
+        project_name: str,
+        baseline_kind: str,
+        sequence_id: str,
+    ) -> list[Postplot4DDiffRow]:
+        project_id = self.get_project_id(project_name)
+        if project_id is None:
+            return []
+        rows = self._conn.execute(
+            """
+            SELECT shotpoint, baseline_x, baseline_y, baseline_latitude, baseline_longitude,
+                   source_x, source_y, source_latitude, source_longitude,
+                   crossline_m, inline_m, radial_m
+            FROM postplot_4d_diffs
+            WHERE project_id=? AND baseline_kind=? AND sequence_id=?
+            ORDER BY shotpoint
+            """,
+            (project_id, baseline_kind, sequence_id),
+        ).fetchall()
+        return [
+            diff_row_from_dict(
+                {
+                    "shotpoint": row["shotpoint"],
+                    "baseline_x": row["baseline_x"],
+                    "baseline_y": row["baseline_y"],
+                    "baseline_latitude": row["baseline_latitude"] or "",
+                    "baseline_longitude": row["baseline_longitude"] or "",
+                    "source_x": row["source_x"],
+                    "source_y": row["source_y"],
+                    "source_latitude": row["source_latitude"] or "",
+                    "source_longitude": row["source_longitude"] or "",
+                    "crossline_m": row["crossline_m"],
+                    "inline_m": row["inline_m"],
+                    "radial_m": row["radial_m"],
+                }
+            )
+            for row in rows
+        ]
+
+    def delete_postplot_4d_diffs_for_files(
+        self,
+        project_name: str,
+        file_names: set[str],
+    ) -> None:
+        if not file_names:
+            return
+        project_id = self.get_project_id(project_name)
+        if project_id is None:
+            return
+        for file_name in file_names:
+            pattern = f"{file_name}|%"
+            self._conn.execute(
+                """
+                DELETE FROM postplot_4d_diffs
+                WHERE project_id=? AND sequence_id LIKE ?
+                """,
+                (project_id, pattern),
+            )
+        self._conn.commit()
 
     def list_projects(self) -> list[str]:
         rows = self._conn.execute(
