@@ -289,15 +289,19 @@ class Database:
                 file_mtime REAL NOT NULL,
                 file_size INTEGER NOT NULL,
                 shotpoint INTEGER NOT NULL,
+                source_id TEXT DEFAULT '',
+                source_index INTEGER DEFAULT 0,
                 x REAL NOT NULL,
                 y REAL NOT NULL,
                 latitude TEXT DEFAULT '',
                 longitude TEXT DEFAULT '',
                 shotpoint_interval_m REAL NOT NULL,
                 line_direction TEXT DEFAULT '',
+                source_count INTEGER DEFAULT 1,
+                source_separation_m REAL DEFAULT 0,
                 updated_at TEXT NOT NULL,
                 FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE,
-                UNIQUE(project_id, file_path, line_name, shotpoint)
+                UNIQUE(project_id, file_path, line_name, shotpoint, source_id)
             )
             """
         )
@@ -307,6 +311,47 @@ class Database:
                 ON postplot_4d_preplot_shotpoints(project_id, file_path, line_name)
             """
         )
+        preplot_shotpoint_cols = {
+            row[1]
+            for row in self._conn.execute(
+                "PRAGMA table_info(postplot_4d_preplot_shotpoints)"
+            )
+        }
+        if "source_id" not in preplot_shotpoint_cols:
+            self._conn.execute("DROP TABLE IF EXISTS postplot_4d_preplot_shotpoints")
+            self._conn.execute(
+                """
+                CREATE TABLE postplot_4d_preplot_shotpoints (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    project_id INTEGER NOT NULL,
+                    file_path TEXT NOT NULL,
+                    file_name TEXT NOT NULL,
+                    line_name TEXT NOT NULL,
+                    file_mtime REAL NOT NULL,
+                    file_size INTEGER NOT NULL,
+                    shotpoint INTEGER NOT NULL,
+                    source_id TEXT DEFAULT '',
+                    source_index INTEGER DEFAULT 0,
+                    x REAL NOT NULL,
+                    y REAL NOT NULL,
+                    latitude TEXT DEFAULT '',
+                    longitude TEXT DEFAULT '',
+                    shotpoint_interval_m REAL NOT NULL,
+                    line_direction TEXT DEFAULT '',
+                    source_count INTEGER DEFAULT 1,
+                    source_separation_m REAL DEFAULT 0,
+                    updated_at TEXT NOT NULL,
+                    FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE,
+                    UNIQUE(project_id, file_path, line_name, shotpoint, source_id)
+                )
+                """
+            )
+            self._conn.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_postplot_4d_preplot_shotpoints_lookup
+                    ON postplot_4d_preplot_shotpoints(project_id, file_path, line_name)
+                """
+            )
 
         self._conn.commit()
 
@@ -1155,11 +1200,11 @@ class Database:
             return []
         rows = self._conn.execute(
             """
-            SELECT shotpoint, x, y, latitude, longitude
+            SELECT shotpoint, source_id, source_index, x, y, latitude, longitude
             FROM postplot_4d_preplot_shotpoints
             WHERE project_id=? AND file_path=? AND line_name=?
               AND file_mtime=? AND file_size=?
-            ORDER BY shotpoint
+            ORDER BY shotpoint, source_index, source_id
             """,
             (project_id, file_path, line_name, file_mtime, file_size),
         ).fetchall()
@@ -1170,6 +1215,8 @@ class Database:
                 y=float(row["y"]),
                 latitude=row["latitude"] or "",
                 longitude=row["longitude"] or "",
+                source_id=row["source_id"] or "",
+                source_index=int(row["source_index"] or 0),
             )
             for row in rows
         ]
@@ -1184,6 +1231,8 @@ class Database:
         file_size: int,
         shotpoint_interval_m: float,
         line_direction: str,
+        source_count: int,
+        source_separation_m: float,
         rows: list[BaselineShotpoint],
     ) -> None:
         project_id = self.get_project_id(project_name)
@@ -1202,9 +1251,10 @@ class Database:
                 """
                 INSERT INTO postplot_4d_preplot_shotpoints (
                     project_id, file_path, file_name, line_name, file_mtime, file_size,
-                    shotpoint, x, y, latitude, longitude,
-                    shotpoint_interval_m, line_direction, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    shotpoint, source_id, source_index, x, y, latitude, longitude,
+                    shotpoint_interval_m, line_direction, source_count,
+                    source_separation_m, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 [
                     (
@@ -1215,12 +1265,16 @@ class Database:
                         file_mtime,
                         file_size,
                         row.shotpoint,
+                        row.source_id,
+                        row.source_index,
                         row.x,
                         row.y,
                         row.latitude,
                         row.longitude,
                         shotpoint_interval_m,
                         line_direction,
+                        source_count,
+                        source_separation_m,
                         now,
                     )
                     for row in rows

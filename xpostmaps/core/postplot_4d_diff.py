@@ -31,6 +31,14 @@ _SHOTPOINT_INTERVAL_RE = re.compile(
     r"[^0-9+\-]*(?P<value>[-+]?\d+(?:\.\d+)?)",
     re.IGNORECASE,
 )
+_NUMBER_OF_SOURCES_RE = re.compile(
+    r"NUMBER\s+OF\s+SOURCES[^0-9+\-]*(?P<value>\d+)",
+    re.IGNORECASE,
+)
+_SOURCE_SEPARATION_RE = re.compile(
+    r"SOURCE\s+SEPARATION[^0-9+\-]*(?P<value>[-+]?\d+(?:\.\d+)?)",
+    re.IGNORECASE,
+)
 _PREPLOT_DIRECTION_RE = re.compile(
     r"(?:LINE[-\s_]*DIRECTION|LINE\s*HEADING|HEADING|AZIMUTH|BEARING|ROTATION)",
     re.IGNORECASE,
@@ -44,6 +52,19 @@ class BaselineShotpoint:
     y: float
     latitude: str = ""
     longitude: str = ""
+    source_id: str = ""
+    source_index: int = 0
+
+
+BaselineKey = int | tuple[int, str]
+
+
+@dataclass(frozen=True)
+class PreplotHeaderInfo:
+    shotpoint_interval_m: float | None = None
+    line_direction: str = ""
+    number_of_sources: int = 1
+    source_separation_m: float | None = None
 
 
 @dataclass(frozen=True)
@@ -87,13 +108,37 @@ def parse_shotpoint_interval_m(text: str) -> float | None:
     return value if value > 0 else None
 
 
-def _read_preplot_header_info(path: Path) -> tuple[float | None, str]:
+def parse_number_of_sources(text: str) -> int | None:
+    match = _NUMBER_OF_SOURCES_RE.search((text or "").replace(",", " "))
+    if not match:
+        return None
+    try:
+        value = int(match.group("value"))
+    except ValueError:
+        return None
+    return value if value > 0 else None
+
+
+def parse_source_separation_m(text: str) -> float | None:
+    match = _SOURCE_SEPARATION_RE.search((text or "").replace(",", " "))
+    if not match:
+        return None
+    try:
+        value = float(match.group("value"))
+    except ValueError:
+        return None
+    return value if value >= 0 else None
+
+
+def _read_preplot_generation_info(path: Path) -> PreplotHeaderInfo:
     interval: float | None = None
     line_direction = ""
+    number_of_sources = 1
+    source_separation_m: float | None = None
     try:
         handle = path.open("r", encoding="utf-8", errors="replace")
     except OSError:
-        return None, ""
+        return PreplotHeaderInfo()
     with handle:
         for raw_line in handle:
             line = raw_line.strip()
@@ -103,8 +148,13 @@ def _read_preplot_header_info(path: Path) -> tuple[float | None, str]:
                 break
             if interval is None:
                 interval = parse_shotpoint_interval_m(line)
+            parsed_sources = parse_number_of_sources(line)
+            if parsed_sources is not None:
+                number_of_sources = parsed_sources
+            if source_separation_m is None:
+                source_separation_m = parse_source_separation_m(line)
             if line.startswith("HC,"):
-                if interval is not None:
+                if interval is not None or source_separation_m is not None:
                     continue
                 continue
             direction_match = _PREPLOT_DIRECTION_RE.search(line)
@@ -112,9 +162,24 @@ def _read_preplot_header_info(path: Path) -> tuple[float | None, str]:
                 parsed = _parse_azimuth_degrees(line[direction_match.end() :])
                 if parsed is not None:
                     line_direction = f"{parsed:.2f}°"
-            if interval is not None and line_direction:
+            if (
+                interval is not None
+                and line_direction
+                and number_of_sources > 0
+                and (number_of_sources == 1 or source_separation_m is not None)
+            ):
                 break
-    return interval, line_direction
+    return PreplotHeaderInfo(
+        shotpoint_interval_m=interval,
+        line_direction=line_direction,
+        number_of_sources=number_of_sources,
+        source_separation_m=source_separation_m,
+    )
+
+
+def _read_preplot_header_info(path: Path) -> tuple[float | None, str]:
+    info = _read_preplot_generation_info(path)
+    return info.shotpoint_interval_m, info.line_direction
 
 
 def _azimuth_from_geometry(points: list[tuple[float, float]]) -> float | None:
@@ -207,6 +272,49 @@ def _baseline_from_segment(segment: LineSegment, baseline_name: str) -> dict[int
     return result
 
 
+def _source_index_from_id(source_id: str) -> int | None:
+    match = re.search(r"\d+", source_id or "")
+    if not match:
+        return None
+    try:
+        value = int(match.group(0))
+    except ValueError:
+        return None
+    return value if value > 0 else None
+
+
+def _source_key(source_id: str) -> str:
+    index = _source_index_from_id(source_id)
+    if index is not None:
+        return str(index)
+    return (source_id or "").strip().upper()
+
+
+def _source_id_for_index(source_index: int) -> str:
+    return f"G{source_index:02d}"
+
+
+def _baseline_key(point: BaselineShotpoint) -> BaselineKey:
+    if point.source_id or point.source_index:
+        return (point.shotpoint, _source_key(point.source_id or str(point.source_index)))
+    return point.shotpoint
+
+
+def _source_crossline_offset_m(source_index: int, source_count: int, separation_m: float) -> float:
+    center_index = (source_count + 1) / 2.0
+    return (center_index - source_index) * separation_m
+
+
+def _apply_crossline_offset(
+    x: float,
+    y: float,
+    offset_m: float,
+    azimuth_deg: float,
+) -> tuple[float, float]:
+    theta = math.radians(azimuth_deg)
+    return x + offset_m * math.cos(theta), y - offset_m * math.sin(theta)
+
+
 def load_baseline_shotpoints(
     map_data: MapData | None,
     settings: ProjectSettings | None,
@@ -217,7 +325,7 @@ def load_baseline_shotpoints(
     database=None,
     project_name: str = "",
     map_epsg: str = "",
-) -> dict[int, BaselineShotpoint]:
+) -> dict[BaselineKey, BaselineShotpoint]:
     if map_data is None:
         return {}
 
@@ -249,7 +357,7 @@ def load_baseline_shotpoints(
         map_data.navplan_segments if baseline_kind == "navplan" else map_data.preplot_segments
     )
     target_name = Path(baseline_file_name).name if baseline_file_name else ""
-    merged: dict[int, BaselineShotpoint] = {}
+    merged: dict[BaselineKey, BaselineShotpoint] = {}
     for segment in segments:
         if target_name and segment.file_name and Path(segment.file_name).name != target_name:
             continue
@@ -326,7 +434,7 @@ def resolve_diff_map_epsg(
 
 def resolve_line_azimuth_degrees(
     line_direction: str,
-    baseline: dict[int, BaselineShotpoint],
+    baseline: dict[BaselineKey, BaselineShotpoint],
     baseline_path: Path | None = None,
 ) -> float:
     for candidate in (line_direction, _load_baseline_line_direction(baseline_path)):
@@ -351,13 +459,14 @@ def _file_fingerprint(path: Path | None) -> tuple[str, float, int]:
 
 
 def _populate_generated_lat_lon(
-    generated: dict[int, BaselineShotpoint],
+    generated: dict[BaselineKey, BaselineShotpoint],
     map_epsg: str,
 ) -> None:
     code = normalize_epsg(map_epsg)
     if not code:
         return
-    ordered = [generated[shotpoint] for shotpoint in sorted(generated)]
+    ordered_items = list(generated.items())
+    ordered = [point for _, point in ordered_items]
     try:
         lons, lats = transform_coordinates(
             [point.x for point in ordered],
@@ -369,27 +478,34 @@ def _populate_generated_lat_lon(
         return
     if len(lons) != len(ordered) or len(lats) != len(ordered):
         return
-    for point, lat, lon in zip(ordered, lats, lons):
-        generated[point.shotpoint] = BaselineShotpoint(
+    for (key, point), lat, lon in zip(ordered_items, lats, lons):
+        generated[key] = BaselineShotpoint(
             shotpoint=point.shotpoint,
             x=point.x,
             y=point.y,
             latitude=f"{float(lat):.8f}",
             longitude=f"{float(lon):.8f}",
+            source_id=point.source_id,
+            source_index=point.source_index,
         )
 
 
 def _generate_preplot_shotpoints(
     controls: list[PositionRecord],
     map_epsg: str,
-) -> dict[int, BaselineShotpoint]:
+    source_count: int = 1,
+    source_separation_m: float | None = None,
+    line_azimuth_deg: float | None = None,
+) -> dict[BaselineKey, BaselineShotpoint]:
     ordered = sorted(
         [record for record in controls if record.point_num > 0],
         key=lambda record: record.point_num,
     )
-    generated: dict[int, BaselineShotpoint] = {}
+    generated: dict[BaselineKey, BaselineShotpoint] = {}
     if len(ordered) < 2:
         return generated
+    source_count = max(1, int(source_count or 1))
+    source_separation_m = float(source_separation_m or 0.0)
     for start, end in zip(ordered, ordered[1:]):
         sp0 = int(start.point_num)
         sp1 = int(end.point_num)
@@ -397,13 +513,39 @@ def _generate_preplot_shotpoints(
             continue
         step = 1 if sp1 > sp0 else -1
         span = sp1 - sp0
+        segment_azimuth = _azimuth_from_geometry([(start.x, start.y), (end.x, end.y)])
+        azimuth = segment_azimuth if segment_azimuth is not None else line_azimuth_deg
+        if azimuth is None:
+            azimuth = 0.0
         for shotpoint in range(sp0, sp1 + step, step):
             fraction = (shotpoint - sp0) / span
-            generated[shotpoint] = BaselineShotpoint(
-                shotpoint=shotpoint,
-                x=start.x + (end.x - start.x) * fraction,
-                y=start.y + (end.y - start.y) * fraction,
-            )
+            center_x = start.x + (end.x - start.x) * fraction
+            center_y = start.y + (end.y - start.y) * fraction
+            if source_count <= 1:
+                generated[shotpoint] = BaselineShotpoint(
+                    shotpoint=shotpoint,
+                    x=center_x,
+                    y=center_y,
+                    source_id="",
+                    source_index=0,
+                )
+                continue
+            for source_index in range(1, source_count + 1):
+                offset = _source_crossline_offset_m(
+                    source_index,
+                    source_count,
+                    source_separation_m,
+                )
+                x, y = _apply_crossline_offset(center_x, center_y, offset, azimuth)
+                source_id = _source_id_for_index(source_index)
+                point = BaselineShotpoint(
+                    shotpoint=shotpoint,
+                    x=x,
+                    y=y,
+                    source_id=source_id,
+                    source_index=source_index,
+                )
+                generated[_baseline_key(point)] = point
     _populate_generated_lat_lon(generated, map_epsg)
     return generated
 
@@ -416,7 +558,7 @@ def _generated_preplot_baseline(
     database=None,
     project_name: str = "",
     map_epsg: str = "",
-) -> dict[int, BaselineShotpoint]:
+) -> dict[BaselineKey, BaselineShotpoint]:
     file_path, file_mtime, file_size = _file_fingerprint(path)
     line_name = controls[0].line_name or baseline_name
     if database is not None and project_name.strip():
@@ -428,12 +570,19 @@ def _generated_preplot_baseline(
             file_size,
         )
         if cached:
-            return {point.shotpoint: point for point in cached}
+            return {_baseline_key(point): point for point in cached}
 
-    interval_m, header_direction = _read_preplot_header_info(path)
-    if interval_m is None:
+    header_info = _read_preplot_generation_info(path)
+    if header_info.shotpoint_interval_m is None:
         return {}
-    generated = _generate_preplot_shotpoints(controls, map_epsg)
+    header_azimuth = _parse_azimuth_degrees(header_info.line_direction)
+    generated = _generate_preplot_shotpoints(
+        controls,
+        map_epsg,
+        source_count=header_info.number_of_sources,
+        source_separation_m=header_info.source_separation_m,
+        line_azimuth_deg=header_azimuth,
+    )
     if not generated:
         return {}
     if database is not None and project_name.strip():
@@ -444,9 +593,14 @@ def _generated_preplot_baseline(
             line_name,
             file_mtime,
             file_size,
-            interval_m,
-            header_direction,
-            [generated[shotpoint] for shotpoint in sorted(generated)],
+            header_info.shotpoint_interval_m,
+            header_info.line_direction,
+            header_info.number_of_sources,
+            header_info.source_separation_m or 0.0,
+            sorted(
+                generated.values(),
+                key=lambda point: (point.shotpoint, point.source_index, point.source_id),
+            ),
         )
     return generated
 
@@ -459,7 +613,7 @@ def _generated_preplot_baseline_from_records(
     database=None,
     project_name: str = "",
     map_epsg: str = "",
-) -> dict[int, BaselineShotpoint]:
+) -> dict[BaselineKey, BaselineShotpoint]:
     controls = [
         record
         for record in records
@@ -487,7 +641,7 @@ def _generated_preplot_baseline_from_segment(
     database=None,
     project_name: str = "",
     map_epsg: str = "",
-) -> dict[int, BaselineShotpoint]:
+) -> dict[BaselineKey, BaselineShotpoint]:
     if path is None or not _line_names_match(baseline_name, segment.line_name):
         return {}
     sparse = _baseline_from_segment(segment, baseline_name)
@@ -529,7 +683,7 @@ def _offset_components(
 
 
 def compute_postplot_4d_diff_rows(
-    baseline: dict[int, BaselineShotpoint],
+    baseline: dict[BaselineKey, BaselineShotpoint],
     sources: dict[int, PositionRecord],
     line_direction: str,
     *,
@@ -541,9 +695,14 @@ def compute_postplot_4d_diff_rows(
     azimuth = resolve_line_azimuth_degrees(line_direction, baseline, baseline_path)
 
     rows: list[Postplot4DDiffRow] = []
-    for shotpoint in sorted(set(baseline) & set(sources)):
-        base = baseline[shotpoint]
+    for shotpoint in sorted(sources):
         source = sources[shotpoint]
+        source_key = _source_key(source.source_id)
+        base = baseline.get((shotpoint, source_key))
+        if base is None:
+            base = baseline.get(shotpoint)
+        if base is None:
+            continue
         delta_e = source.x - base.x
         delta_n = source.y - base.y
         inline, crossline, radial = _offset_components(delta_e, delta_n, azimuth)

@@ -12,7 +12,9 @@ from xpostmaps.core.postplot_4d_diff import (
     _generate_preplot_shotpoints,
     _read_preplot_header_info,
     compute_postplot_4d_diff_rows,
+    parse_number_of_sources,
     parse_shotpoint_interval_m,
+    parse_source_separation_m,
     resolve_line_azimuth_degrees,
     source_shotpoints_for_match,
 )
@@ -48,6 +50,13 @@ def test_shotpoint_interval_parser_handles_sample_header_styles() -> None:
     assert parse_shotpoint_interval_m("H2600 SHOT POINT INTERVAL.....: 25.000000") == 25.0
     assert parse_shotpoint_interval_m("H2600STREAMER SEPARATION       112.50 m") is None
     assert parse_shotpoint_interval_m("H2600SHOT INCREMENT ..........: 1") is None
+
+
+def test_preplot_source_header_parsers_handle_sample_styles() -> None:
+    assert parse_number_of_sources("H2600NUMBER OF SOURCES......: 3") == 3
+    assert parse_number_of_sources("CC,1,0,0,NUMBER OF SOURCES      2") == 2
+    assert parse_source_separation_m("H2600SOURCE SEPARATION       50.00 m") == 50.0
+    assert parse_source_separation_m("CC,1,0,0,SOURCE SEPARATION      37.50 m") == 37.5
 
 
 def test_sample_preplot_headers_parse_interval_and_heading() -> None:
@@ -93,6 +102,81 @@ def test_generated_preplot_shotpoints_interpolate_each_integer_shotpoint() -> No
     assert sorted(generated) == [100, 101, 102, 103, 104]
     assert generated[102].x == 20.0
     assert generated[102].y == 0.0
+
+
+def test_generated_preplot_shotpoints_offsets_multiple_sources_crossline() -> None:
+    controls = [
+        PositionRecord(
+            file_name="preplot.p190",
+            record_type=RecordType.PREPLOT,
+            line_name="LINE01",
+            vessel_id="",
+            source_id="",
+            point_num=100,
+            x=0.0,
+            y=0.0,
+        ),
+        PositionRecord(
+            file_name="preplot.p190",
+            record_type=RecordType.PREPLOT,
+            line_name="LINE01",
+            vessel_id="",
+            source_id="",
+            point_num=101,
+            x=0.0,
+            y=25.0,
+        ),
+    ]
+    generated = _generate_preplot_shotpoints(
+        controls,
+        "",
+        source_count=2,
+        source_separation_m=50.0,
+        line_azimuth_deg=0.0,
+    )
+    source_1 = generated[(100, "1")]
+    source_2 = generated[(100, "2")]
+    assert source_1.source_id == "G01"
+    assert source_2.source_id == "G02"
+    assert abs(source_1.x - 25.0) < 1e-6
+    assert abs(source_1.y - 0.0) < 1e-6
+    assert abs(source_2.x + 25.0) < 1e-6
+    assert abs(source_2.y - 0.0) < 1e-6
+
+
+def test_diff_rows_compare_firing_source_to_matching_preplot_source_position() -> None:
+    baseline = {
+        (100, "1"): BaselineShotpoint(
+            shotpoint=100,
+            x=25.0,
+            y=0.0,
+            source_id="G01",
+            source_index=1,
+        ),
+        (100, "2"): BaselineShotpoint(
+            shotpoint=100,
+            x=-25.0,
+            y=0.0,
+            source_id="G02",
+            source_index=2,
+        ),
+    }
+    sources = {
+        100: PositionRecord(
+            file_name="line.p111",
+            record_type=RecordType.SOURCE,
+            line_name="LINE01",
+            vessel_id="",
+            source_id="G02",
+            point_num=100,
+            x=-20.0,
+            y=0.0,
+        )
+    }
+    rows = compute_postplot_4d_diff_rows(baseline, sources, "0.0")
+    assert len(rows) == 1
+    assert rows[0].baseline_x == -25.0
+    assert abs(rows[0].crossline_m - 5.0) < 1e-6
 
 
 def test_p111_preplot_parser_uses_actual_control_shotpoints() -> None:
