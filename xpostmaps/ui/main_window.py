@@ -384,6 +384,7 @@ class MainWindow(QMainWindow):
             on_baseline_changed=self._on_postplot_4d_baseline_changed,
             project_name=self._settings.name,
             positions_provider=self._current_positions,
+            map_data_provider=lambda: self._map_data,
             database=self._db,
         )
         self._track_left_dialog("postplot_4d", dialog)
@@ -453,6 +454,14 @@ class MainWindow(QMainWindow):
             parsed_names = sorted({seq.file_name for seq in map_data.sequences if seq.file_name})
         if parsed_names:
             self._db.delete_postplot_4d_diffs_for_files(name, set(parsed_names))
+        preplot_refs = {
+            entry.file_path
+            for entry in self._settings.preplot_catalog
+            if entry.file_path
+        }
+        preplot_refs.update(raw for raw in self._settings.preplot_files if raw)
+        if preplot_refs:
+            self._db.delete_postplot_4d_preplot_shotpoints_for_files(name, preplot_refs)
 
     @staticmethod
     def _summary_value(values: set[str]) -> str:

@@ -1,3 +1,6 @@
+from pathlib import Path
+import math
+
 from xpostmaps.core.coord_format import (
     dms_compact_to_decimal,
     format_dd_mm,
@@ -6,11 +9,15 @@ from xpostmaps.core.coord_format import (
 from xpostmaps.core.models import PositionRecord, RecordType
 from xpostmaps.core.postplot_4d_diff import (
     BaselineShotpoint,
+    _generate_preplot_shotpoints,
+    _read_preplot_header_info,
     compute_postplot_4d_diff_rows,
+    parse_shotpoint_interval_m,
     resolve_line_azimuth_degrees,
     source_shotpoints_for_match,
 )
 from xpostmaps.core.postplot_4d_matching import Postplot4DMatchRow
+from xpostmaps.parsers.preplot_parser import parse_preplot_file
 
 
 def test_decimal_lat_lon_formats_to_dd_mm() -> None:
@@ -30,6 +37,92 @@ def test_dms_compact_parses_navplan_style_values() -> None:
 def test_format_geo_display_uses_decimal_strings() -> None:
     assert format_geo_display("59.60086832", 0.0, is_latitude=True) == "59 36.05 N"
     assert format_geo_display("1.1701019", 0.0, is_latitude=False) == "1 10.21 E"
+
+
+def test_shotpoint_interval_parser_handles_sample_header_styles() -> None:
+    assert parse_shotpoint_interval_m(
+        "CC,1,0,0,SHOT POINT INTERVAL       16.667 m"
+    ) == 16.667
+    assert parse_shotpoint_interval_m("H2600SHOT POINT INTERVAL       25.0 m") == 25.0
+    assert parse_shotpoint_interval_m("H2600SHOT INTERVAL ...........: 25.0000") == 25.0
+    assert parse_shotpoint_interval_m("H2600 SHOT POINT INTERVAL.....: 25.000000") == 25.0
+    assert parse_shotpoint_interval_m("H2600STREAMER SEPARATION       112.50 m") is None
+    assert parse_shotpoint_interval_m("H2600SHOT INCREMENT ..........: 1") is None
+
+
+def test_sample_preplot_headers_parse_interval_and_heading() -> None:
+    interval, heading = _read_preplot_header_info(
+        Path("Sample Preplots/7027_S_TRINAV_v2.p190")
+    )
+    assert interval == 25.0
+    assert heading == "125.00°"
+
+
+def test_4030_preplot_header_parses_shot_interval_and_rotation() -> None:
+    interval, heading = _read_preplot_header_info(
+        Path("4D/4030/Preplot/4030_Mariner4D_Preplots_v2.190")
+    )
+    assert interval == 25.0
+    assert heading == "123.10°"
+
+
+def test_generated_preplot_shotpoints_interpolate_each_integer_shotpoint() -> None:
+    controls = [
+        PositionRecord(
+            file_name="preplot.p190",
+            record_type=RecordType.PREPLOT,
+            line_name="LINE01",
+            vessel_id="",
+            source_id="",
+            point_num=100,
+            x=0.0,
+            y=0.0,
+        ),
+        PositionRecord(
+            file_name="preplot.p190",
+            record_type=RecordType.PREPLOT,
+            line_name="LINE01",
+            vessel_id="",
+            source_id="",
+            point_num=104,
+            x=40.0,
+            y=0.0,
+        ),
+    ]
+    generated = _generate_preplot_shotpoints(controls, "")
+    assert sorted(generated) == [100, 101, 102, 103, 104]
+    assert generated[102].x == 20.0
+    assert generated[102].y == 0.0
+
+
+def test_p111_preplot_parser_uses_actual_control_shotpoints() -> None:
+    result = parse_preplot_file(Path("Sample Preplots/TTUD-13D.DL2_3.WGS84.p111"))
+    controls = [
+        record
+        for record in result.records
+        if record.line_name == "6018"
+    ]
+    assert [record.point_num for record in controls] == [1974, 4500, 7529]
+    first, middle = controls[0], controls[1]
+    distance = math.hypot(middle.x - first.x, middle.y - first.y)
+    assert abs(distance / (middle.point_num - first.point_num) - 16.667) < 1e-3
+
+
+def test_4030_generated_preplot_position_matches_interval_and_rotation() -> None:
+    preplot = Path("4D/4030/Preplot/4030_Mariner4D_Preplots_v2.190")
+    result = parse_preplot_file(preplot)
+    controls = [
+        record
+        for record in result.records
+        if record.line_name == "0103643A"
+    ]
+    generated = _generate_preplot_shotpoints(controls, "")
+    sp = 1536
+    start = controls[0]
+    expected_x = start.x + (sp - start.point_num) * 25.0 * math.sin(math.radians(123.1))
+    expected_y = start.y + (sp - start.point_num) * 25.0 * math.cos(math.radians(123.1))
+    assert abs(generated[sp].x - expected_x) < 0.02
+    assert abs(generated[sp].y - expected_y) < 0.02
 
 
 def test_offset_components_use_line_heading_for_4030_sp1536() -> None:

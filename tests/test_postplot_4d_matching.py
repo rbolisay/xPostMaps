@@ -79,6 +79,178 @@ def test_preplot_matching_handles_p111_and_p190_line_names() -> None:
     assert ("51892", "51892") in matched
 
 
+def test_preplot_matching_does_not_use_project_or_sequence_number_tokens() -> None:
+    map_data = MapData(
+        sequences=[
+            LineSequence(
+                seq_id="15762317027.p190|7027|15762317027",
+                file_name="15762317027_7027.p190",
+                sequence_no="7027",
+                line_name="15762317027",
+                subline="a7027",
+                line_direction="305.0",
+                first_sp=54409,
+                last_sp=54899,
+                record_type=RecordType.SOURCE,
+            )
+        ],
+        preplot_segments=[
+            LineSegment(
+                line_name="51892",
+                record_type=RecordType.PREPLOT,
+                file_name="7027_S_TRINAV_v2.p190",
+            )
+        ],
+    )
+
+    rows = build_postplot_4d_rows(map_data, ProjectSettings(), "preplot")
+
+    assert len(rows) == 1
+    assert not rows[0].has_match
+    assert rows[0].baseline_name == "51892"
+
+
+def test_preplot_matching_handles_trinav_embedded_line_ids() -> None:
+    map_data = MapData(
+        sequences=[
+            LineSequence(
+                seq_id="3001.51892113001.a3001.GFUNREG.p111|3001|51892113001",
+                file_name="3001.51892113001.a3001.GFUNREG.p111",
+                sequence_no="3001",
+                line_name="51892113001",
+                subline="a3001",
+                line_direction="305.0",
+                first_sp=100,
+                last_sp=200,
+                record_type=RecordType.SOURCE,
+            ),
+            LineSequence(
+                seq_id="3002.51980113002.a3002.GFUNREG.p111|3002|51980113002",
+                file_name="3002.51980113002.a3002.GFUNREG.p111",
+                sequence_no="3002",
+                line_name="51980113002",
+                subline="a3002",
+                line_direction="305.0",
+                first_sp=100,
+                last_sp=200,
+                record_type=RecordType.SOURCE,
+            ),
+        ],
+        preplot_segments=[
+            LineSegment(
+                line_name="51892",
+                record_type=RecordType.PREPLOT,
+                file_name="7027_S_TRINAV_v2.p190",
+            ),
+            LineSegment(
+                line_name="51980",
+                record_type=RecordType.PREPLOT,
+                file_name="7027_S_TRINAV_v2.p190",
+            ),
+            LineSegment(
+                line_name="51900",
+                record_type=RecordType.PREPLOT,
+                file_name="7027_S_TRINAV_v2.p190",
+            ),
+        ],
+    )
+
+    rows = build_postplot_4d_rows(map_data, ProjectSettings(), "preplot")
+    matched = {(row.baseline_name, row.line_name, row.sequence_no) for row in rows if row.has_match}
+
+    assert matched == {
+        ("51892", "51892113001", "3001"),
+        ("51980", "51980113002", "3002"),
+    }
+    assert ("51900", "", "") not in matched
+
+
+def test_preplot_matching_handles_trinav_l_suffix_line_ids() -> None:
+    map_data = MapData(
+        sequences=[
+            LineSequence(
+                seq_id="3224.531401L0224.a3224.GFUNREG.p111|3224|531401L0224",
+                file_name="3224.531401L0224.a3224.GFUNREG.p111",
+                sequence_no="3224",
+                line_name="531401L0224",
+                subline="a3224",
+                line_direction="305.0",
+                first_sp=100,
+                last_sp=200,
+                record_type=RecordType.SOURCE,
+            ),
+            LineSequence(
+                seq_id="3227.531242L0227.a3227.GFUNREG.p111|3227|531242L0227",
+                file_name="3227.531242L0227.a3227.GFUNREG.p111",
+                sequence_no="3227",
+                line_name="531242L0227",
+                subline="a3227",
+                line_direction="305.0",
+                first_sp=100,
+                last_sp=200,
+                record_type=RecordType.SOURCE,
+            ),
+        ],
+        preplot_segments=[
+            LineSegment(
+                line_name="53140",
+                record_type=RecordType.PREPLOT,
+                file_name="7027_S_TRINAV_v2.p190",
+            ),
+            LineSegment(
+                line_name="53124",
+                record_type=RecordType.PREPLOT,
+                file_name="7027_S_TRINAV_v2.p190",
+            ),
+        ],
+    )
+
+    rows = build_postplot_4d_rows(map_data, ProjectSettings(), "preplot")
+    matched = {(row.baseline_name, row.line_name) for row in rows if row.has_match}
+
+    assert matched == {
+        ("53140", "531401L0224"),
+        ("53124", "531242L0227"),
+    }
+
+
+def test_preplot_prefix_matching_prefers_longest_preplot_id() -> None:
+    map_data = MapData(
+        sequences=[
+            LineSequence(
+                seq_id="3004.51988113004.a3004.GFUNREG.p111|3004|51988113004",
+                file_name="3004.51988113004.a3004.GFUNREG.p111",
+                sequence_no="3004",
+                line_name="51988113004",
+                subline="a3004",
+                line_direction="305.0",
+                first_sp=100,
+                last_sp=200,
+                record_type=RecordType.SOURCE,
+            )
+        ],
+        preplot_segments=[
+            LineSegment(
+                line_name="51980",
+                record_type=RecordType.PREPLOT,
+                file_name="7027_S_TRINAV_v2.p190",
+            ),
+            LineSegment(
+                line_name="51988",
+                record_type=RecordType.PREPLOT,
+                file_name="7027_S_TRINAV_v2.p190",
+            ),
+        ],
+    )
+
+    rows = build_postplot_4d_rows(map_data, ProjectSettings(), "preplot")
+    matched = [row for row in rows if row.has_match]
+
+    assert len(matched) == 1
+    assert matched[0].baseline_name == "51988"
+    assert matched[0].line_name == "51988113004"
+
+
 def test_navplan_matching_ignores_file_format_tokens() -> None:
     settings = ProjectSettings(
         navplan_catalog=[

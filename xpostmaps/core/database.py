@@ -14,7 +14,11 @@ from xpostmaps.core.navplan_catalog_utils import (
     navplan_catalog_to_json,
 )
 from xpostmaps.core.preplot_catalog_utils import catalog_from_json, catalog_to_json
-from xpostmaps.core.postplot_4d_diff import Postplot4DDiffRow, diff_row_from_dict
+from xpostmaps.core.postplot_4d_diff import (
+    BaselineShotpoint,
+    Postplot4DDiffRow,
+    diff_row_from_dict,
+)
 from xpostmaps.core.sequence_utils import nav_cache_from_json, nav_cache_to_json
 from xpostmaps.core.models import (
     DisplayMode,
@@ -272,6 +276,35 @@ class Database:
             """
             CREATE INDEX IF NOT EXISTS idx_postplot_4d_diffs_project
                 ON postplot_4d_diffs(project_id)
+            """
+        )
+        self._conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS postplot_4d_preplot_shotpoints (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                project_id INTEGER NOT NULL,
+                file_path TEXT NOT NULL,
+                file_name TEXT NOT NULL,
+                line_name TEXT NOT NULL,
+                file_mtime REAL NOT NULL,
+                file_size INTEGER NOT NULL,
+                shotpoint INTEGER NOT NULL,
+                x REAL NOT NULL,
+                y REAL NOT NULL,
+                latitude TEXT DEFAULT '',
+                longitude TEXT DEFAULT '',
+                shotpoint_interval_m REAL NOT NULL,
+                line_direction TEXT DEFAULT '',
+                updated_at TEXT NOT NULL,
+                FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE,
+                UNIQUE(project_id, file_path, line_name, shotpoint)
+            )
+            """
+        )
+        self._conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_postplot_4d_preplot_shotpoints_lookup
+                ON postplot_4d_preplot_shotpoints(project_id, file_path, line_name)
             """
         )
 
@@ -1106,6 +1139,112 @@ class Database:
                 WHERE project_id=? AND sequence_id LIKE ?
                 """,
                 (project_id, pattern),
+            )
+        self._conn.commit()
+
+    def load_postplot_4d_preplot_shotpoints(
+        self,
+        project_name: str,
+        file_path: str,
+        line_name: str,
+        file_mtime: float,
+        file_size: int,
+    ) -> list[BaselineShotpoint]:
+        project_id = self.get_project_id(project_name)
+        if project_id is None:
+            return []
+        rows = self._conn.execute(
+            """
+            SELECT shotpoint, x, y, latitude, longitude
+            FROM postplot_4d_preplot_shotpoints
+            WHERE project_id=? AND file_path=? AND line_name=?
+              AND file_mtime=? AND file_size=?
+            ORDER BY shotpoint
+            """,
+            (project_id, file_path, line_name, file_mtime, file_size),
+        ).fetchall()
+        return [
+            BaselineShotpoint(
+                shotpoint=int(row["shotpoint"]),
+                x=float(row["x"]),
+                y=float(row["y"]),
+                latitude=row["latitude"] or "",
+                longitude=row["longitude"] or "",
+            )
+            for row in rows
+        ]
+
+    def save_postplot_4d_preplot_shotpoints(
+        self,
+        project_name: str,
+        file_path: str,
+        file_name: str,
+        line_name: str,
+        file_mtime: float,
+        file_size: int,
+        shotpoint_interval_m: float,
+        line_direction: str,
+        rows: list[BaselineShotpoint],
+    ) -> None:
+        project_id = self.get_project_id(project_name)
+        if project_id is None:
+            return
+        now = self._now()
+        self._conn.execute(
+            """
+            DELETE FROM postplot_4d_preplot_shotpoints
+            WHERE project_id=? AND file_path=? AND line_name=?
+            """,
+            (project_id, file_path, line_name),
+        )
+        if rows:
+            self._conn.executemany(
+                """
+                INSERT INTO postplot_4d_preplot_shotpoints (
+                    project_id, file_path, file_name, line_name, file_mtime, file_size,
+                    shotpoint, x, y, latitude, longitude,
+                    shotpoint_interval_m, line_direction, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                [
+                    (
+                        project_id,
+                        file_path,
+                        file_name,
+                        line_name,
+                        file_mtime,
+                        file_size,
+                        row.shotpoint,
+                        row.x,
+                        row.y,
+                        row.latitude,
+                        row.longitude,
+                        shotpoint_interval_m,
+                        line_direction,
+                        now,
+                    )
+                    for row in rows
+                ],
+            )
+        self._conn.commit()
+
+    def delete_postplot_4d_preplot_shotpoints_for_files(
+        self,
+        project_name: str,
+        file_refs: set[str],
+    ) -> None:
+        if not file_refs:
+            return
+        project_id = self.get_project_id(project_name)
+        if project_id is None:
+            return
+        for file_ref in file_refs:
+            self._conn.execute(
+                """
+                DELETE FROM postplot_4d_preplot_shotpoints
+                WHERE project_id=? AND (file_path=? OR file_name=?)
+                """,
+                (project_id, file_ref, Path(file_ref).name),
             )
         self._conn.commit()
 

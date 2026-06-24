@@ -191,6 +191,7 @@ def _legend_section_toolbar_button(text: str, *, kind: str) -> QPushButton:
     reference = "Add PostPlot Row" if kind == "add" else "Remove Selected"
     btn = QPushButton(text)
     btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+    btn.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
     pad = 28
     btn.setMinimumWidth(btn.fontMetrics().horizontalAdvance(reference) + pad)
     return btn
@@ -1217,6 +1218,7 @@ class LegendDialog:
             rem_post_btn.clicked.connect(remove_post_row)
             post_btns.addWidget(add_post_btn)
             post_btns.addWidget(rem_post_btn)
+            post_btns.addStretch()
 
             layout.addLayout(post_btns)
             layout.addWidget(post_table)

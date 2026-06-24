@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 import time
 from datetime import datetime
 from typing import Callable, Literal
@@ -147,6 +148,43 @@ def _format_offset(value: float) -> str:
     return f"{value:.3f}"
 
 
+def _natural_sort_key(text: str) -> tuple:
+    parts = re.split(r"(\d+)", (text or "").upper())
+    key: list[int | str] = []
+    for part in parts:
+        if part.isdigit():
+            key.append(int(part))
+        else:
+            key.append(part)
+    return tuple(key)
+
+
+def _sort_match_rows(
+    rows: list[Postplot4DMatchRow],
+    column: int,
+    order: Qt.SortOrder,
+) -> list[Postplot4DMatchRow]:
+    reverse = order == Qt.SortOrder.DescendingOrder
+
+    if column == 3:
+        with_seq = [row for row in rows if row.has_match and row.sequence_no.strip()]
+        without_seq = [row for row in rows if row not in with_seq]
+
+        def seq_key(row: Postplot4DMatchRow) -> tuple[int | str, ...]:
+            try:
+                return (int(row.sequence_no), row.sequence_no.upper())
+            except ValueError:
+                return (-1, row.sequence_no.upper())
+
+        return sorted(with_seq, key=seq_key, reverse=reverse) + without_seq
+
+    return sorted(
+        rows,
+        key=lambda row: (_natural_sort_key(row.baseline_name), row.baseline_name.upper()),
+        reverse=reverse,
+    )
+
+
 def _diff_title(match_row: Postplot4DMatchRow) -> str:
     if match_row.subline:
         return f"{match_row.line_name}.{match_row.subline} Diff Stat Table"
@@ -178,30 +216,50 @@ class Postplot4DDialog:
         on_baseline_changed: Callable[[], None] | None = None,
         project_name: str = "",
         positions_provider: Callable[[], list[PositionRecord]] | None = None,
+        map_data_provider: Callable[[], MapData | None] | None = None,
         database: Database | None = None,
         on_diffs_saved: Callable[[], None] | None = None,
     ) -> SingleInstanceDialog:
         saved_baseline = settings.postplot_4d_baseline
         if saved_baseline not in ("navplan", "preplot"):
-            saved_baseline = "navplan" if map_data and map_data.navplan_segments else "preplot"
-        state: dict[str, BaselineKind | CoordMode | Postplot4DMatchRow | None | str] = {
+            saved_baseline = (
+                "navplan"
+                if map_data and map_data.navplan_segments
+                else "preplot"
+            )
+        state: dict[
+            str,
+            BaselineKind | CoordMode | Postplot4DMatchRow | Qt.SortOrder | None | str | int,
+        ] = {
             "baseline": saved_baseline,
             "coord_mode": "en",
             "active_match": None,
             "map_epsg": resolve_diff_map_epsg(map_data, settings),
+            "sort_column": 0,
+            "sort_order": Qt.SortOrder.AscendingOrder,
         }
         row_cache: dict[BaselineKind, list[Postplot4DMatchRow]] = {}
         diff_rows: list[Postplot4DDiffRow] = []
         host_dialog: SingleInstanceDialog | None = None
 
+        def current_map_data() -> MapData | None:
+            if map_data_provider is not None:
+                return map_data_provider()
+            return map_data
+
         def rows_for(kind: BaselineKind) -> list[Postplot4DMatchRow]:
             if kind not in row_cache:
-                row_cache[kind] = build_postplot_4d_rows(map_data, settings, kind)
+                row_cache[kind] = build_postplot_4d_rows(current_map_data(), settings, kind)
             return row_cache[kind]
 
+        def invalidate_row_cache() -> None:
+            row_cache.clear()
+            state["map_epsg"] = resolve_diff_map_epsg(current_map_data(), settings)
+
         def positions() -> list[PositionRecord]:
+            active_map_data = current_map_data()
             if positions_provider is None:
-                return list(map_data.positions) if map_data else []
+                return list(active_map_data.positions) if active_map_data else []
             return list(positions_provider())
 
         def persist_diff_rows(match_row: Postplot4DMatchRow, rows: list[Postplot4DDiffRow]) -> None:
@@ -220,7 +278,11 @@ class Postplot4DDialog:
         def load_or_calculate_diffs(
             match_row: Postplot4DMatchRow,
         ) -> tuple[list[Postplot4DDiffRow], str]:
-            if database is not None and project_name.strip():
+            if (
+                match_row.baseline_kind != "preplot"
+                and database is not None
+                and project_name.strip()
+            ):
                 stored = database.load_postplot_4d_diffs(
                     project_name.strip(),
                     match_row.baseline_kind,
@@ -228,7 +290,14 @@ class Postplot4DDialog:
                 )
                 if stored:
                     return stored, "loaded"
-            rows = calculate_match_diff_rows(map_data, settings, positions(), match_row)
+            rows = calculate_match_diff_rows(
+                current_map_data(),
+                settings,
+                positions(),
+                match_row,
+                database=database,
+                project_name=project_name,
+            )
             persist_diff_rows(match_row, rows)
             return rows, "calculated"
 
@@ -364,10 +433,12 @@ class Postplot4DDialog:
             started = time.perf_counter()
             try:
                 diff_rows = calculate_match_diff_rows(
-                    map_data,
+                    current_map_data(),
                     settings,
                     positions(),
                     match_row,
+                    database=database,
+                    project_name=project_name,
                 )
                 persist_diff_rows(match_row, diff_rows)
                 refresh_diff_table()
@@ -422,9 +493,17 @@ class Postplot4DDialog:
 
         def refresh_table() -> None:
             rows = rows_for(state["baseline"])  # type: ignore[arg-type]
+            sort_column = int(state.get("sort_column", 0))
+            sort_order = state.get("sort_order", Qt.SortOrder.AscendingOrder)
+            if not isinstance(sort_order, Qt.SortOrder):
+                sort_order = Qt.SortOrder.AscendingOrder
+            if sort_column in (0, 3):
+                rows = _sort_match_rows(rows, sort_column, sort_order)
             name_header = (
                 "Navplan Name" if state["baseline"] == "navplan" else "Preplot Name"
             )
+            header = table.horizontalHeader()
+            header.blockSignals(True)
             table.setUpdatesEnabled(False)
             table.setSortingEnabled(False)
             table.setHorizontalHeaderLabels(
@@ -439,6 +518,9 @@ class Postplot4DDialog:
                     "Diff Stat",
                 ]
             )
+            header.setSortIndicatorShown(True)
+            if sort_column in (0, 3):
+                header.setSortIndicator(sort_column, sort_order)
             table.setRowCount(len(rows))
             try:
                 for row_idx, match_row in enumerate(rows):
@@ -467,16 +549,37 @@ class Postplot4DDialog:
                     table.setCellWidget(row_idx, 7, diff_btn)
             finally:
                 table.setUpdatesEnabled(True)
+                header.blockSignals(False)
             summary.setText(
                 f"{len(rows)} row(s) from {state['baseline']} baseline, "
                 f"{sum(1 for row in rows if row.has_match)} matched imported line(s)"
             )
             _fit_table(table)
 
+        def on_main_header_clicked(section: int) -> None:
+            if section not in (0, 3):
+                return
+            current_column = int(state.get("sort_column", 0))
+            current_order = state.get("sort_order", Qt.SortOrder.AscendingOrder)
+            if not isinstance(current_order, Qt.SortOrder):
+                current_order = Qt.SortOrder.AscendingOrder
+            if current_column == section:
+                state["sort_order"] = (
+                    Qt.SortOrder.DescendingOrder
+                    if current_order == Qt.SortOrder.AscendingOrder
+                    else Qt.SortOrder.AscendingOrder
+                )
+            else:
+                state["sort_column"] = section
+                state["sort_order"] = Qt.SortOrder.AscendingOrder
+            refresh_table()
+
         def set_baseline(kind: BaselineKind) -> None:
             if state["baseline"] == kind:
                 return
             state["baseline"] = kind
+            state["sort_column"] = 0
+            state["sort_order"] = Qt.SortOrder.AscendingOrder
             settings.postplot_4d_baseline = kind
             if on_baseline_changed is not None:
                 on_baseline_changed()
@@ -528,6 +631,7 @@ class Postplot4DDialog:
 
             table = QTableWidget(0, 8)
             _configure_table(table)
+            table.horizontalHeader().sectionClicked.connect(on_main_header_clicked)
             main_layout.addWidget(table, stretch=1)
 
             close_row = QHBoxLayout()
@@ -578,6 +682,7 @@ class Postplot4DDialog:
             stack.addWidget(diff_page)
             layout.addWidget(stack, stretch=1)
 
+            invalidate_row_cache()
             if isinstance(state["active_match"], Postplot4DMatchRow):
                 show_diff_stat(state["active_match"])
             else:

@@ -25,6 +25,9 @@ _LINE_FAMILY_COMPACT_RE = re.compile(
     re.IGNORECASE,
 )
 _LEADING_PREFIX_LINE_RE = re.compile(r"^[1-9](?P<rest>\d{6}[A-Z]\d?)$", re.IGNORECASE)
+_TRINAV_LINE_SUFFIX_RE = re.compile(r"^(?P<root>\d+)113\d+$")
+_TRINAV_LINE_L_SUFFIX_RE = re.compile(r"^(?P<root>\d+)[1-9]L\d+$", re.IGNORECASE)
+_TRINAV_EMBEDDED_SUFFIX_RE = re.compile(r"^(?:113|[1-9]L|[1-9]\d+)\d+$", re.IGNORECASE)
 _STOP_TOKENS = {
     "H",
     "LINE",
@@ -113,6 +116,55 @@ def _leading_prefix_alias_forms(text: str) -> set[str]:
     return forms
 
 
+def _reverse_leading_prefix_alias_forms(text: str) -> set[str]:
+    """Map baseline names like 0114451U to common acquired prefixes 8114451U, 5114451U, …"""
+    forms: set[str] = set()
+    for raw in (text or "", *_tokens(text), *_line_family_forms(text)):
+        value = raw.strip().upper().strip("/\\ .:")
+        if not value.startswith("0") or len(value) < 4:
+            continue
+        rest = value[1:]
+        if not rest or not rest[0].isdigit():
+            continue
+        for prefix in "123456789":
+            forms.add(f"{prefix}{rest}")
+    return forms
+
+
+def _preplot_line_root_forms(text: str) -> set[str]:
+    """Extract embedded preplot line ids from acquired names like 51892113001."""
+    forms: set[str] = set()
+    for raw in (text or "", *_tokens(text)):
+        value = raw.strip().upper().strip("/\\ .:")
+        if not value:
+            continue
+        for pattern in (_TRINAV_LINE_SUFFIX_RE, _TRINAV_LINE_L_SUFFIX_RE):
+            match = pattern.match(value)
+            if match:
+                root = match.group("root")
+                if len(root) >= 3:
+                    forms.add(root)
+    return forms
+
+
+def _preplot_prefix_root_forms(text: str, preplot_names: set[str]) -> set[str]:
+    """Match acquired TRINAV-style names to catalog preplot ids by longest valid prefix."""
+    value = (text or "").strip().upper().strip("/\\ .:")
+    if not value or not preplot_names:
+        return set()
+    matches: list[str] = []
+    for name in preplot_names:
+        candidate = (name or "").strip().upper()
+        if not candidate or not value.startswith(candidate) or len(value) <= len(candidate):
+            continue
+        rest = value[len(candidate):]
+        if _TRINAV_EMBEDDED_SUFFIX_RE.match(rest):
+            matches.append(candidate)
+    if not matches:
+        return set()
+    return {max(matches, key=len)}
+
+
 def _text_forms(text: str) -> set[str]:
     """Build robust match keys from noisy headers, names, and filenames."""
     forms: set[str] = set()
@@ -132,12 +184,23 @@ def _text_forms(text: str) -> set[str]:
     return forms
 
 
-def _sequence_forms(seq: LineSequence) -> set[str]:
+def _sequence_forms(
+    seq: LineSequence,
+    *,
+    include_context: bool = True,
+    preplot_names: set[str] | None = None,
+) -> set[str]:
     forms = set()
-    for text in (seq.line_name, seq.sequence_no, seq.file_name, Path(seq.file_name).stem):
+    texts = [seq.line_name]
+    if include_context:
+        texts.extend([seq.sequence_no, seq.file_name, Path(seq.file_name).stem])
+    for text in texts:
         forms.update(_text_forms(text))
         forms.update(_parent_line_forms(text))
         forms.update(_leading_prefix_alias_forms(text))
+        forms.update(_preplot_line_root_forms(text))
+    if preplot_names:
+        forms.update(_preplot_prefix_root_forms(seq.line_name, preplot_names))
     return forms
 
 
@@ -145,6 +208,11 @@ def _candidate_forms(candidate: BaselineCandidate) -> set[str]:
     forms = set()
     for text in candidate.candidate_texts:
         forms.update(_text_forms(text))
+        forms.update(_line_family_forms(text))
+        forms.update(_parent_line_forms(text))
+        forms.update(_leading_prefix_alias_forms(text))
+        forms.update(_reverse_leading_prefix_alias_forms(text))
+        forms.update(_preplot_line_root_forms(text))
     return forms
 
 
@@ -154,6 +222,43 @@ def _is_match(candidate: BaselineCandidate, seq: LineSequence) -> bool:
     if not candidate_forms or not seq_forms:
         return False
     return bool(candidate_forms.intersection(seq_forms))
+
+
+def _sequence_form_index(
+    sequences: list[LineSequence],
+    *,
+    include_context: bool = True,
+    preplot_names: set[str] | None = None,
+) -> tuple[list[LineSequence], dict[str, list[LineSequence]]]:
+    """Index imported sequences once so large preplot sets do not hang the UI."""
+    ordered = sorted(sequences, key=lambda seq: (_sort_key(seq.line_name), seq.sequence_no))
+    index: dict[str, list[LineSequence]] = {}
+    for seq in ordered:
+        for form in _sequence_forms(
+            seq,
+            include_context=include_context,
+            preplot_names=preplot_names,
+        ):
+            index.setdefault(form, []).append(seq)
+    return ordered, index
+
+
+def _matching_sequences(
+    candidate: BaselineCandidate,
+    ordered_sequences: list[LineSequence],
+    indexed_sequences: dict[str, list[LineSequence]],
+) -> list[LineSequence]:
+    forms = _candidate_forms(candidate)
+    if not forms:
+        return []
+    matched_ids = {
+        id(seq)
+        for form in forms
+        for seq in indexed_sequences.get(form, [])
+    }
+    if not matched_ids:
+        return []
+    return [seq for seq in ordered_sequences if id(seq) in matched_ids]
 
 
 def _sort_key(text: str) -> tuple[str, int, str]:
@@ -254,7 +359,7 @@ def build_preplot_candidates(map_data: MapData | None) -> list[BaselineCandidate
                 name=name,
                 kind="preplot",
                 file_name=file_name,
-                candidate_texts=tuple(text for text in (name, file_name, Path(file_name).stem) if text),
+                candidate_texts=tuple(text for text in (name,) if text),
             )
         )
     return _unique_candidates(candidates)
@@ -273,11 +378,20 @@ def build_postplot_4d_rows(
         if baseline_kind == "navplan"
         else build_preplot_candidates(map_data)
     )
-    sequences = sorted(map_data.sequences, key=lambda seq: (_sort_key(seq.line_name), seq.sequence_no))
+    preplot_names = (
+        {(candidate.name or "").strip().upper() for candidate in candidates if candidate.name}
+        if baseline_kind == "preplot"
+        else None
+    )
+    sequences, sequence_index = _sequence_form_index(
+        map_data.sequences,
+        include_context=baseline_kind == "navplan",
+        preplot_names=preplot_names,
+    )
 
     rows: list[Postplot4DMatchRow] = []
     for candidate in candidates:
-        matches = [seq for seq in sequences if _is_match(candidate, seq)]
+        matches = _matching_sequences(candidate, sequences, sequence_index)
         if not matches:
             rows.append(
                 Postplot4DMatchRow(

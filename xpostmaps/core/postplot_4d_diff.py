@@ -23,9 +23,18 @@ from xpostmaps.core.postplot_4d_matching import (
 )
 from xpostmaps.parsers.p190_parser import parse_p190_header
 from xpostmaps.parsers.preplot_parser import parse_navplan_source_file, parse_preplot_file
-from xpostmaps.core.crs_utils import normalize_epsg
+from xpostmaps.core.crs_utils import WGS84_EPSG, normalize_epsg, transform_coordinates
 
 _AZIMUTH_RE = re.compile(r"-?\d+(?:\.\d+)?")
+_SHOTPOINT_INTERVAL_RE = re.compile(
+    r"(?:(?:SHOT\s*POINT|SHOTPOINT|SHOT)\s*(?:INTERVAL|INT|SPACING)|SP\s*(?:INTERVAL|INT))"
+    r"[^0-9+\-]*(?P<value>[-+]?\d+(?:\.\d+)?)",
+    re.IGNORECASE,
+)
+_PREPLOT_DIRECTION_RE = re.compile(
+    r"(?:LINE[-\s_]*DIRECTION|LINE\s*HEADING|HEADING|AZIMUTH|BEARING|ROTATION)",
+    re.IGNORECASE,
+)
 
 
 @dataclass(frozen=True)
@@ -64,6 +73,48 @@ def _parse_azimuth_degrees(line_direction: str) -> float | None:
         return float(match.group(0)) % 360.0
     except ValueError:
         return None
+
+
+def parse_shotpoint_interval_m(text: str) -> float | None:
+    """Parse P111/P190 shotpoint interval headers such as CC/H2600 variants."""
+    match = _SHOTPOINT_INTERVAL_RE.search((text or "").replace(",", " "))
+    if not match:
+        return None
+    try:
+        value = float(match.group("value"))
+    except ValueError:
+        return None
+    return value if value > 0 else None
+
+
+def _read_preplot_header_info(path: Path) -> tuple[float | None, str]:
+    interval: float | None = None
+    line_direction = ""
+    try:
+        handle = path.open("r", encoding="utf-8", errors="replace")
+    except OSError:
+        return None, ""
+    with handle:
+        for raw_line in handle:
+            line = raw_line.strip()
+            if not line:
+                continue
+            if line.startswith(("S", "V", "N1", "P1", "R1", "E1")):
+                break
+            if interval is None:
+                interval = parse_shotpoint_interval_m(line)
+            if line.startswith("HC,"):
+                if interval is not None:
+                    continue
+                continue
+            direction_match = _PREPLOT_DIRECTION_RE.search(line)
+            if not line_direction and direction_match:
+                parsed = _parse_azimuth_degrees(line[direction_match.end() :])
+                if parsed is not None:
+                    line_direction = f"{parsed:.2f}°"
+            if interval is not None and line_direction:
+                break
+    return interval, line_direction
 
 
 def _azimuth_from_geometry(points: list[tuple[float, float]]) -> float | None:
@@ -162,6 +213,10 @@ def load_baseline_shotpoints(
     baseline_kind: BaselineKind,
     baseline_name: str,
     baseline_file_name: str,
+    *,
+    database=None,
+    project_name: str = "",
+    map_epsg: str = "",
 ) -> dict[int, BaselineShotpoint]:
     if map_data is None:
         return {}
@@ -174,6 +229,16 @@ def load_baseline_shotpoints(
                 parsed = parse_navplan_source_file(path)
             else:
                 parsed = parse_preplot_file(path)
+                generated = _generated_preplot_baseline_from_records(
+                    parsed.records,
+                    baseline_name,
+                    path,
+                    database=database,
+                    project_name=project_name,
+                    map_epsg=map_epsg,
+                )
+                if generated:
+                    return generated
             by_records = _baseline_from_records(parsed.records, baseline_name, record_type)
             if by_records:
                 return by_records
@@ -188,6 +253,18 @@ def load_baseline_shotpoints(
     for segment in segments:
         if target_name and segment.file_name and Path(segment.file_name).name != target_name:
             continue
+        if baseline_kind == "preplot":
+            generated = _generated_preplot_baseline_from_segment(
+                segment,
+                baseline_name,
+                path,
+                database=database,
+                project_name=project_name,
+                map_epsg=map_epsg,
+            )
+            if generated:
+                merged.update(generated)
+                continue
         merged.update(_baseline_from_segment(segment, baseline_name))
     return merged
 
@@ -266,6 +343,179 @@ def resolve_line_azimuth_degrees(
     return 0.0
 
 
+def _file_fingerprint(path: Path | None) -> tuple[str, float, int]:
+    if path is None or not path.is_file():
+        return "", 0.0, 0
+    stat = path.stat()
+    return str(path.resolve()), float(stat.st_mtime), int(stat.st_size)
+
+
+def _populate_generated_lat_lon(
+    generated: dict[int, BaselineShotpoint],
+    map_epsg: str,
+) -> None:
+    code = normalize_epsg(map_epsg)
+    if not code:
+        return
+    ordered = [generated[shotpoint] for shotpoint in sorted(generated)]
+    try:
+        lons, lats = transform_coordinates(
+            [point.x for point in ordered],
+            [point.y for point in ordered],
+            code,
+            WGS84_EPSG,
+        )
+    except Exception:  # noqa: BLE001
+        return
+    if len(lons) != len(ordered) or len(lats) != len(ordered):
+        return
+    for point, lat, lon in zip(ordered, lats, lons):
+        generated[point.shotpoint] = BaselineShotpoint(
+            shotpoint=point.shotpoint,
+            x=point.x,
+            y=point.y,
+            latitude=f"{float(lat):.8f}",
+            longitude=f"{float(lon):.8f}",
+        )
+
+
+def _generate_preplot_shotpoints(
+    controls: list[PositionRecord],
+    map_epsg: str,
+) -> dict[int, BaselineShotpoint]:
+    ordered = sorted(
+        [record for record in controls if record.point_num > 0],
+        key=lambda record: record.point_num,
+    )
+    generated: dict[int, BaselineShotpoint] = {}
+    if len(ordered) < 2:
+        return generated
+    for start, end in zip(ordered, ordered[1:]):
+        sp0 = int(start.point_num)
+        sp1 = int(end.point_num)
+        if sp0 == sp1:
+            continue
+        step = 1 if sp1 > sp0 else -1
+        span = sp1 - sp0
+        for shotpoint in range(sp0, sp1 + step, step):
+            fraction = (shotpoint - sp0) / span
+            generated[shotpoint] = BaselineShotpoint(
+                shotpoint=shotpoint,
+                x=start.x + (end.x - start.x) * fraction,
+                y=start.y + (end.y - start.y) * fraction,
+            )
+    _populate_generated_lat_lon(generated, map_epsg)
+    return generated
+
+
+def _generated_preplot_baseline(
+    controls: list[PositionRecord],
+    path: Path,
+    baseline_name: str,
+    *,
+    database=None,
+    project_name: str = "",
+    map_epsg: str = "",
+) -> dict[int, BaselineShotpoint]:
+    file_path, file_mtime, file_size = _file_fingerprint(path)
+    line_name = controls[0].line_name or baseline_name
+    if database is not None and project_name.strip():
+        cached = database.load_postplot_4d_preplot_shotpoints(
+            project_name.strip(),
+            file_path,
+            line_name,
+            file_mtime,
+            file_size,
+        )
+        if cached:
+            return {point.shotpoint: point for point in cached}
+
+    interval_m, header_direction = _read_preplot_header_info(path)
+    if interval_m is None:
+        return {}
+    generated = _generate_preplot_shotpoints(controls, map_epsg)
+    if not generated:
+        return {}
+    if database is not None and project_name.strip():
+        database.save_postplot_4d_preplot_shotpoints(
+            project_name.strip(),
+            file_path,
+            path.name,
+            line_name,
+            file_mtime,
+            file_size,
+            interval_m,
+            header_direction,
+            [generated[shotpoint] for shotpoint in sorted(generated)],
+        )
+    return generated
+
+
+def _generated_preplot_baseline_from_records(
+    records: list[PositionRecord],
+    baseline_name: str,
+    path: Path,
+    *,
+    database=None,
+    project_name: str = "",
+    map_epsg: str = "",
+) -> dict[int, BaselineShotpoint]:
+    controls = [
+        record
+        for record in records
+        if record.record_type == RecordType.PREPLOT
+        and _line_names_match(baseline_name, record.line_name)
+        and record.point_num > 0
+    ]
+    if len(controls) < 2:
+        return {}
+    return _generated_preplot_baseline(
+        controls,
+        path,
+        baseline_name,
+        database=database,
+        project_name=project_name,
+        map_epsg=map_epsg,
+    )
+
+
+def _generated_preplot_baseline_from_segment(
+    segment: LineSegment,
+    baseline_name: str,
+    path: Path | None,
+    *,
+    database=None,
+    project_name: str = "",
+    map_epsg: str = "",
+) -> dict[int, BaselineShotpoint]:
+    if path is None or not _line_names_match(baseline_name, segment.line_name):
+        return {}
+    sparse = _baseline_from_segment(segment, baseline_name)
+    controls = [
+        PositionRecord(
+            file_name=segment.file_name,
+            record_type=RecordType.PREPLOT,
+            line_name=segment.line_name,
+            vessel_id="",
+            source_id="",
+            point_num=point.shotpoint,
+            x=point.x,
+            y=point.y,
+        )
+        for point in sorted(sparse.values(), key=lambda item: item.shotpoint)
+    ]
+    if len(controls) < 2:
+        return {}
+    return _generated_preplot_baseline(
+        controls,
+        path,
+        baseline_name,
+        database=database,
+        project_name=project_name,
+        map_epsg=map_epsg,
+    )
+
+
 def _offset_components(
     delta_e: float,
     delta_n: float,
@@ -321,7 +571,11 @@ def calculate_match_diff_rows(
     settings: ProjectSettings | None,
     positions: list[PositionRecord],
     match_row: Postplot4DMatchRow,
+    *,
+    database=None,
+    project_name: str = "",
 ) -> list[Postplot4DDiffRow]:
+    map_epsg = resolve_diff_map_epsg(map_data, settings)
     baseline_path = _resolve_baseline_path(
         settings,
         match_row.baseline_kind,
@@ -333,6 +587,9 @@ def calculate_match_diff_rows(
         match_row.baseline_kind,
         match_row.baseline_name,
         match_row.baseline_file_name,
+        database=database,
+        project_name=project_name,
+        map_epsg=map_epsg,
     )
     sources = source_shotpoints_for_match(positions, match_row)
     return compute_postplot_4d_diff_rows(

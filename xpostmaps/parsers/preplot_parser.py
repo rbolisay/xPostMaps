@@ -60,7 +60,7 @@ class _P111Line:
     line_name: str = ""
     fsp: str = ""
     lsp: str = ""
-    path_points: list[tuple[float, float]] = field(default_factory=list)
+    path_points: list[dict] = field(default_factory=list)
 
 
 @dataclass
@@ -78,13 +78,34 @@ def _to_float(value: str) -> float:
         return float("nan")
 
 
-def _append_unique_point(points: list[tuple[float, float]], easting: str, northing: str) -> None:
+def _append_unique_point(
+    points: list[dict],
+    shotpoint: str,
+    easting: str,
+    northing: str,
+    latitude: str = "",
+    longitude: str = "",
+) -> None:
     x = _to_float(easting)
     y = _to_float(northing)
     if not (x == x and y == y):
         return
-    candidate = (x, y)
-    if not points or points[-1] != candidate:
+    try:
+        sp = int(float(str(shotpoint).strip()))
+    except (TypeError, ValueError):
+        sp = 0
+    candidate = {
+        "shotpoint": str(sp) if sp else "",
+        "easting": x,
+        "northing": y,
+        "latitude": str(latitude).strip(),
+        "longitude": str(longitude).strip(),
+    }
+    if not points or (
+        points[-1].get("shotpoint") != candidate["shotpoint"]
+        or points[-1].get("easting") != candidate["easting"]
+        or points[-1].get("northing") != candidate["northing"]
+    ):
         points.append(candidate)
 
 
@@ -146,8 +167,22 @@ def _parse_p111_preplot_file(path: Path) -> tuple[list[LineSegment], list[Positi
                     lsp=row[6].strip(),
                 )
             elif subtype == "2" and current is not None and len(row) >= 17:
-                _append_unique_point(current.path_points, row[8], row[9])
-                _append_unique_point(current.path_points, row[15], row[16])
+                _append_unique_point(
+                    current.path_points,
+                    row[7],
+                    row[8],
+                    row[9],
+                    row[11] if len(row) > 11 else "",
+                    row[12] if len(row) > 12 else "",
+                )
+                _append_unique_point(
+                    current.path_points,
+                    row[14],
+                    row[15],
+                    row[16],
+                    row[18] if len(row) > 18 else "",
+                    row[19] if len(row) > 19 else "",
+                )
 
     if current and current.path_points:
         lines.append(current)
@@ -156,21 +191,16 @@ def _parse_p111_preplot_file(path: Path) -> tuple[list[LineSegment], list[Positi
     max_points = 0
     for line in lines:
         max_points = max(max_points, len(line.path_points))
-        xs = [p[0] for p in line.path_points]
-        ys = [p[1] for p in line.path_points]
-        try:
-            fsp = int(float(line.fsp))
-            lsp = int(float(line.lsp))
-        except ValueError:
-            fsp, lsp = 0, 0
+        xs = [float(p["easting"]) for p in line.path_points]
+        ys = [float(p["northing"]) for p in line.path_points]
         pnums = np.array(
-            [fsp + i * max(1, (lsp - fsp) // max(len(line.path_points) - 1, 1))
-             for i in range(len(line.path_points))]
-            if fsp and lsp and len(line.path_points) > 1
-            else np.arange(len(line.path_points), dtype=np.int64),
+            [
+                int(float(p.get("shotpoint") or 0))
+                for p in line.path_points
+            ],
             dtype=np.int64,
         )
-        for idx, (x, y) in enumerate(line.path_points):
+        for idx, point in enumerate(line.path_points):
             sp = int(pnums[idx]) if idx < len(pnums) else idx
             records.append(
                 PositionRecord(
@@ -180,8 +210,10 @@ def _parse_p111_preplot_file(path: Path) -> tuple[list[LineSegment], list[Positi
                     vessel_id="",
                     source_id="",
                     point_num=sp,
-                    x=x,
-                    y=y,
+                    x=float(point["easting"]),
+                    y=float(point["northing"]),
+                    latitude=str(point.get("latitude", "")),
+                    longitude=str(point.get("longitude", "")),
                 )
             )
         direction = infer_line_direction(pnums) if len(pnums) > 1 else 1
