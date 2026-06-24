@@ -14,7 +14,7 @@ from xpostmaps.core.models import (
 )
 
 # Bump when navigation parsing logic changes (invalidates incremental nav cache).
-NAV_PARSE_VERSION = "firing-source-v2"
+NAV_PARSE_VERSION = "p190-header-v3"
 
 
 def nav_file_signature(path: Path) -> tuple[float, int, str]:
