@@ -35,7 +35,7 @@ NAVPLAN_IMPORT_EXTENSIONS = {
 
 _V_RECORD_RE = re.compile(
     r"^V(?P<line>[A-Za-z0-9_]+)\s+"
-    r"(?P<shotpoint>\d{4,6})"
+    r"(?P<shotpoint>\d{1,6})"
     r"(?P<latdeg>\d{2})(?P<latmin>\d{2})(?P<latsec>\d{2}\.\d{2})(?P<lathem>[NS])"
     r"(?P<londeg>\d{3})(?P<lonmin>\d{2})(?P<lonsec>\d{2}\.\d{2})(?P<lonhem>[EW])\s*"
     r"(?P<easting>\d{4,8}\.\d)(?P<northing>\d{5,10}\.\d)"

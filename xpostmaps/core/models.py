@@ -255,6 +255,7 @@ class ProjectSettings:
     legend_config: LegendConfig = field(default_factory=LegendConfig.default)
     minimap_view: dict[str, float] = field(default_factory=dict)
     map_view: dict[str, float] = field(default_factory=dict)
+    postplot_4d_baseline: str = "navplan"
 
 
 @dataclass

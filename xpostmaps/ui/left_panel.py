@@ -30,6 +30,7 @@ class LeftPanel(GlassPanel):
     open_postmap_info = Signal()
     open_legend = Signal()
     open_pdf_export = Signal()
+    open_postplot_4d = Signal()
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent, radius=16)
@@ -138,6 +139,17 @@ class LeftPanel(GlassPanel):
         self._pdf_btn.clicked.connect(self.open_pdf_export.emit)
         self._info_btn.clicked.connect(self.open_postmap_info.emit)
 
+        layout.addSpacing(8)
+
+        four_d_title = QLabel("4D Tools")
+        four_d_title.setObjectName("sectionTitle")
+        layout.addWidget(four_d_title)
+
+        self._postplot_4d_btn = QPushButton("Postplot 4D")
+        self._postplot_4d_btn.setObjectName("dirBtn")
+        layout.addWidget(self._postplot_4d_btn)
+        self._postplot_4d_btn.clicked.connect(self.open_postplot_4d.emit)
+
         self._active_buttons = {
             "browse_load": self._browse_load_btn,
             "preplot": self._preplot_btn,
@@ -148,6 +160,7 @@ class LeftPanel(GlassPanel):
             "legend": self._legend_btn,
             "pdf": self._pdf_btn,
             "info": self._info_btn,
+            "postplot_4d": self._postplot_4d_btn,
         }
         for button in (self._save_btn, *self._active_buttons.values()):
             button.setFocusPolicy(Qt.FocusPolicy.NoFocus)
@@ -203,6 +216,7 @@ class LeftPanel(GlassPanel):
             self._legend_btn,
             self._pdf_btn,
             self._info_btn,
+            self._postplot_4d_btn,
         ):
             widget.setEnabled(enabled)
 

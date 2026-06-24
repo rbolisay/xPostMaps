@@ -2316,39 +2316,33 @@ class PostplotMapWidget(QWidget):
             return
 
         extent_ranges = self._visible_extent_ranges(map_data, nav_segments)
+        self._update_extent(map_data, nav_segments)
+
+        if current_world_range is not None:
+            target_world = current_world_range
+        elif extent_ranges is not None:
+            target_world = extent_ranges
+        else:
+            target_world = None
+
+        if target_world is not None:
+            x_range, y_range = self._localize_range(
+                target_world[0],
+                target_world[1],
+                self._origin_x,
+                self._origin_y,
+            )
+            self._plot.setRange(
+                xRange=x_range,
+                yRange=y_range,
+                padding=0,
+            )
 
         self._add_batched_segments(nav_segments)
         self._add_legend_preplot_segments(map_data)
         self._add_legend_navplan_segments(map_data)
 
         self._add_area_polygons(map_data)
-
-        self._update_extent(map_data, nav_segments)
-
-        if current_world_range is not None:
-            x_range, y_range = self._localize_range(
-                current_world_range[0],
-                current_world_range[1],
-                self._origin_x,
-                self._origin_y,
-            )
-            self._plot.setRange(
-                xRange=x_range,
-                yRange=y_range,
-                padding=0,
-            )
-        elif extent_ranges is not None:
-            x_range, y_range = self._localize_range(
-                extent_ranges[0],
-                extent_ranges[1],
-                self._origin_x,
-                self._origin_y,
-            )
-            self._plot.setRange(
-                xRange=x_range,
-                yRange=y_range,
-                padding=0,
-            )
 
         self._reposition_overlays()
         if self._all_gl_layers():

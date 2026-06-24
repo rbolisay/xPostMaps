@@ -186,6 +186,16 @@ def _hide_checkbox(hidden: bool) -> QCheckBox:
     return box
 
 
+def _legend_section_toolbar_button(text: str, *, kind: str) -> QPushButton:
+    """Toolbar buttons above legend tables share width within each button kind."""
+    reference = "Add PostPlot Row" if kind == "add" else "Remove Selected"
+    btn = QPushButton(text)
+    btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+    pad = 28
+    btn.setMinimumWidth(btn.fontMetrics().horizontalAdvance(reference) + pad)
+    return btn
+
+
 def _configure_legend_table(table: QTableWidget) -> None:
     table.verticalHeader().setVisible(False)
     table.verticalHeader().setMinimumSectionSize(34)
@@ -911,8 +921,8 @@ class LegendDialog:
             _fit_table_columns(area_table)
 
             area_btns = QHBoxLayout()
-            add_area_btn = QPushButton("Add Area Row")
-            rem_area_btn = QPushButton("Remove Selected")
+            add_area_btn = _legend_section_toolbar_button("Add Area Row", kind="add")
+            rem_area_btn = _legend_section_toolbar_button("Remove Selected", kind="remove")
             add_area_btn.clicked.connect(add_area_row)
             rem_area_btn.clicked.connect(remove_area_row)
             area_btns.addWidget(add_area_btn)
@@ -1152,8 +1162,8 @@ class LegendDialog:
             _fit_table_columns(preplot_table)
 
             preplot_btns = QHBoxLayout()
-            add_preplot_btn = QPushButton("Add Preplot Row")
-            rem_preplot_btn = QPushButton("Remove Selected")
+            add_preplot_btn = _legend_section_toolbar_button("Add Preplot Row", kind="add")
+            rem_preplot_btn = _legend_section_toolbar_button("Remove Selected", kind="remove")
             add_preplot_btn.clicked.connect(add_preplot_row)
             rem_preplot_btn.clicked.connect(remove_preplot_row)
             preplot_btns.addWidget(add_preplot_btn)
@@ -1175,8 +1185,8 @@ class LegendDialog:
             _fit_table_columns(navplan_table)
 
             navplan_btns = QHBoxLayout()
-            add_navplan_btn = QPushButton("Add Navplan Row")
-            rem_navplan_btn = QPushButton("Remove Selected")
+            add_navplan_btn = _legend_section_toolbar_button("Add Navplan Row", kind="add")
+            rem_navplan_btn = _legend_section_toolbar_button("Remove Selected", kind="remove")
             add_navplan_btn.clicked.connect(add_navplan_row)
             rem_navplan_btn.clicked.connect(remove_navplan_row)
             navplan_btns.addWidget(add_navplan_btn)
@@ -1201,8 +1211,8 @@ class LegendDialog:
             _fit_table_columns(post_table)
 
             post_btns = QHBoxLayout()
-            add_post_btn = QPushButton("Add PostPlot Row")
-            rem_post_btn = QPushButton("Remove Selected")
+            add_post_btn = _legend_section_toolbar_button("Add PostPlot Row", kind="add")
+            rem_post_btn = _legend_section_toolbar_button("Remove Selected", kind="remove")
             add_post_btn.clicked.connect(add_post_row)
             rem_post_btn.clicked.connect(remove_post_row)
             post_btns.addWidget(add_post_btn)

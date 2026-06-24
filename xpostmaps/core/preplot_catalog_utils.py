@@ -116,21 +116,23 @@ def resolve_preplot_file_order(
     settings=None,
 ) -> list[str]:
     """Return ordered preplot file paths for legend source matching."""
-    if map_data is not None and map_data.preplot_file_order:
-        return list(map_data.preplot_file_order)
     if settings is not None:
-        if settings.preplot_files:
-            return [
-                str(Path(raw).resolve())
-                for raw in sorted(settings.preplot_files)
-                if Path(raw).is_file()
-            ]
         catalog = getattr(settings, "preplot_catalog", None) or []
         if catalog:
             return [
                 entry.file_path
                 for entry in sorted(catalog, key=lambda item: item.preplot_number)
             ]
+        if settings.preplot_files:
+            resolved = [
+                str(Path(raw).resolve())
+                for raw in sorted(settings.preplot_files)
+                if Path(raw).is_file()
+            ]
+            if resolved:
+                return resolved
+    if map_data is not None and map_data.preplot_file_order:
+        return list(map_data.preplot_file_order)
     if map_data is not None and map_data.preplot_segments:
         seen: list[str] = []
         for segment in map_data.preplot_segments:

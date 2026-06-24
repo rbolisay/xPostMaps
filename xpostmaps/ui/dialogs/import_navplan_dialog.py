@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 from typing import Callable
 
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
+    QFileDialog,
     QHBoxLayout,
     QHeaderView,
     QLabel,
@@ -25,7 +27,7 @@ from xpostmaps.core.navplan_catalog_utils import (
     renumber_navplan_catalog,
 )
 from xpostmaps.ui.dialogs.base_dialog import SingleInstanceDialog
-from xpostmaps.ui.theme import themed_open_directory, themed_open_files
+from xpostmaps.ui.theme import apply_file_dialog_theme, themed_open_files
 
 _NAVPLAN_FILTER = (
     "Navplan Files (*.navplan *.p190 *.190 *.p111);;"
@@ -80,6 +82,55 @@ def _set_table_viewport_rows(table: QTableWidget, visible_rows: int = 8) -> None
     table.setMaximumHeight(viewport_h)
 
 
+def _split_folders(value: str) -> list[str]:
+    if not value:
+        return []
+    return [folder for folder in value.split(os.pathsep) if folder]
+
+
+def _folders_to_string(folders: list[str]) -> str:
+    return os.pathsep.join(folders)
+
+
+def _unique_existing_paths(paths: list[str]) -> list[str]:
+    seen: set[str] = set()
+    result: list[str] = []
+    for raw in paths:
+        path = Path(raw)
+        try:
+            resolved = str(path.resolve())
+        except OSError:
+            continue
+        if resolved in seen:
+            continue
+        seen.add(resolved)
+        result.append(resolved)
+    return result
+
+
+def _collect_from_folders(folders: list[str]) -> list[str]:
+    files: list[str] = []
+    for folder in folders:
+        files.extend(collect_navplan_files_from_folder(folder))
+    return _unique_existing_paths(files)
+
+
+def _themed_open_directories(parent: QWidget, title: str, initial_dir: str = "") -> list[str]:
+    """Show a dark-themed multi-folder picker."""
+    picker = QFileDialog(parent, title)
+    if initial_dir and Path(initial_dir).is_dir():
+        picker.setDirectory(initial_dir)
+    picker.setFileMode(QFileDialog.FileMode.ExistingFiles)
+    picker.setOption(QFileDialog.Option.ShowDirsOnly, True)
+    picker.setOption(QFileDialog.Option.DontUseNativeDialog, True)
+    apply_file_dialog_theme(picker)
+    if picker.exec() != QFileDialog.DialogCode.Accepted:
+        return []
+    return _unique_existing_paths(
+        [path for path in picker.selectedFiles() if Path(path).is_dir()]
+    )
+
+
 class ImportNavplanDialog:
     KEY = "import_navplan"
 
@@ -91,8 +142,15 @@ class ImportNavplanDialog:
         on_apply: Callable[[ProjectSettings], None],
         initial_dir: str = "",
     ) -> None:
+        initial_folders = _split_folders(settings.navplans_dir)
+        if not initial_folders and settings.navplans_dir:
+            initial_folders = [settings.navplans_dir]
+        if not initial_folders and initial_dir:
+            initial_folders = [initial_dir]
         state = {
-            "folder": settings.navplans_dir or initial_dir,
+            "folders": _unique_existing_paths(
+                [folder for folder in initial_folders if Path(folder).is_dir()]
+            ),
             "files": list(settings.navplan_files),
             "catalog": list(settings.navplan_catalog),
         }
@@ -105,7 +163,7 @@ class ImportNavplanDialog:
         def apply_changes() -> None:
             settings.navplan_files = list(state["files"])
             settings.navplan_files_explicit = True
-            settings.navplans_dir = state["folder"]
+            settings.navplans_dir = _folders_to_string(state["folders"])
             settings.navplan_catalog = list(state["catalog"])
             on_apply(settings)
 
@@ -126,14 +184,27 @@ class ImportNavplanDialog:
                 table.setItem(row, 2, QTableWidgetItem(crs_text))
             _fit_table(table)
             _set_table_viewport_rows(table, 8)
-            summary.setText(f"{len(state['catalog'])} navplan file(s)")
+            folder_count = len(state["folders"])
+            folder_text = (
+                f" from {folder_count} folder(s)"
+                if folder_count
+                else ""
+            )
+            summary.setText(f"{len(state['catalog'])} navplan file(s){folder_text}")
 
         def browse_folder() -> None:
-            folder = themed_open_directory(parent, "Import Navplan — Select Folder")
-            if not folder:
+            initial = state["folders"][0] if state["folders"] else initial_dir
+            folders = _themed_open_directories(
+                parent,
+                "Import Navplan — Add Folders",
+                initial,
+            )
+            if not folders:
                 return
-            state["folder"] = folder
-            state["files"] = collect_navplan_files_from_folder(folder)
+            state["folders"] = _unique_existing_paths([*state["folders"], *folders])
+            state["files"] = _unique_existing_paths(
+                [*state["files"], *_collect_from_folders(folders)]
+            )
             rebuild_catalog()
             refresh_table(table)
             apply_changes()
@@ -146,13 +217,26 @@ class ImportNavplanDialog:
             )
             if not paths:
                 return
-            state["folder"] = str(Path(paths[0]).parent)
+            state["folders"] = _unique_existing_paths(
+                [*state["folders"], str(Path(paths[0]).parent)]
+            )
             existing = set(state["files"])
             for path in paths:
                 resolved = str(Path(path).resolve())
                 if resolved not in existing:
                     state["files"].append(resolved)
                     existing.add(resolved)
+            rebuild_catalog()
+            refresh_table(table)
+            apply_changes()
+
+        def rescan() -> None:
+            if state["folders"]:
+                state["files"] = _collect_from_folders(state["folders"])
+            else:
+                state["files"] = _unique_existing_paths(
+                    [path for path in state["files"] if Path(path).is_file()]
+                )
             rebuild_catalog()
             refresh_table(table)
             apply_changes()
@@ -169,13 +253,22 @@ class ImportNavplanDialog:
             state["files"] = [
                 path for path in state["files"] if path not in remove_paths
             ]
+            remaining_dirs = {str(Path(path).parent.resolve()) for path in state["files"]}
+            state["folders"] = [
+                folder for folder in state["folders"] if folder in remaining_dirs
+            ]
             rebuild_catalog()
             refresh_table(table)
             apply_changes()
 
         def build(dialog: SingleInstanceDialog) -> None:
             state["files"] = list(settings.navplan_files)
-            state["folder"] = settings.navplans_dir or initial_dir
+            folders = _split_folders(settings.navplans_dir)
+            if not folders and initial_dir:
+                folders = [initial_dir]
+            state["folders"] = _unique_existing_paths(
+                [folder for folder in folders if Path(folder).is_dir()]
+            )
             rebuild_catalog()
             layout = dialog.content_layout
             _clear_layout(layout)
@@ -188,7 +281,7 @@ class ImportNavplanDialog:
             layout.addWidget(hint)
 
             btn_row = QHBoxLayout()
-            browse_btn = QPushButton("Browse Folder…")
+            browse_btn = QPushButton("Add Folder…")
             files_btn = QPushButton("Select Files…")
             remove_btn = QPushButton("Remove Selected")
             for btn in (browse_btn, files_btn, remove_btn):
@@ -217,9 +310,13 @@ class ImportNavplanDialog:
             refresh_table(table)
 
             close_row = QHBoxLayout()
+            rescan_btn = QPushButton("Rescan")
+            rescan_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+            rescan_btn.clicked.connect(rescan)
             close_btn = QPushButton("Close")
             close_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
             close_btn.clicked.connect(dialog.close)
+            close_row.addWidget(rescan_btn)
             close_row.addStretch()
             close_row.addWidget(close_btn)
             layout.addLayout(close_row)

@@ -59,6 +59,7 @@ from xpostmaps.core.polygon_import_service import imported_polygon_entries
 from xpostmaps.ui.dialogs.nav_picker_dialog import NavFilePickerDialog
 from xpostmaps.ui.dialogs.pdf_export_dialog import PdfExportDialog
 from xpostmaps.ui.dialogs.postmap_info_dialog import PostmapInfoDialog
+from xpostmaps.ui.dialogs.postplot_4d_dialog import Postplot4DDialog
 from xpostmaps.ui.dialogs.preplot_navplan_dialog import PreplotNavplanDialog
 from xpostmaps.ui.dialogs.project_browser_dialog import ProjectBrowserDialog
 from xpostmaps.ui.left_panel import LeftPanel
@@ -144,6 +145,7 @@ class MainWindow(QMainWindow):
         self._left.open_postmap_info.connect(self._open_postmap_info)
         self._left.open_legend.connect(self._open_legend)
         self._left.open_pdf_export.connect(self._open_pdf_export)
+        self._left.open_postplot_4d.connect(self._open_postplot_4d)
         self._right.minimap_view_changed.connect(self._on_minimap_view_changed)
         self._map.view_changed.connect(self._on_map_view_changed)
 
@@ -365,6 +367,25 @@ class MainWindow(QMainWindow):
             default_output_dir=self._db_directory,
         )
         self._track_left_dialog("pdf", dialog)
+
+    def _open_postplot_4d(self) -> None:
+        if not self._map_data:
+            QMessageBox.information(
+                self,
+                "Postplot 4D",
+                "Load imported P111/P190 and a Preplot or Navplan baseline first.",
+            )
+            return
+        dialog = Postplot4DDialog.open(
+            self,
+            self._settings,
+            self._map_data,
+            on_baseline_changed=self._on_postplot_4d_baseline_changed,
+        )
+        self._track_left_dialog("postplot_4d", dialog)
+
+    def _on_postplot_4d_baseline_changed(self) -> None:
+        self._schedule_metadata_autosave()
 
     def _open_legend(self) -> None:
         perimeters = self._map_data.survey_perimeters if self._map_data else []
@@ -861,20 +882,20 @@ class MainWindow(QMainWindow):
                     map_data.preplot_segments,
                     map_data.postmap_info.epsg_code,
                 )
-                sync_preplot_legend_entries(
-                    settings.legend_config,
-                    settings.preplot_catalog,
-                )
+            sync_preplot_legend_entries(
+                settings.legend_config,
+                settings.preplot_catalog,
+            )
             if settings.navplan_files and not settings.navplan_catalog:
                 settings.navplan_catalog = build_navplan_catalog_from_segments(
                     settings.navplan_files,
                     map_data.navplan_segments,
                     map_data.postmap_info.epsg_code,
                 )
-                sync_navplan_legend_entries(
-                    settings.legend_config,
-                    settings.navplan_catalog,
-                )
+            sync_navplan_legend_entries(
+                settings.legend_config,
+                settings.navplan_catalog,
+            )
             self._apply_map_crs_from_preplot(map_data)
             self._sync_map_data_preplot_order()
             self._left.set_project_name(settings.name)
@@ -890,8 +911,14 @@ class MainWindow(QMainWindow):
             self._refresh_preplot_summary()
             if settings.logo_path:
                 self._right.set_logo(settings.logo_path)
-            self._refresh_ui()
+            self._map.clear()
+            self._map.set_legend(self._settings.legend_config)
+            self._map.set_display_mode(self._settings.display_mode)
+            self._map.render(self._map_data, force=True)
             self._map.restore_view(settings.map_view)
+            self._map.render(self._map_data, force=True)
+            self._right.update_from_project(self._settings, self._map_data)
+            self._refresh_import_polygons_summary()
             total_records = int(map_data.stats.get("total_records", 0))
             self.statusBar().showMessage(
                 f"Loaded project: {settings.name} "

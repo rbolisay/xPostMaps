@@ -1,0 +1,232 @@
+from xpostmaps.core.models import (
+    LineSegment,
+    LineSequence,
+    MapData,
+    NavplanCatalogEntry,
+    PreplotCatalogEntry,
+    ProjectSettings,
+    RecordType,
+)
+from xpostmaps.core.postplot_4d_matching import build_postplot_4d_rows
+
+
+def _sequence(line_name: str, sequence_no: str = "1") -> LineSequence:
+    return LineSequence(
+        seq_id=f"post.p190|{sequence_no}|{line_name}",
+        file_name="post.p190",
+        sequence_no=sequence_no,
+        line_name=line_name,
+        subline="A",
+        line_direction="Up",
+        first_sp=100,
+        last_sp=200,
+        record_type=RecordType.SOURCE,
+    )
+
+
+def test_navplan_matching_uses_noisy_header_name_tokens() -> None:
+    settings = ProjectSettings(
+        navplan_catalog=[
+            NavplanCatalogEntry(
+                navplan_number=1,
+                navplan_name="H2600PREPLOT LINE NUMBER......: 0103643A extra text",
+                file_path=r"C:\sample\0103643A.navplan",
+            )
+        ]
+    )
+    map_data = MapData(
+        sequences=[_sequence("0103643A")],
+        navplan_segments=[
+            LineSegment(
+                line_name="unrelated segment name",
+                record_type=RecordType.NAVPLAN,
+                file_name="0103643A.navplan",
+            )
+        ],
+    )
+
+    rows = build_postplot_4d_rows(map_data, settings, "navplan")
+
+    assert len(rows) == 1
+    assert rows[0].has_match
+    assert rows[0].line_name == "0103643A"
+
+
+def test_preplot_matching_handles_p111_and_p190_line_names() -> None:
+    settings = ProjectSettings(
+        preplot_catalog=[PreplotCatalogEntry(preplot_number=1, file_path=r"C:\sample\preplot.p111")]
+    )
+    map_data = MapData(
+        sequences=[_sequence("1018"), _sequence("51892")],
+        preplot_segments=[
+            LineSegment(
+                line_name="N1 preplot line 1018",
+                record_type=RecordType.PREPLOT,
+                file_name="preplot.p111",
+            ),
+            LineSegment(
+                line_name="51892",
+                record_type=RecordType.PREPLOT,
+                file_name="preplot.p190",
+            ),
+        ],
+    )
+
+    rows = build_postplot_4d_rows(map_data, settings, "preplot")
+    matched = {(row.baseline_name, row.line_name) for row in rows if row.has_match}
+
+    assert ("N1 preplot line 1018", "1018") in matched
+    assert ("51892", "51892") in matched
+
+
+def test_navplan_matching_ignores_file_format_tokens() -> None:
+    settings = ProjectSettings(
+        navplan_catalog=[
+            NavplanCatalogEntry(
+                navplan_number=1,
+                navplan_name="1005P1",
+                file_path=r"C:\sample\1005P1.p190",
+            ),
+            NavplanCatalogEntry(
+                navplan_number=2,
+                navplan_name="1065P1",
+                file_path=r"C:\sample\1065P1.p190",
+            ),
+        ]
+    )
+    map_data = MapData(
+        sequences=[_sequence("1065P1A-070", sequence_no="70")],
+        navplan_segments=[
+            LineSegment(
+                line_name="1005P1",
+                record_type=RecordType.NAVPLAN,
+                file_name="1005P1.p190",
+            ),
+            LineSegment(
+                line_name="1065P1",
+                record_type=RecordType.NAVPLAN,
+                file_name="1065P1.p190",
+            ),
+        ],
+    )
+
+    rows = build_postplot_4d_rows(map_data, settings, "navplan")
+    matched = [(row.baseline_name, row.line_name) for row in rows if row.has_match]
+    unmatched = [row.baseline_name for row in rows if not row.has_match]
+
+    assert matched == [("1065P1", "1065P1A-070")]
+    assert unmatched == ["1005P1"]
+
+
+def test_baseline_parent_name_matches_contained_imported_line_name() -> None:
+    settings = ProjectSettings(
+        navplan_catalog=[
+            NavplanCatalogEntry(
+                navplan_number=1,
+                navplan_name="1065P",
+                file_path=r"C:\sample\1065P.p190",
+            )
+        ]
+    )
+    map_data = MapData(
+        sequences=[
+            LineSequence(
+                seq_id="70.1065P1A-070.a070.p190|70|1065P1A-070",
+                file_name="70.1065P1A-070.a070.p190",
+                sequence_no="70",
+                line_name="1065P1A-070",
+                subline="a070",
+                line_direction="179.97",
+                first_sp=1300,
+                last_sp=1600,
+                record_type=RecordType.SOURCE,
+            )
+        ],
+        navplan_segments=[
+            LineSegment(
+                line_name="1065P",
+                record_type=RecordType.NAVPLAN,
+                file_name="1065P.p190",
+            )
+        ],
+    )
+
+    rows = build_postplot_4d_rows(map_data, settings, "navplan")
+
+    assert len(rows) == 1
+    assert rows[0].has_match
+    assert rows[0].baseline_name == "1065P"
+    assert rows[0].line_name == "1065P1A-070"
+    assert rows[0].sequence_no == "70"
+
+
+def test_4030_prefixed_imported_line_maps_to_zero_prefixed_baseline() -> None:
+    settings = ProjectSettings(
+        navplan_catalog=[
+            NavplanCatalogEntry(
+                navplan_number=1,
+                navplan_name="0114451U",
+                file_path=r"C:\sample\0114451U.navplan",
+            ),
+            NavplanCatalogEntry(
+                navplan_number=2,
+                navplan_name="0116269V",
+                file_path=r"C:\sample\0116269V.navplan",
+            ),
+        ]
+    )
+    map_data = MapData(
+        sequences=[
+            _sequence("8114451U-032", sequence_no="32"),
+            _sequence("8116269V-031", sequence_no="31"),
+        ],
+        navplan_segments=[
+            LineSegment(
+                line_name="0114451U",
+                record_type=RecordType.NAVPLAN,
+                file_name="0114451U.navplan",
+            ),
+            LineSegment(
+                line_name="0116269V",
+                record_type=RecordType.NAVPLAN,
+                file_name="0116269V.navplan",
+            ),
+        ],
+    )
+
+    rows = build_postplot_4d_rows(map_data, settings, "navplan")
+    matched = {(row.baseline_name, row.line_name, row.sequence_no) for row in rows if row.has_match}
+
+    assert matched == {
+        ("0114451U", "8114451U-032", "32"),
+        ("0116269V", "8116269V-031", "31"),
+    }
+
+
+def test_4030_single_digit_prefix_line_maps_to_zero_prefixed_baseline() -> None:
+    settings = ProjectSettings(
+        navplan_catalog=[
+            NavplanCatalogEntry(
+                navplan_number=1,
+                navplan_name="0116875A",
+                file_path=r"C:\sample\0116875A.navplan",
+            )
+        ]
+    )
+    map_data = MapData(
+        sequences=[_sequence("1116875A-038", sequence_no="38")],
+        navplan_segments=[
+            LineSegment(
+                line_name="0116875A",
+                record_type=RecordType.NAVPLAN,
+                file_name="0116875A.navplan",
+            )
+        ],
+    )
+
+    rows = build_postplot_4d_rows(map_data, settings, "navplan")
+
+    assert len(rows) == 1
+    assert rows[0].has_match
+    assert rows[0].baseline_name == "0116875A"
+    assert rows[0].line_name == "1116875A-038"

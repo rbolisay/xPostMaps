@@ -201,6 +201,10 @@ class Database:
             self._conn.execute(
                 "ALTER TABLE projects ADD COLUMN map_view_json TEXT DEFAULT '{}'"
             )
+        if "postplot_4d_baseline" not in cols:
+            self._conn.execute(
+                "ALTER TABLE projects ADD COLUMN postplot_4d_baseline TEXT DEFAULT 'navplan'"
+            )
 
         seg_cols = {row[1] for row in self._conn.execute("PRAGMA table_info(segments)")}
         if "sequence_id" not in seg_cols:
@@ -311,6 +315,7 @@ class Database:
                     preplot_catalog_json=?, minimap_view_json=?,
                     navplan_files_json=?, navplan_files_explicit=?,
                     navplans_dir=?, navplan_catalog_json=?, map_view_json=?,
+                    postplot_4d_baseline=?,
                     updated_at=?
                 WHERE id=?
                 """,
@@ -342,6 +347,7 @@ class Database:
                     settings.navplans_dir,
                     navplan_catalog_json,
                     map_view_json,
+                    settings.postplot_4d_baseline,
                     now,
                     project_id,
                 ),
@@ -375,8 +381,9 @@ class Database:
                     nav_files_explicit, preplot_files_explicit, preplot_catalog_json,
                     minimap_view_json, navplan_files_json, navplan_files_explicit,
                     navplans_dir, navplan_catalog_json, map_view_json,
+                    postplot_4d_baseline,
                     created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     settings.name,
@@ -407,6 +414,7 @@ class Database:
                     settings.navplans_dir,
                     navplan_catalog_json,
                     map_view_json,
+                    settings.postplot_4d_baseline,
                     now,
                     now,
                 ),
@@ -466,7 +474,7 @@ class Database:
                 display_mode=?, show_source=?, show_vessel=?,
                 show_overlay=?, show_preplots=?,
                 logo_path=?, legend_config_json=?, minimap_view_json=?,
-                map_view_json=?, updated_at=?
+                map_view_json=?, postplot_4d_baseline=?, updated_at=?
             WHERE id=?
             """,
             (
@@ -479,6 +487,7 @@ class Database:
                 json.dumps(legend_to_dict(settings.legend_config)),
                 json.dumps(settings.minimap_view),
                 json.dumps(settings.map_view),
+                settings.postplot_4d_baseline,
                 now,
                 project_id,
             ),
@@ -713,6 +722,12 @@ class Database:
             map_view=json.loads(row["map_view_json"] or "{}")
             if "map_view_json" in row.keys()
             else {},
+            postplot_4d_baseline=(
+                row["postplot_4d_baseline"]
+                if "postplot_4d_baseline" in row.keys()
+                else "navplan"
+            )
+            or "navplan",
         )
 
         postmap_dict = json.loads(row["postmap_info_json"] or "{}")
