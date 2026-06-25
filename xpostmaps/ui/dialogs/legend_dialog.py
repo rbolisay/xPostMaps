@@ -29,6 +29,7 @@ from xpostmaps.core.area_utils import (
 from xpostmaps.core.models import (
     AreaCoordinateMode,
     AreaLegendEntry,
+    ConditionalColorRule,
     LegendConfig,
     LineSequence,
     LineStyle,
@@ -342,6 +343,91 @@ def _autosize_legend_dialog(
     layout.activate()
     QApplication.processEvents()
 
+_COND_MIN_DIALOG_WIDTH = 480
+_COND_MIN_DIALOG_HEIGHT = 180
+
+
+def _conditional_table_width(table: QTableWidget) -> int:
+    width = table.frameWidth() * 2
+    if table.verticalHeader().isVisible():
+        width += table.verticalHeader().width()
+    for col in range(table.columnCount()):
+        width += table.columnWidth(col)
+    return width
+
+
+def _autosize_conditional_colors_dialog(
+    dialog: SingleInstanceDialog,
+    layout: QVBoxLayout,
+    table: QTableWidget,
+) -> None:
+    """Fit the conditional-colors popup to its table rows and column widths."""
+    _fit_table_columns(table)
+    body_cap = _legend_table_body_cap(table)
+    _fit_table_height(table, max_body_rows=body_cap)
+
+    table_w = _conditional_table_width(table)
+    table.setMinimumWidth(table_w)
+    table.setMaximumWidth(max(table_w, 1))
+    table.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
+
+    if body_cap is not None and table.rowCount() > body_cap:
+        table.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+    else:
+        table.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+    table.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+
+    layout.activate()
+    QApplication.processEvents()
+
+    outer = dialog.layout()
+    outer_margins = outer.contentsMargins() if outer is not None else None
+    glass_margins = layout.contentsMargins()
+    pad_w = (
+        (outer_margins.left() + outer_margins.right() if outer_margins else 0)
+        + glass_margins.left()
+        + glass_margins.right()
+    )
+    pad_h = (
+        (outer_margins.top() + outer_margins.bottom() if outer_margins else 0)
+        + glass_margins.top()
+        + glass_margins.bottom()
+    )
+
+    screen = dialog.screen().availableGeometry() if dialog.screen() else None
+    if screen is None:
+        screen = QApplication.primaryScreen().availableGeometry()
+    max_w = max(screen.width() - 48, _COND_MIN_DIALOG_WIDTH)
+    max_h = max(screen.height() - 48, _COND_MIN_DIALOG_HEIGHT)
+
+    chrome_h = _layout_chrome_height(layout, {table})
+    table_h = table.minimumHeight()
+    natural_h = chrome_h + table_h + pad_h
+
+    if natural_h > max_h:
+        available = max(max_h - pad_h - chrome_h, _LEGEND_ROW_HEIGHT)
+        max_visible = max(1, available // _LEGEND_ROW_HEIGHT)
+        _fit_table_height(
+            table,
+            max_body_rows=max_visible if table.rowCount() > max_visible else None,
+        )
+        table_h = table.minimumHeight()
+        target_h = min(chrome_h + table_h + pad_h, max_h)
+    else:
+        target_h = max(natural_h, _COND_MIN_DIALOG_HEIGHT)
+
+    target_w = min(
+        max(_COND_MIN_DIALOG_WIDTH, pad_w + max(table_w, layout.sizeHint().width())),
+        max_w,
+    )
+
+    dialog.setMinimumSize(_COND_MIN_DIALOG_WIDTH, _COND_MIN_DIALOG_HEIGHT)
+    dialog.setMaximumSize(max_w, max_h)
+    dialog.resize(target_w, target_h)
+    layout.activate()
+    QApplication.processEvents()
+
+
 class LegendDialog:
     KEY = "legend"
 
@@ -354,6 +440,12 @@ class LegendDialog:
         if style == LineStyle.DOTTED:
             return "Size (mm)", 2, 80
         return "Width (mm)", 1, 25
+
+    @staticmethod
+    def _secondary_metric_config_for_style(style: LineStyle) -> tuple[str, int, int] | None:
+        if style == LineStyle.DASH:
+            return "Dash length (mm)", 1, 200
+        return None
 
     @staticmethod
     def _area_style_from_index(index: int) -> LineStyle:
@@ -412,6 +504,16 @@ class LegendDialog:
         navplan_list: list[NavplanCatalogEntry] = list(navplan_catalog or [])
         row_sequence_ids: list[list[str]] = []
         row_sequence_filter_active: list[bool] = []
+        row_conditional_colors: list[list[ConditionalColorRule]] = []
+        row_post_line_widths: list[float] = []
+        row_post_dot_radii: list[float] = []
+        row_post_dash_lengths: list[float] = []
+        row_preplot_line_widths: list[float] = []
+        row_preplot_dot_radii: list[float] = []
+        row_preplot_dash_lengths: list[float] = []
+        row_navplan_line_widths: list[float] = []
+        row_navplan_dot_radii: list[float] = []
+        row_navplan_dash_lengths: list[float] = []
         row_navplan_indices: list[list[int]] = []
         row_navplan_filter_active: list[bool] = []
         row_custom_points: list[list[PolygonPoint]] = []
@@ -429,6 +531,16 @@ class LegendDialog:
             row_custom_points.clear()
             row_sequence_ids.clear()
             row_sequence_filter_active.clear()
+            row_conditional_colors.clear()
+            row_post_line_widths.clear()
+            row_post_dot_radii.clear()
+            row_post_dash_lengths.clear()
+            row_preplot_line_widths.clear()
+            row_preplot_dot_radii.clear()
+            row_preplot_dash_lengths.clear()
+            row_navplan_line_widths.clear()
+            row_navplan_dot_radii.clear()
+            row_navplan_dash_lengths.clear()
             row_navplan_indices.clear()
             row_navplan_filter_active.clear()
             imported_storage.clear()
@@ -463,9 +575,17 @@ class LegendDialog:
             post_lbl = QLabel("PostPlot")
             post_lbl.setStyleSheet("font-weight: 600; margin-top: 8px;")
 
-            post_table = QTableWidget(0, 6)
+            post_table = QTableWidget(0, 7)
             post_table.setHorizontalHeaderLabels(
-                ["Postplot Name", "Line Style", "Color", "P111/P190 Data", "Select Sequences", "Hide"]
+                [
+                    "Postplot Name",
+                    "Line Style",
+                    "Color",
+                    "P111/P190 Data",
+                    "Select Sequences",
+                    "Conditional Colors",
+                    "Hide",
+                ]
             )
             _configure_legend_table(post_table)
 
@@ -530,6 +650,123 @@ class LegendDialog:
                     postplot_lines=_collect_postplot_lines(),
                 )
 
+            def _ensure_symbology_row(
+                widths: list[float],
+                dots: list[float],
+                dashes: list[float],
+                row: int,
+                entry=None,
+            ) -> None:
+                while len(widths) <= row:
+                    widths.append(entry.line_width if entry is not None else 0.35)
+                    dots.append(entry.dot_radius if entry is not None else 0.8)
+                    dashes.append(
+                        entry.dash_length_mm if entry is not None else 3.0
+                    )
+
+            def _symbology_metric_value(
+                widths: list[float],
+                dots: list[float],
+                dashes: list[float],
+                row: int,
+                style: LineStyle,
+            ) -> float:
+                _ensure_symbology_row(widths, dots, dashes, row)
+                if style == LineStyle.DOTTED:
+                    return dots[row]
+                return widths[row]
+
+            def _symbology_secondary_metric_value(
+                dashes: list[float],
+                row: int,
+                style: LineStyle,
+            ) -> float:
+                while len(dashes) <= row:
+                    dashes.append(3.0)
+                if style == LineStyle.DASH:
+                    return dashes[row]
+                return 3.0
+
+            def _sync_symbology_metric(
+                row: int,
+                style_w,
+                color_w,
+                *,
+                widths: list[float],
+                dots: list[float],
+                dashes: list[float],
+            ) -> None:
+                if not isinstance(style_w, QComboBox) or not isinstance(color_w, ColorButton):
+                    return
+                _ensure_symbology_row(widths, dots, dashes, row)
+                style = cls._style_from_index(style_w.currentIndex())
+                metric = color_w.metric_value
+                if style == LineStyle.DOTTED:
+                    dots[row] = metric
+                else:
+                    widths[row] = metric
+                if style == LineStyle.DASH:
+                    dashes[row] = color_w.secondary_metric_value
+
+            def _bind_style_metric_switch(
+                row: int,
+                style_combo: QComboBox,
+                color_btn: ColorButton,
+                *,
+                widths: list[float],
+                dots: list[float],
+                dashes: list[float],
+            ) -> None:
+                def on_style_changed() -> None:
+                    _sync_symbology_metric(
+                        row,
+                        style_combo,
+                        color_btn,
+                        widths=widths,
+                        dots=dots,
+                        dashes=dashes,
+                    )
+                    style = cls._style_from_index(style_combo.currentIndex())
+                    color_btn.set_color(
+                        color_btn.color,
+                        color_btn.opacity,
+                        metric_value=_symbology_metric_value(
+                            widths,
+                            dots,
+                            dashes,
+                            row,
+                            style,
+                        ),
+                        secondary_metric_value=_symbology_secondary_metric_value(
+                            dashes,
+                            row,
+                            style,
+                        ),
+                    )
+                    schedule_refit()
+
+                style_combo.currentIndexChanged.connect(on_style_changed)
+                color_btn.metric_changed.connect(
+                    lambda _value: _sync_symbology_metric(
+                        row,
+                        style_combo,
+                        color_btn,
+                        widths=widths,
+                        dots=dots,
+                        dashes=dashes,
+                    )
+                )
+                color_btn.secondary_metric_changed.connect(
+                    lambda _value: _sync_symbology_metric(
+                        row,
+                        style_combo,
+                        color_btn,
+                        widths=widths,
+                        dots=dots,
+                        dashes=dashes,
+                    )
+                )
+
             def _collect_preplot_lines() -> list[PreplotLegendEntry]:
                 lines: list[PreplotLegendEntry] = []
                 for row in range(preplot_table.rowCount()):
@@ -547,6 +784,20 @@ class LegendDialog:
                     ):
                         name = name_w.text().strip()
                         if name:
+                            _ensure_symbology_row(
+                                row_preplot_line_widths,
+                                row_preplot_dot_radii,
+                                row_preplot_dash_lengths,
+                                row,
+                            )
+                            _sync_symbology_metric(
+                                row,
+                                style_w,
+                                color_w,
+                                widths=row_preplot_line_widths,
+                                dots=row_preplot_dot_radii,
+                                dashes=row_preplot_dash_lengths,
+                            )
                             lines.append(
                                 PreplotLegendEntry(
                                     name=name,
@@ -556,8 +807,9 @@ class LegendDialog:
                                     ),
                                     color=color_w.color,
                                     opacity=color_w.opacity,
-                                    line_width=color_w.metric_value,
-                                    dot_radius=color_w.metric_value,
+                                    line_width=row_preplot_line_widths[row],
+                                    dot_radius=row_preplot_dot_radii[row],
+                                    dash_length_mm=row_preplot_dash_lengths[row],
                                     hidden=hide_w.isChecked(),
                                 )
                             )
@@ -589,14 +841,29 @@ class LegendDialog:
                                 if row < len(row_navplan_filter_active)
                                 else False
                             )
+                            _ensure_symbology_row(
+                                row_navplan_line_widths,
+                                row_navplan_dot_radii,
+                                row_navplan_dash_lengths,
+                                row,
+                            )
+                            _sync_symbology_metric(
+                                row,
+                                style_w,
+                                color_w,
+                                widths=row_navplan_line_widths,
+                                dots=row_navplan_dot_radii,
+                                dashes=row_navplan_dash_lengths,
+                            )
                             lines.append(
                                 NavplanLegendEntry(
                                     name=name,
                                     line_style=style,
                                     color=color_w.color,
                                     opacity=color_w.opacity,
-                                    line_width=color_w.metric_value,
-                                    dot_radius=color_w.metric_value,
+                                    line_width=row_navplan_line_widths[row],
+                                    dot_radius=row_navplan_dot_radii[row],
+                                    dash_length_mm=row_navplan_dash_lengths[row],
                                     hidden=hide_w.isChecked(),
                                     navplan_source_indices=selected,
                                     navplan_filter_active=filter_active,
@@ -611,7 +878,7 @@ class LegendDialog:
                     style_w = post_table.cellWidget(row, 1)
                     color_w = post_table.cellWidget(row, 2)
                     data_w = post_table.cellWidget(row, 3)
-                    hide_w = post_table.cellWidget(row, 5)
+                    hide_w = post_table.cellWidget(row, 6)
                     if (
                         isinstance(name_w, QLineEdit)
                         and isinstance(style_w, QComboBox)
@@ -629,18 +896,38 @@ class LegendDialog:
                                 if row < len(row_sequence_filter_active)
                                 else False
                             )
+                            _ensure_symbology_row(
+                                row_post_line_widths,
+                                row_post_dot_radii,
+                                row_post_dash_lengths,
+                                row,
+                            )
+                            _sync_symbology_metric(
+                                row,
+                                style_w,
+                                color_w,
+                                widths=row_post_line_widths,
+                                dots=row_post_dot_radii,
+                                dashes=row_post_dash_lengths,
+                            )
                             lines.append(
                                 PostplotLegendEntry(
                                     name=name,
                                     line_style=style,
                                     color=color_w.color,
                                     opacity=color_w.opacity,
-                                    line_width=color_w.metric_value,
-                                    dot_radius=color_w.metric_value,
+                                    line_width=row_post_line_widths[row],
+                                    dot_radius=row_post_dot_radii[row],
+                                    dash_length_mm=row_post_dash_lengths[row],
                                     hidden=hide_w.isChecked(),
                                     data_type=data_type,
                                     sequence_ids=seq_ids,
                                     sequence_filter_active=filter_active,
+                                    conditional_colors=(
+                                        list(row_conditional_colors[row])
+                                        if row < len(row_conditional_colors)
+                                        else []
+                                    ),
                                 )
                             )
                 return lines
@@ -791,6 +1078,216 @@ class LegendDialog:
                 _fit_table_columns(post_table)
                 schedule_refit()
 
+            def _refresh_conditional_button(row: int) -> None:
+                btn = post_table.cellWidget(row, 5)
+                if not isinstance(btn, QPushButton):
+                    return
+                rules = row_conditional_colors[row] if row < len(row_conditional_colors) else []
+                enabled = [rule for rule in rules if not rule.disabled]
+                label = (
+                    f"Conditional Colors ({len(enabled)})"
+                    if enabled
+                    else "Conditional Colors"
+                )
+                btn.setText(label)
+                _apply_table_cell_button_width(btn, label)
+                _fit_table_columns(post_table, [5])
+                schedule_refit()
+
+            def _open_conditional_colors(row: int) -> None:
+                while len(row_conditional_colors) <= row:
+                    row_conditional_colors.append([])
+                saved_rules = [
+                    ConditionalColorRule(
+                        diff_stat=rule.diff_stat,
+                        range_value=rule.range_value,
+                        color=rule.color,
+                        opacity=rule.opacity,
+                        disabled=rule.disabled,
+                    )
+                    for rule in row_conditional_colors[row]
+                ]
+                name_w = post_table.cellWidget(row, 0)
+                row_name = (
+                    name_w.text().strip()
+                    if isinstance(name_w, QLineEdit) and name_w.text().strip()
+                    else f"Postplot Row {row + 1}"
+                )
+                style_w = post_table.cellWidget(row, 1)
+                color_w = post_table.cellWidget(row, 2)
+
+                def postplot_metric_config() -> tuple[str, int, int]:
+                    return "Size (mm)", 2, 80
+
+                def postplot_metric_value() -> float:
+                    if row < len(row_post_dot_radii):
+                        return row_post_dot_radii[row]
+                    if isinstance(color_w, ColorButton):
+                        return color_w.metric_value
+                    return 0.8
+
+                def build_conditional_dialog(cond_dialog: SingleInstanceDialog) -> None:
+                    cond_layout = cond_dialog.content_layout
+                    _clear_layout(cond_layout)
+                    cond_layout.setSpacing(8)
+
+                    title = QLabel(f"Conditional Colors - {row_name}")
+                    title.setStyleSheet("font-weight: 600;")
+                    title.setAlignment(
+                        Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter
+                    )
+                    cond_layout.addWidget(title)
+
+                    cond_table = QTableWidget(0, 4)
+                    cond_table.setHorizontalHeaderLabels(
+                        ["Diff Stat", "Range Value (Abs)", "Color", "Disable"]
+                    )
+                    _configure_legend_table(cond_table)
+
+                    def refit_conditional_dialog() -> None:
+                        _autosize_conditional_colors_dialog(
+                            cond_dialog,
+                            cond_layout,
+                            cond_table,
+                        )
+
+                    def collect_rules() -> list[ConditionalColorRule]:
+                        collected: list[ConditionalColorRule] = []
+                        for rule_row in range(cond_table.rowCount()):
+                            stat_w = cond_table.cellWidget(rule_row, 0)
+                            range_w = cond_table.cellWidget(rule_row, 1)
+                            color_w = cond_table.cellWidget(rule_row, 2)
+                            disable_w = cond_table.cellWidget(rule_row, 3)
+                            if (
+                                isinstance(stat_w, QComboBox)
+                                and isinstance(range_w, QLineEdit)
+                                and isinstance(color_w, ColorButton)
+                                and isinstance(disable_w, QCheckBox)
+                            ):
+                                collected.append(
+                                    ConditionalColorRule(
+                                        diff_stat=stat_w.currentText().strip().lower(),
+                                        range_value=range_w.text().strip(),
+                                        color=color_w.color,
+                                        opacity=color_w.opacity,
+                                        disabled=disable_w.isChecked(),
+                                    )
+                                )
+                        return collected
+
+                    def refresh_cond_table_layout() -> None:
+                        refit_conditional_dialog()
+
+                    def apply_conditional_rules() -> None:
+                        row_conditional_colors[row] = collect_rules()
+                        _refresh_conditional_button(row)
+                        apply_legend()
+
+                    def add_condition(rule: ConditionalColorRule | None = None) -> None:
+                        rule_row = cond_table.rowCount()
+                        cond_table.insertRow(rule_row)
+
+                        stat_combo = QComboBox()
+                        stat_combo.addItems(["Crossline", "Inline", "Radial"])
+                        stat_combo.setSizeAdjustPolicy(
+                            QComboBox.SizeAdjustPolicy.AdjustToContents
+                        )
+                        stat_combo.setMaxVisibleItems(stat_combo.count())
+                        stat_combo.view().setMinimumWidth(
+                            max(
+                                stat_combo.fontMetrics().horizontalAdvance(label) + 40
+                                for label in ("Crossline", "Inline", "Radial")
+                            )
+                        )
+                        current = (rule.diff_stat if rule else "radial").lower()
+                        stat_combo.setCurrentIndex(
+                            {"crossline": 0, "inline": 1, "radial": 2}.get(current, 2)
+                        )
+                        cond_table.setCellWidget(rule_row, 0, stat_combo)
+
+                        range_edit = QLineEdit(rule.range_value if rule else "")
+                        range_edit.setPlaceholderText("e.g. <3, 0-3, >3")
+                        cond_table.setCellWidget(rule_row, 1, range_edit)
+
+                        color_btn = ColorButton(
+                            rule.color if rule else "#22c55e",
+                            rule.opacity if rule else 1.0,
+                            postplot_metric_value(),
+                            postplot_metric_config,
+                        )
+                        cond_table.setCellWidget(rule_row, 2, color_btn)
+
+                        disable_box = QCheckBox("")
+                        disable_box.setChecked(rule.disabled if rule else False)
+                        cond_table.setCellWidget(rule_row, 3, disable_box)
+
+                        _fit_table_row(cond_table, rule_row)
+                        refresh_cond_table_layout()
+
+                    def remove_selected() -> None:
+                        selected = sorted(
+                            {idx.row() for idx in cond_table.selectedIndexes()},
+                            reverse=True,
+                        )
+                        if not selected and cond_table.currentRow() >= 0:
+                            selected = [cond_table.currentRow()]
+                        for rule_row in selected:
+                            cond_table.removeRow(rule_row)
+                        refresh_cond_table_layout()
+
+                    toolbar = QHBoxLayout()
+                    toolbar.setContentsMargins(0, 0, 0, 0)
+                    add_btn = _legend_section_toolbar_button("Add Condition Row", kind="add")
+                    remove_btn = _legend_section_toolbar_button("Remove Selected", kind="remove")
+                    add_btn.clicked.connect(lambda: add_condition())
+                    remove_btn.clicked.connect(remove_selected)
+                    toolbar.addWidget(add_btn)
+                    toolbar.addWidget(remove_btn)
+                    toolbar.addStretch()
+                    cond_layout.addLayout(toolbar)
+                    cond_layout.addWidget(cond_table)
+
+                    action_row = QHBoxLayout()
+                    action_row.setContentsMargins(0, 0, 0, 0)
+                    apply_btn = QPushButton("Apply")
+                    apply_btn.setObjectName("primaryBtn")
+                    ok_btn = QPushButton("Ok")
+                    close_btn = QPushButton("Close")
+
+                    def close_without_apply() -> None:
+                        row_conditional_colors[row] = saved_rules
+                        _refresh_conditional_button(row)
+                        cond_dialog.close()
+
+                    apply_btn.clicked.connect(apply_conditional_rules)
+                    ok_btn.clicked.connect(
+                        lambda: (apply_conditional_rules(), cond_dialog.close())
+                    )
+                    close_btn.clicked.connect(close_without_apply)
+                    action_row.addStretch()
+                    action_row.addWidget(apply_btn)
+                    action_row.addWidget(ok_btn)
+                    action_row.addWidget(close_btn)
+                    cond_layout.addLayout(action_row)
+
+                    if saved_rules:
+                        for rule in saved_rules:
+                            add_condition(rule)
+                    else:
+                        refresh_cond_table_layout()
+
+                    refit_conditional_dialog()
+                    QTimer.singleShot(0, refit_conditional_dialog)
+
+                SingleInstanceDialog.show_dialog(
+                    f"legend_conditional_colors_{row}",
+                    "Conditional Colors",
+                    build_conditional_dialog,
+                    dialog,
+                    width=_COND_MIN_DIALOG_WIDTH,
+                    height=_COND_MIN_DIALOG_HEIGHT,
+                )
+
             def _open_sequences(row: int, name: str) -> None:
                 if not seq_list:
                     return
@@ -857,21 +1354,54 @@ class LegendDialog:
                         cls._style_from_index(combo.currentIndex())
                     )
 
-                post_metric = (
-                    entry.dot_radius
-                    if entry and entry.line_style == LineStyle.DOTTED
-                    else entry.line_width if entry else 1.2
+                def post_secondary_metric_config(
+                    combo=style_combo,
+                ) -> tuple[str, int, int] | None:
+                    return cls._secondary_metric_config_for_style(
+                        cls._style_from_index(combo.currentIndex())
+                    )
+
+                _ensure_symbology_row(
+                    row_post_line_widths,
+                    row_post_dot_radii,
+                    row_post_dash_lengths,
+                    row,
+                    entry,
+                )
+                post_style = (
+                    entry.line_style
+                    if entry
+                    else cls._style_from_index(style_combo.currentIndex())
                 )
                 post_color = ColorButton(
                     entry.color if entry else "#ef4444",
                     entry.opacity if entry else 1.0,
-                    post_metric,
+                    _symbology_metric_value(
+                        row_post_line_widths,
+                        row_post_dot_radii,
+                        row_post_dash_lengths,
+                        row,
+                        post_style,
+                    ),
                     post_metric_config,
+                    secondary_metric_value=_symbology_secondary_metric_value(
+                        row_post_dash_lengths,
+                        row,
+                        post_style,
+                    ),
+                    secondary_metric_provider=post_secondary_metric_config,
                 )
+                _bind_style_metric_switch(
+                    row,
+                    style_combo,
+                    post_color,
+                    widths=row_post_line_widths,
+                    dots=row_post_dot_radii,
+                    dashes=row_post_dash_lengths,
+                )
+                post_table.setCellWidget(row, 2, post_color)
                 post_color.color_changed.connect(live_apply)
                 post_color.opacity_changed.connect(live_apply)
-                post_color.metric_changed.connect(live_apply)
-                post_table.setCellWidget(row, 2, post_color)
 
                 data_combo = QComboBox()
                 data_combo.addItems(list(cls._DATA_TYPE_LABELS))
@@ -885,6 +1415,9 @@ class LegendDialog:
                 row_sequence_filter_active.append(
                     entry.sequence_filter_active if entry else False
                 )
+                row_conditional_colors.append(
+                    list(entry.conditional_colors) if entry else []
+                )
                 seq_btn = _table_cell_button(
                     f"Select Sequences ({len(seq_ids)})" if seq_ids else "Select Sequences"
                 )
@@ -897,9 +1430,16 @@ class LegendDialog:
                 ))
                 post_table.setCellWidget(row, 4, seq_btn)
 
+                conditional_btn = _table_cell_button("Conditional Colors")
+                conditional_btn.clicked.connect(
+                    lambda _checked=False, r=row: _open_conditional_colors(r)
+                )
+                post_table.setCellWidget(row, 5, conditional_btn)
+                _refresh_conditional_button(row)
+
                 hide_box = _hide_checkbox(entry.hidden if entry else False)
                 hide_box.toggled.connect(live_apply)
-                post_table.setCellWidget(row, 5, hide_box)
+                post_table.setCellWidget(row, 6, hide_box)
                 _fit_table_row(post_table, row)
                 _fit_table_columns(post_table)
                 schedule_refit()
@@ -912,6 +1452,14 @@ class LegendDialog:
                         del row_sequence_ids[row]
                     if row < len(row_sequence_filter_active):
                         del row_sequence_filter_active[row]
+                    if row < len(row_conditional_colors):
+                        del row_conditional_colors[row]
+                    if row < len(row_post_line_widths):
+                        del row_post_line_widths[row]
+                    if row < len(row_post_dot_radii):
+                        del row_post_dot_radii[row]
+                    if row < len(row_post_dash_lengths):
+                        del row_post_dash_lengths[row]
                     schedule_refit()
                     apply_legend()
 
@@ -977,20 +1525,53 @@ class LegendDialog:
                         cls._style_from_index(combo.currentIndex())
                     )
 
-                preplot_metric = (
-                    entry.dot_radius
-                    if entry and entry.line_style == LineStyle.DOTTED
-                    else entry.line_width if entry else 0.9
+                def preplot_secondary_metric_config(
+                    combo=style_combo,
+                ) -> tuple[str, int, int] | None:
+                    return cls._secondary_metric_config_for_style(
+                        cls._style_from_index(combo.currentIndex())
+                    )
+
+                _ensure_symbology_row(
+                    row_preplot_line_widths,
+                    row_preplot_dot_radii,
+                    row_preplot_dash_lengths,
+                    row,
+                    entry,
+                )
+                preplot_style = (
+                    entry.line_style
+                    if entry
+                    else cls._style_from_index(style_combo.currentIndex())
                 )
                 color_btn = ColorButton(
                     entry.color if entry else "#f59e0b",
                     entry.opacity if entry else 1.0,
-                    preplot_metric,
+                    _symbology_metric_value(
+                        row_preplot_line_widths,
+                        row_preplot_dot_radii,
+                        row_preplot_dash_lengths,
+                        row,
+                        preplot_style,
+                    ),
                     preplot_metric_config,
+                    secondary_metric_value=_symbology_secondary_metric_value(
+                        row_preplot_dash_lengths,
+                        row,
+                        preplot_style,
+                    ),
+                    secondary_metric_provider=preplot_secondary_metric_config,
+                )
+                _bind_style_metric_switch(
+                    row,
+                    style_combo,
+                    color_btn,
+                    widths=row_preplot_line_widths,
+                    dots=row_preplot_dot_radii,
+                    dashes=row_preplot_dash_lengths,
                 )
                 color_btn.color_changed.connect(live_apply)
                 color_btn.opacity_changed.connect(live_apply)
-                color_btn.metric_changed.connect(live_apply)
                 preplot_table.setCellWidget(row, 3, color_btn)
 
                 hide_box = _hide_checkbox(entry.hidden if entry else False)
@@ -1004,6 +1585,12 @@ class LegendDialog:
                 row = preplot_table.currentRow()
                 if row >= 0:
                     preplot_table.removeRow(row)
+                    if row < len(row_preplot_line_widths):
+                        del row_preplot_line_widths[row]
+                    if row < len(row_preplot_dot_radii):
+                        del row_preplot_dot_radii[row]
+                    if row < len(row_preplot_dash_lengths):
+                        del row_preplot_dash_lengths[row]
                     schedule_refit()
                     apply_legend()
 
@@ -1105,20 +1692,53 @@ class LegendDialog:
                         cls._style_from_index(combo.currentIndex())
                     )
 
-                navplan_metric = (
-                    entry.dot_radius
-                    if entry and entry.line_style == LineStyle.DOTTED
-                    else entry.line_width if entry else 0.9
+                def navplan_secondary_metric_config(
+                    combo=style_combo,
+                ) -> tuple[str, int, int] | None:
+                    return cls._secondary_metric_config_for_style(
+                        cls._style_from_index(combo.currentIndex())
+                    )
+
+                _ensure_symbology_row(
+                    row_navplan_line_widths,
+                    row_navplan_dot_radii,
+                    row_navplan_dash_lengths,
+                    row,
+                    entry,
+                )
+                navplan_style = (
+                    entry.line_style
+                    if entry
+                    else cls._style_from_index(style_combo.currentIndex())
                 )
                 color_btn = ColorButton(
                     entry.color if entry else "#22c55e",
                     entry.opacity if entry else 1.0,
-                    navplan_metric,
+                    _symbology_metric_value(
+                        row_navplan_line_widths,
+                        row_navplan_dot_radii,
+                        row_navplan_dash_lengths,
+                        row,
+                        navplan_style,
+                    ),
                     navplan_metric_config,
+                    secondary_metric_value=_symbology_secondary_metric_value(
+                        row_navplan_dash_lengths,
+                        row,
+                        navplan_style,
+                    ),
+                    secondary_metric_provider=navplan_secondary_metric_config,
+                )
+                _bind_style_metric_switch(
+                    row,
+                    style_combo,
+                    color_btn,
+                    widths=row_navplan_line_widths,
+                    dots=row_navplan_dot_radii,
+                    dashes=row_navplan_dash_lengths,
                 )
                 color_btn.color_changed.connect(live_apply)
                 color_btn.opacity_changed.connect(live_apply)
-                color_btn.metric_changed.connect(live_apply)
                 navplan_table.setCellWidget(row, 2, color_btn)
 
                 selected = list(entry.navplan_source_indices) if entry else []
@@ -1155,6 +1775,12 @@ class LegendDialog:
                         del row_navplan_indices[row]
                     if row < len(row_navplan_filter_active):
                         del row_navplan_filter_active[row]
+                    if row < len(row_navplan_line_widths):
+                        del row_navplan_line_widths[row]
+                    if row < len(row_navplan_dot_radii):
+                        del row_navplan_dot_radii[row]
+                    if row < len(row_navplan_dash_lengths):
+                        del row_navplan_dash_lengths[row]
                     schedule_refit()
                     apply_legend()
 

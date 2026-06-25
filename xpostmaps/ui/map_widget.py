@@ -126,12 +126,32 @@ def _color_with_opacity(color: str, opacity: float) -> tuple[int, int, int, int]
     return c.red(), c.green(), c.blue(), c.alpha()
 
 
+def _dash_pen_pattern(width_px: float, dash_length_mm: float, dpi: float) -> list[float]:
+    """Dash/gap lengths for a custom dash pen.
+
+    Qt specifies ``CustomDashLine`` pattern values in *units of the pen width*,
+    so the on-screen length is ``value * penWidth``. We compute the desired
+    dash/gap in absolute screen pixels and divide by the pen width so the dash
+    looks the same regardless of how thick the line is. Minimums keep the dash
+    clearly visible (never collapsing to a solid stroke) even for very small
+    ``dash_length_mm`` values.
+    """
+    width_px = max(float(width_px), 0.1)
+    # Honour the user's dash length (mm -> px) so the slider visibly changes the
+    # dash. Keep small floors only so a dash never collapses into a solid stroke;
+    # the floors are small enough that the configured length still dominates.
+    dash_px = max(3.0, mm_to_pixels(dpi, max(dash_length_mm, 0.05)))
+    gap_px = max(2.5, dash_px * 0.85)
+    return [dash_px / width_px, gap_px / width_px]
+
+
 def _make_nav_pen(
     rgba: tuple[int, int, int, int],
     width_mm: float,
     line_style: LineStyle,
     *,
     dpi: float,
+    dash_length_mm: float = 3.0,
 ) -> QPen:
     """Legend widths are millimeters on screen, like QGIS canvas symbology."""
     color = QColor(rgba[0], rgba[1], rgba[2], rgba[3])
@@ -141,9 +161,12 @@ def _make_nav_pen(
     pen.setCapStyle(Qt.PenCapStyle.RoundCap)
     pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
     style = normalize_line_style(line_style)
-    pen.setStyle(
-        Qt.PenStyle.DashLine if style == LineStyle.DASH else Qt.PenStyle.SolidLine
-    )
+    if style == LineStyle.DASH:
+        pen.setStyle(Qt.PenStyle.CustomDashLine)
+        pen.setDashPattern(_dash_pen_pattern(pen.widthF(), dash_length_mm, dpi))
+        pen.setCapStyle(Qt.PenCapStyle.FlatCap)
+    else:
+        pen.setStyle(Qt.PenStyle.SolidLine)
     return pen
 
 
@@ -151,19 +174,25 @@ def _make_export_pen(
     rgba: tuple[int, int, int, int],
     width_mm: float,
     line_style: LineStyle,
+    *,
+    dash_length_mm: float = 3.0,
 ) -> QPen:
-    pen = _make_nav_pen(rgba, width_mm, line_style, dpi=PDF_EXPORT_DPI)
+    pen = _make_nav_pen(
+        rgba,
+        width_mm,
+        line_style,
+        dpi=PDF_EXPORT_DPI,
+        dash_length_mm=dash_length_mm,
+    )
     export_pen = QPen(pen)
     export_pen.setWidthF(
         max(_EXPORT_MIN_LINE_WIDTH, pen.widthF() * _EXPORT_LINE_WIDTH_SCALE)
     )
     if normalize_line_style(line_style) == LineStyle.DASH:
-        # Qt's default dash pattern scales with pen width; with print-weight
-        # hairlines that collapses to a nearly solid stroke in PDF viewers.
-        # Use a wider explicit pattern so dashes remain visible without using
-        # thick screen-weight export lines.
         export_pen.setStyle(Qt.PenStyle.CustomDashLine)
-        export_pen.setDashPattern([16.0, 8.0])
+        export_pen.setDashPattern(
+            _dash_pen_pattern(export_pen.widthF(), dash_length_mm, PDF_EXPORT_DPI)
+        )
         export_pen.setCapStyle(Qt.PenCapStyle.FlatCap)
     export_pen.setCosmetic(True)
     return export_pen
@@ -424,6 +453,13 @@ class PostplotMapWidget(QWidget):
         super().__init__(parent)
         self._display_mode = DisplayMode.LINES
         self._legend = LegendConfig.default()
+        self._conditional_postplot_points: tuple[tuple[float, float, str, float, float], ...] = ()
+        self._conditional_postplot_lookup: dict[
+            tuple[int, int], tuple[str, float, float]
+        ] = {}
+        self._cond_keys_sorted: np.ndarray = np.empty(0, dtype=np.int64)
+        self._cond_group_idx: np.ndarray = np.empty(0, dtype=np.int64)
+        self._cond_groups: tuple[tuple[str, float, float], ...] = ()
         self._origin_x = 0.0
         self._origin_y = 0.0
         self._suppress_view_changed = False
@@ -628,6 +664,197 @@ class PostplotMapWidget(QWidget):
     def set_legend(self, legend: LegendConfig) -> None:
         self._legend = legend
         self._cached_signature = None
+
+    def set_conditional_postplot_points(
+        self,
+        points: list[tuple[float, float, str, float, float]],
+    ) -> None:
+        """Set per-shotpoint conditional colors keyed by map coordinates.
+
+        Each tuple is (x, y, color, opacity, radius_mm). Matching shotpoints are
+        drawn in these colors for every postplot line style (dotted markers,
+        or markers on solid/dash lines with the connecting stroke broken).
+        """
+        self._conditional_postplot_points = tuple(points)
+        lookup: dict[tuple[int, int], tuple[str, float, float]] = {}
+        for x, y, color, opacity, radius_mm in points:
+            if x == x and y == y:
+                lookup[self._conditional_coord_key(x, y)] = (color, opacity, radius_mm)
+        self._conditional_postplot_lookup = lookup
+        # Build vectorized lookup structures so per-segment classification is a
+        # single numpy searchsorted instead of a Python-level dict loop over
+        # every vertex (which dominated render time on dense surveys).
+        if lookup:
+            group_index: dict[tuple[str, float, float], int] = {}
+            group_list: list[tuple[str, float, float]] = []
+            combined = np.empty(len(lookup), dtype=np.int64)
+            gidx = np.empty(len(lookup), dtype=np.int64)
+            for i, (key, style) in enumerate(lookup.items()):
+                kx, ky = key
+                combined[i] = kx * self._COND_KEY_MUL + ky
+                gi = group_index.get(style)
+                if gi is None:
+                    gi = len(group_list)
+                    group_index[style] = gi
+                    group_list.append(style)
+                gidx[i] = gi
+            order = np.argsort(combined)
+            self._cond_keys_sorted = combined[order]
+            self._cond_group_idx = gidx[order]
+            self._cond_groups = tuple(group_list)
+        else:
+            self._cond_keys_sorted = np.empty(0, dtype=np.int64)
+            self._cond_group_idx = np.empty(0, dtype=np.int64)
+            self._cond_groups = ()
+        self._cached_signature = None
+
+    _COND_KEY_MUL = 4_000_000_000
+
+    @staticmethod
+    def _conditional_coord_key(x: float, y: float) -> tuple[int, int]:
+        """Round map coordinates to 1 cm for stable conditional-color lookup."""
+        return (round(x * 100.0), round(y * 100.0))
+
+    def _split_scatter_coords(
+        self,
+        xs: np.ndarray,
+        ys: np.ndarray,
+    ) -> tuple[
+        np.ndarray,
+        np.ndarray,
+        dict[tuple[str, float, float], tuple[list[float], list[float]]],
+    ]:
+        """Partition scatter coordinates into default and conditional batches."""
+        if xs.size == 0 or self._cond_keys_sorted.size == 0:
+            return xs, ys, {}
+
+        kx = np.rint(xs * 100.0).astype(np.int64)
+        ky = np.rint(ys * 100.0).astype(np.int64)
+        query = kx * self._COND_KEY_MUL + ky
+        pos = np.searchsorted(self._cond_keys_sorted, query)
+        np.clip(pos, 0, self._cond_keys_sorted.size - 1, out=pos)
+        matched = self._cond_keys_sorted[pos] == query
+
+        default_xs = xs[~matched]
+        default_ys = ys[~matched]
+        conditional: dict[tuple[str, float, float], tuple[list[float], list[float]]] = {}
+        if matched.any():
+            group_ids = self._cond_group_idx[pos]
+            for gi in np.unique(group_ids[matched]):
+                sel = matched & (group_ids == gi)
+                style = self._cond_groups[int(gi)]
+                conditional[style] = (xs[sel].tolist(), ys[sel].tolist())
+        return default_xs, default_ys, conditional
+
+    def _conditional_vertex_colors(
+        self,
+        xs: np.ndarray,
+        ys: np.ndarray,
+        default_rgba: tuple[int, int, int, int],
+    ) -> np.ndarray | None:
+        """Return per-vertex RGBA colors for existing geometry.
+
+        This is the guardrail against conditional overlay regressions: conditional
+        color is stored on the original vertices/shotpoints, not emitted as a
+        second marker or fragmented line layer.
+        """
+        if xs.size == 0 or self._cond_keys_sorted.size == 0:
+            return None
+        kx = np.rint(xs * 100.0).astype(np.int64)
+        ky = np.rint(ys * 100.0).astype(np.int64)
+        query = kx * self._COND_KEY_MUL + ky
+        pos = np.searchsorted(self._cond_keys_sorted, query)
+        np.clip(pos, 0, self._cond_keys_sorted.size - 1, out=pos)
+        matched = self._cond_keys_sorted[pos] == query
+        if not matched.any():
+            return None
+
+        colors = np.empty((xs.size, 4), dtype=np.float32)
+        colors[:] = (
+            default_rgba[0] / 255.0,
+            default_rgba[1] / 255.0,
+            default_rgba[2] / 255.0,
+            default_rgba[3] / 255.0,
+        )
+        group_ids = self._cond_group_idx[pos]
+        for gi in np.unique(group_ids[matched]):
+            sel = matched & (group_ids == gi)
+            color, opacity, _radius = self._cond_groups[int(gi)]
+            cond_rgba = _color_with_opacity(color, opacity)
+            colors[sel] = (
+                cond_rgba[0] / 255.0,
+                cond_rgba[1] / 255.0,
+                cond_rgba[2] / 255.0,
+                cond_rgba[3] / 255.0,
+            )
+        return colors
+
+    def _split_polyline_by_color(
+        self,
+        xs: np.ndarray,
+        ys: np.ndarray,
+    ) -> tuple[
+        list[tuple[np.ndarray, np.ndarray]],
+        dict[tuple[str, float], list[tuple[np.ndarray, np.ndarray]]],
+    ]:
+        """Split a polyline into colored runs that keep the parent line style.
+
+        Returns ``(default_parts, conditional_parts)`` where each entry is a list
+        of polylines. Conditional runs are keyed by ``(color, opacity)`` and are
+        drawn with the same line style as the parent — only the color changes.
+        Boundary vertices are shared between adjacent runs so the line stays
+        visually continuous (no gaps).
+        """
+        if xs.size == 0 or not self._conditional_postplot_lookup:
+            return [(xs, ys)], {}
+
+        default_parts: list[tuple[np.ndarray, np.ndarray]] = []
+        conditional: dict[tuple[str, float], list[tuple[np.ndarray, np.ndarray]]] = {}
+
+        _SENTINEL = object()
+        run_style: object = _SENTINEL
+        run_x: list[float] = []
+        run_y: list[float] = []
+
+        def flush_run() -> None:
+            nonlocal run_x, run_y
+            if len(run_x) >= 2:
+                part = (
+                    np.asarray(run_x, dtype=np.float64),
+                    np.asarray(run_y, dtype=np.float64),
+                )
+                if run_style is None:
+                    default_parts.append(part)
+                else:
+                    color, opacity, _radius = run_style  # type: ignore[misc]
+                    conditional.setdefault((color, opacity), []).append(part)
+            run_x = []
+            run_y = []
+
+        for x, y in zip(xs.tolist(), ys.tolist(), strict=False):
+            style = self._conditional_postplot_lookup.get(self._conditional_coord_key(x, y))
+            if run_style is _SENTINEL:
+                run_style = style
+                run_x = [x]
+                run_y = [y]
+                continue
+            if style != run_style:
+                # Share the boundary vertex so the colored run connects to the
+                # previous run without leaving a gap.
+                run_x.append(x)
+                run_y.append(y)
+                flush_run()
+                run_style = style
+                run_x = [x]
+                run_y = [y]
+            else:
+                run_x.append(x)
+                run_y.append(y)
+        flush_run()
+
+        if not default_parts and not conditional:
+            return [(xs, ys)], {}
+        return default_parts, conditional
 
     def prepare_for_export(
         self,
@@ -1104,9 +1331,9 @@ class PostplotMapWidget(QWidget):
             for item in self._overview_cpu_items:
                 item.setVisible(True)
             for layer in self._gl_line_layers:
-                layer.set_gl_visible(False)
+                layer.set_gl_visible(layer.has_vertex_colors)
             for layer in self._gl_scatter_layers:
-                layer.set_gl_visible(False)
+                layer.set_gl_visible(layer.has_vertex_colors)
             return
         self._gl_overlay.set_viewport_cull(False)
         for item in self._overview_cpu_items:
@@ -1251,11 +1478,11 @@ class PostplotMapWidget(QWidget):
 
     def _style_for_segment(
         self, segment: LineSegment, *, width_override: float | None = None
-    ) -> tuple[str, LineStyle, float, float, float]:
+    ) -> tuple[str, LineStyle, float, float, float, float]:
         if segment.record_type == RecordType.OVERLAY:
-            return OVERLAY_LINE, LineStyle.SOLID, 1.0, width_override or 0.35, 0.8
+            return OVERLAY_LINE, LineStyle.SOLID, 1.0, width_override or 0.35, 0.8, 3.0
         if segment.record_type in (RecordType.PREPLOT, RecordType.NAVPLAN):
-            return PREPLOT_LINE, LineStyle.SOLID, 1.0, width_override or 0.35, 0.8
+            return PREPLOT_LINE, LineStyle.SOLID, 1.0, width_override or 0.35, 0.8, 3.0
 
         entry = self._entry_for_segment(segment)
         if entry:
@@ -1265,10 +1492,11 @@ class PostplotMapWidget(QWidget):
                 entry.opacity,
                 width_override or entry.line_width,
                 entry.dot_radius,
+                entry.dash_length_mm,
             )
 
         default_color = UP_LINE if segment.direction >= 0 else DOWN_LINE
-        return default_color, LineStyle.SOLID, 1.0, width_override or 0.35, 0.8
+        return default_color, LineStyle.SOLID, 1.0, width_override or 0.35, 0.8, 3.0
 
     def _segment_should_draw(self, segment: LineSegment) -> bool:
         if segment.record_type not in self._NAV_TYPES:
@@ -1277,7 +1505,7 @@ class PostplotMapWidget(QWidget):
 
     def _style_fn_for_batch(self, width_override: float | None = None):
         def style_fn(segment: LineSegment) -> tuple[str, LineStyle, float]:
-            color, line_style, opacity, width, _dot_radius = self._style_for_segment(
+            color, line_style, opacity, width, _dot_radius, _dash = self._style_for_segment(
                 segment, width_override=width_override
             )
             _ = width
@@ -1302,13 +1530,17 @@ class PostplotMapWidget(QWidget):
             return
         style_fn = self._style_fn_for_batch(width_override)
         batches: dict[LineBatchKey, list[tuple[np.ndarray, np.ndarray]]] = {}
+        color_batches: dict[
+            LineBatchKey,
+            list[tuple[np.ndarray, np.ndarray, np.ndarray]],
+        ] = {}
         for segment in segments:
             if not segment.xs:
                 continue
             color, line_style, opacity = style_fn(segment)
             line_style = normalize_line_style(line_style)
             rgba = _color_with_opacity(color, opacity)
-            _, _, _, width, dot_radius = self._style_for_segment(
+            _, _, _, width, dot_radius, dash_length_mm = self._style_for_segment(
                 segment,
                 width_override=width_override,
             )
@@ -1318,15 +1550,46 @@ class PostplotMapWidget(QWidget):
                 width=width,
                 dotted=renders_as_scatter(line_style),
                 dot_radius=dot_radius,
+                dash_length_mm=dash_length_mm,
             )
             xs = np.asarray(segment.xs, dtype=np.float64)
             ys = np.asarray(segment.ys, dtype=np.float64)
-            batches.setdefault(key, []).append((xs, ys))
+            color_part = self._conditional_vertex_colors(xs, ys, rgba)
+            if color_part is not None:
+                color_batches.setdefault(key, []).append((xs, ys, color_part))
+            else:
+                batches.setdefault(key, []).append((xs, ys))
+
+        for key in list(color_batches):
+            plain_parts = batches.pop(key, [])
+            if not plain_parts:
+                continue
+            default = np.array(
+                (
+                    key.color[0] / 255.0,
+                    key.color[1] / 255.0,
+                    key.color[2] / 255.0,
+                    key.color[3] / 255.0,
+                ),
+                dtype=np.float32,
+            )
+            for xs, ys in plain_parts:
+                colors = np.empty((xs.size, 4), dtype=np.float32)
+                colors[:] = default
+                color_batches[key].append((xs, ys, colors))
 
         for key, parts in batches.items():
             self._add_batch_item(
                 key,
                 parts,
+                clipable=not key.dotted,
+                layer=layer,
+            )
+        for key, parts in color_batches.items():
+            self._add_batch_item(
+                key,
+                [(xs, ys) for xs, ys, _colors in parts],
+                color_parts=[colors for _xs, _ys, colors in parts],
                 clipable=not key.dotted,
                 layer=layer,
             )
@@ -1336,6 +1599,7 @@ class PostplotMapWidget(QWidget):
         key: LineBatchKey,
         parts: list[tuple[np.ndarray, np.ndarray]],
         *,
+        color_parts: list[np.ndarray] | None = None,
         clipable: bool = False,
         layer: str = "postplot",
     ) -> None:
@@ -1346,6 +1610,18 @@ class PostplotMapWidget(QWidget):
             xs, ys = shotpoint_marker_coords(local_parts)
             if xs.size == 0:
                 return
+            marker_colors: np.ndarray | None = None
+            if color_parts is not None:
+                color_chunks: list[np.ndarray] = []
+                for (px, py), colors in zip(local_parts, color_parts, strict=False):
+                    finite = np.isfinite(px) & np.isfinite(py)
+                    if colors.shape[0] == px.size and np.any(finite):
+                        color_chunks.append(colors[finite])
+                if color_chunks:
+                    marker_colors = np.ascontiguousarray(
+                        np.concatenate(color_chunks),
+                        dtype=np.float32,
+                    )
             radius_mm = migrate_dot_radius_mm(key.dot_radius)
             screen_size = scatter_size_px(self._screen_dpi(), radius_mm)
             export_size = scatter_size_px(PDF_EXPORT_DPI, radius_mm)
@@ -1358,20 +1634,22 @@ class PostplotMapWidget(QWidget):
                 overview_x, overview_y = screen_scatter_geometry(
                     xs, ys, budget=SCREEN_OVERVIEW_BUDGET
                 )
-                overview_scatter = pg.ScatterPlotItem(
-                    overview_x,
-                    overview_y,
-                    pen=None,
-                    brush=pg.mkBrush(rgba),
-                    size=screen_size,
-                    pxMode=True,
-                    symbol="o",
-                )
-                self._register_plot_item(overview_scatter, layer=layer)
-                self._overview_cpu_items.append(overview_scatter)
+                if color_parts is None:
+                    overview_scatter = pg.ScatterPlotItem(
+                        overview_x,
+                        overview_y,
+                        pen=None,
+                        brush=pg.mkBrush(rgba),
+                        size=screen_size,
+                        pxMode=True,
+                        symbol="o",
+                    )
+                    self._register_plot_item(overview_scatter, layer=layer)
+                    self._overview_cpu_items.append(overview_scatter)
                 self._overview_strokes.append((xs, ys, rgba))
                 gl_layer = ResidentGlScatterLayer(
                     parts=local_parts,
+                    color_parts=color_parts,
                     rgba=rgba,
                     screen_size=screen_size,
                     export_size=export_size,
@@ -1390,11 +1668,22 @@ class PostplotMapWidget(QWidget):
             screen_x, screen_y = screen_scatter_geometry(
                 xs, ys, budget=_SCREEN_SCATTER_BUDGET
             )
+            brush = pg.mkBrush(rgba)
+            if marker_colors is not None and marker_colors.shape[0] == screen_x.size:
+                brush = [
+                    pg.mkBrush(
+                        int(c[0] * 255),
+                        int(c[1] * 255),
+                        int(c[2] * 255),
+                        int(c[3] * 255),
+                    )
+                    for c in marker_colors
+                ]
             item = pg.ScatterPlotItem(
                 screen_x,
                 screen_y,
                 pen=None,
-                brush=pg.mkBrush(rgba),
+                brush=brush,
                 size=screen_size,
                 pxMode=True,
                 symbol="o",
@@ -1435,12 +1724,22 @@ class PostplotMapWidget(QWidget):
             return
 
         width_mm = migrate_line_width_mm(key.width)
-        pen = _make_nav_pen(rgba, width_mm, line_style, dpi=self._screen_dpi())
+        dash_length_mm = migrate_dot_radius_mm(key.dash_length_mm)
+        pen = _make_nav_pen(
+            rgba,
+            width_mm,
+            line_style,
+            dpi=self._screen_dpi(),
+            dash_length_mm=dash_length_mm,
+        )
         local_parts: list[tuple[np.ndarray, np.ndarray]] = []
-        for part_xs, part_ys in parts:
+        local_color_parts: list[np.ndarray] | None = [] if color_parts is not None else None
+        for index, (part_xs, part_ys) in enumerate(parts):
             lx, ly = self._localize_array(part_xs, part_ys)
             if lx.size >= 2:
                 local_parts.append((lx, ly))
+                if local_color_parts is not None and color_parts is not None:
+                    local_color_parts.append(color_parts[index])
         if not local_parts:
             return
         if len(local_parts) == 1:
@@ -1451,30 +1750,37 @@ class PostplotMapWidget(QWidget):
         dense_gl_line = (
             clipable
             and layer in ("postplot", "navplan")
-            and lx.size > _CLIP_REGISTER_MIN
+            and (lx.size > _CLIP_REGISTER_MIN or bool(self._conditional_postplot_lookup))
             and line_style in (LineStyle.SOLID, LineStyle.DASH)
         )
         if dense_gl_line and self._gl_overlay.available:
-            export_pen = _make_export_pen(rgba, width_mm, line_style)
+            export_pen = _make_export_pen(
+                rgba,
+                width_mm,
+                line_style,
+                dash_length_mm=dash_length_mm,
+            )
             overview_x, overview_y = screen_line_geometry(
                 lx,
                 ly,
                 budget=SCREEN_OVERVIEW_BUDGET,
             )
-            overview_curve = pg.PlotCurveItem(
-                overview_x,
-                overview_y,
-                pen=pen,
-                connect="finite",
-                antialias=False,
-                skipFiniteCheck=True,
-            )
-            overview_curve.setSegmentedLineMode("off")
-            self._register_plot_item(overview_curve, layer=layer)
-            self._overview_cpu_items.append(overview_curve)
+            if color_parts is None:
+                overview_curve = pg.PlotCurveItem(
+                    overview_x,
+                    overview_y,
+                    pen=pen,
+                    connect="finite",
+                    antialias=False,
+                    skipFiniteCheck=True,
+                )
+                overview_curve.setSegmentedLineMode("off")
+                self._register_plot_item(overview_curve, layer=layer)
+                self._overview_cpu_items.append(overview_curve)
             self._overview_strokes.append((lx, ly, rgba))
             gl_layer = ResidentGlLineLayer(
                 parts=local_parts,
+                color_parts=local_color_parts,
                 pen=pen,
                 export_pen=export_pen,
                 line_style=line_style,
@@ -1514,16 +1820,22 @@ class PostplotMapWidget(QWidget):
             antialias=False,
             skipFiniteCheck=True,
         )
-        # Render as one connected path (single drawPath) rather than thousands of
-        # individual line segments. With the round join this stays solid (no gap
-        # artefacts) and is markedly cheaper to repaint while panning/zooming.
+        # One connected path (single drawPath) so the cosmetic dash pattern runs
+        # continuously along the whole line. Segmented mode restarts the dash on
+        # every vertex, which collapses to a solid stroke once dense, settled
+        # geometry is shown (only looked dashed during decimated motion LOD).
         curve.setSegmentedLineMode("off")
         self._register_plot_item(curve, layer=layer)
         self._line_items.append(
             {
                 "item": curve,
                 "pen": pen,
-                "export_pen": _make_export_pen(rgba, width_mm, line_style),
+                "export_pen": _make_export_pen(
+                    rgba,
+                    width_mm,
+                    line_style,
+                    dash_length_mm=dash_length_mm,
+                ),
             }
         )
 
@@ -1566,6 +1878,7 @@ class PostplotMapWidget(QWidget):
         opacity: float,
         width: float = 0.9,
         dot_radius: float = 3.0,
+        dash_length_mm: float = 3.0,
         layer: str = "preplot",
     ) -> None:
         if not segments:
@@ -1578,6 +1891,7 @@ class PostplotMapWidget(QWidget):
             width=width,
             dotted=renders_as_scatter(line_style),
             dot_radius=dot_radius,
+            dash_length_mm=dash_length_mm,
         )
         parts: list[tuple[np.ndarray, np.ndarray]] = []
         for segment in segments:
@@ -1616,6 +1930,7 @@ class PostplotMapWidget(QWidget):
                 opacity=entry.opacity,
                 width=entry.line_width,
                 dot_radius=entry.dot_radius,
+                dash_length_mm=entry.dash_length_mm,
                 layer="preplot",
             )
 
@@ -1650,6 +1965,7 @@ class PostplotMapWidget(QWidget):
                 opacity=entry.opacity,
                 width=entry.line_width,
                 dot_radius=entry.dot_radius,
+                dash_length_mm=entry.dash_length_mm,
                 layer="navplan",
             )
 
@@ -2167,7 +2483,7 @@ class PostplotMapWidget(QWidget):
                 entry.hidden,
             )
             for entry in self._legend.postplot_lines
-        )
+        ) + (self._conditional_postplot_points,)
 
     def _area_signature(self) -> tuple:
         return tuple(

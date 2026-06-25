@@ -5,6 +5,7 @@ from __future__ import annotations
 from xpostmaps.core.models import (
     AreaCoordinateMode,
     AreaLegendEntry,
+    ConditionalColorRule,
     LegendConfig,
     LineStyle,
     NavplanLegendEntry,
@@ -31,6 +32,26 @@ def _polygon_point_from_dict(data: dict) -> PolygonPoint:
         y=float(data.get("y", 0.0)),
         latitude=str(data.get("latitude", "")),
         longitude=str(data.get("longitude", "")),
+    )
+
+
+def _conditional_rule_to_dict(rule: ConditionalColorRule) -> dict:
+    return {
+        "diff_stat": rule.diff_stat,
+        "range_value": rule.range_value,
+        "color": rule.color,
+        "opacity": rule.opacity,
+        "disabled": rule.disabled,
+    }
+
+
+def _conditional_rule_from_dict(data: dict) -> ConditionalColorRule:
+    return ConditionalColorRule(
+        diff_stat=str(data.get("diff_stat", "radial")),
+        range_value=str(data.get("range_value", "")),
+        color=str(data.get("color", "#22c55e")),
+        opacity=float(data.get("opacity", 1.0)),
+        disabled=bool(data.get("disabled", False)),
     )
 
 
@@ -63,6 +84,7 @@ def legend_to_dict(config: LegendConfig) -> dict:
                 "opacity": p.opacity,
                 "line_width": p.line_width,
                 "dot_radius": p.dot_radius,
+                "dash_length_mm": p.dash_length_mm,
                 "hidden": p.hidden,
             }
             for p in config.preplot_lines
@@ -89,10 +111,15 @@ def legend_to_dict(config: LegendConfig) -> dict:
                 "opacity": p.opacity,
                 "line_width": p.line_width,
                 "dot_radius": p.dot_radius,
+                "dash_length_mm": p.dash_length_mm,
                 "hidden": p.hidden,
                 "data_type": p.data_type.value,
                 "sequence_ids": list(p.sequence_ids),
                 "sequence_filter_active": p.sequence_filter_active,
+                "conditional_colors": [
+                    _conditional_rule_to_dict(rule)
+                    for rule in p.conditional_colors
+                ],
             }
             for p in config.postplot_lines
         ],
@@ -160,6 +187,9 @@ def legend_from_dict(data: dict | None) -> LegendConfig:
                 opacity=float(item.get("opacity", 1.0)),
                 line_width=migrate_line_width_mm(float(item.get("line_width", 0.9))),
                 dot_radius=migrate_dot_radius_mm(float(item.get("dot_radius", 3.0))),
+                dash_length_mm=migrate_dot_radius_mm(
+                    float(item.get("dash_length_mm", item.get("dot_radius", 3.0)))
+                ),
                 hidden=bool(item.get("hidden", False)),
             )
         )
@@ -178,6 +208,9 @@ def legend_from_dict(data: dict | None) -> LegendConfig:
                 opacity=float(item.get("opacity", 1.0)),
                 line_width=migrate_line_width_mm(float(item.get("line_width", 0.9))),
                 dot_radius=migrate_dot_radius_mm(float(item.get("dot_radius", 3.0))),
+                dash_length_mm=migrate_dot_radius_mm(
+                    float(item.get("dash_length_mm", item.get("dot_radius", 3.0)))
+                ),
                 hidden=bool(item.get("hidden", False)),
                 navplan_source_indices=[
                     int(index) for index in item.get("navplan_source_indices", [])
@@ -210,6 +243,9 @@ def legend_from_dict(data: dict | None) -> LegendConfig:
                 opacity=float(item.get("opacity", 1.0)),
                 line_width=migrate_line_width_mm(float(item.get("line_width", 1.2))),
                 dot_radius=migrate_dot_radius_mm(float(item.get("dot_radius", 3.0))),
+                dash_length_mm=migrate_dot_radius_mm(
+                    float(item.get("dash_length_mm", item.get("dot_radius", 3.0)))
+                ),
                 hidden=bool(item.get("hidden", False)),
                 data_type=data_type,
                 sequence_ids=list(item.get("sequence_ids", [])),
@@ -219,6 +255,11 @@ def legend_from_dict(data: dict | None) -> LegendConfig:
                         bool(item.get("sequence_ids")),
                     )
                 ),
+                conditional_colors=[
+                    _conditional_rule_from_dict(rule)
+                    for rule in item.get("conditional_colors", [])
+                    if isinstance(rule, dict)
+                ],
             )
         )
     if not areas and not preplot_lines and not navplan_lines and not lines:

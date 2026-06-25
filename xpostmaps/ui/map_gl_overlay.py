@@ -231,8 +231,9 @@ class MapGlLineOverlay:
         rx: np.ndarray,
         ry: np.ndarray,
         *,
-        color: tuple[float, float, float, float],
+        color: tuple[float, float, float, float] | np.ndarray,
         width: float,
+        mode: str = "line_strip",
     ) -> None:
         if not self.available:
             return
@@ -261,7 +262,7 @@ class MapGlLineOverlay:
             color=color,
             width=width,
             antialias=True,
-            mode="line_strip",
+            mode=mode,
         )
         self._view.addItem(item)
         self._items[storage_key] = item
@@ -300,7 +301,7 @@ class MapGlLineOverlay:
         rx: np.ndarray,
         ry: np.ndarray,
         *,
-        color: tuple[float, float, float, float],
+        color: tuple[float, float, float, float] | np.ndarray,
         size: float,
     ) -> None:
         if not self.available:

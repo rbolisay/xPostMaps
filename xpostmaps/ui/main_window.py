@@ -29,6 +29,7 @@ from xpostmaps.core.local_settings import load_db_directory, save_db_directory
 from xpostmaps.core.mediator import Mediator
 from xpostmaps.core.project_db_utils import project_db_path
 from xpostmaps.core.models import (
+    ConditionalColorRule,
     DisplayMode,
     LegendConfig,
     LineSequence,
@@ -38,6 +39,8 @@ from xpostmaps.core.models import (
     ProjectSettings,
 )
 from xpostmaps.core.parse_worker import ParseWorker
+from xpostmaps.core.postplot_4d_diff import calculate_match_diff_rows
+from xpostmaps.core.postplot_4d_matching import build_postplot_4d_rows
 from xpostmaps.core.crs_utils import normalize_epsg
 from xpostmaps.core.navplan_catalog_utils import (
     build_navplan_catalog_from_segments,
@@ -78,6 +81,15 @@ class MainWindow(QMainWindow):
         self._db = Database(self._db_directory / "xpostmaps.db")
         self._settings = ProjectSettings()
         self._map_data: MapData | None = None
+        # Cache of purely-geometric 4D diff rows per match row. These do not
+        # depend on legend color/style/width, so we reuse them across legend
+        # applies and only recompute when the underlying data changes.
+        self._match_diff_cache: dict[tuple, list] = {}
+        self._match_diff_cache_version: int = -1
+        self._conditional_data_version: int = 0
+        self._conditional_points_signature_cache: tuple | None = None
+        self._preplot_file_signature: tuple | None = None
+        self._navplan_file_signature: tuple | None = None
         self._worker: ParseWorker | None = None
         self._loading_project = False
         self._parsing = False
@@ -263,6 +275,7 @@ class MainWindow(QMainWindow):
         self._sync_map_data_preplot_order()
         self._map.set_legend(self._settings.legend_config)
         self._map.set_display_mode(self._settings.display_mode)
+        self._refresh_conditional_postplot_points()
         self._map.render(self._map_data)
         self._right.update_from_project(self._settings, self._map_data)
         self._refresh_import_polygons_summary()
@@ -386,11 +399,17 @@ class MainWindow(QMainWindow):
             positions_provider=self._current_positions,
             map_data_provider=lambda: self._map_data,
             database=self._db,
+            on_diffs_saved=self._on_postplot_4d_diffs_saved,
         )
         self._track_left_dialog("postplot_4d", dialog)
 
     def _on_postplot_4d_baseline_changed(self) -> None:
         self._schedule_metadata_autosave()
+
+    def _on_postplot_4d_diffs_saved(self) -> None:
+        self._invalidate_conditional_diff_cache()
+        self._refresh_conditional_postplot_points()
+        self._map.render(self._map_data, force=True)
 
     def _open_legend(self) -> None:
         perimeters = self._map_data.survey_perimeters if self._map_data else []
@@ -445,23 +464,240 @@ class MainWindow(QMainWindow):
         self._map_data.positions_persisted = bool(positions)
         return positions
 
+    @staticmethod
+    def _conditional_range_matches(value: float, range_text: str) -> bool:
+        text = (range_text or "").strip().replace(" ", "")
+        if not text or value != value:
+            return False
+        abs_value = abs(float(value))
+        normalized = text.replace("–", "-").replace("—", "-")
+        try:
+            if normalized.startswith("<="):
+                return abs_value <= float(normalized[2:])
+            if normalized.startswith("<"):
+                return abs_value < float(normalized[1:])
+            if normalized.startswith(">="):
+                return abs_value >= float(normalized[2:])
+            if normalized.startswith(">"):
+                return abs_value > float(normalized[1:])
+            if "-" in normalized:
+                left, right = normalized.split("-", 1)
+                low = float(left) if left else 0.0
+                high = float(right)
+                if low > high:
+                    low, high = high, low
+                return low <= abs_value <= high
+            return abs_value <= float(normalized)
+        except ValueError:
+            return False
+
+    @staticmethod
+    def _conditional_diff_value(rule: ConditionalColorRule, row) -> float:
+        stat = (rule.diff_stat or "").strip().lower()
+        if stat == "crossline":
+            return float(row.crossline_m)
+        if stat == "inline":
+            return float(row.inline_m)
+        return float(row.radial_m)
+
+    def _conditional_rule_for_diff_row(
+        self,
+        rules: list[ConditionalColorRule],
+        row,
+    ) -> ConditionalColorRule | None:
+        match: ConditionalColorRule | None = None
+        for rule in rules:
+            if rule.disabled:
+                continue
+            value = self._conditional_diff_value(rule, row)
+            if self._conditional_range_matches(value, rule.range_value):
+                match = rule
+        return match
+
+    @staticmethod
+    def _conditional_points_signature(settings: ProjectSettings, data_version: int) -> tuple:
+        """Inputs that affect conditional point selection and color."""
+        return (
+            data_version,
+            tuple(
+                (
+                    tuple(entry.sequence_ids),
+                    entry.sequence_filter_active,
+                    entry.hidden,
+                    tuple(
+                        (
+                            rule.diff_stat,
+                            rule.range_value.strip(),
+                            rule.color,
+                            round(float(rule.opacity), 6),
+                            rule.disabled,
+                        )
+                        for rule in entry.conditional_colors
+                    ),
+                )
+                for entry in settings.legend_config.postplot_lines
+            ),
+        )
+
+    def _refresh_conditional_postplot_points(self) -> None:
+        if self._map_data is None:
+            self._map.set_conditional_postplot_points([])
+            self._conditional_points_signature_cache = None
+            return
+        active_entries = [
+            entry
+            for entry in self._settings.legend_config.postplot_lines
+            if not entry.hidden
+            and entry.sequence_filter_active
+            and entry.sequence_ids
+            and any(
+                not rule.disabled and rule.range_value.strip()
+                for rule in entry.conditional_colors
+            )
+        ]
+        signature = self._conditional_points_signature(
+            self._settings,
+            self._conditional_data_version,
+        )
+        if signature == self._conditional_points_signature_cache:
+            return
+        if not active_entries:
+            self._map.set_conditional_postplot_points([])
+            self._conditional_points_signature_cache = signature
+            return
+
+        positions = self._current_positions()
+        match_rows = [
+            row
+            for row in build_postplot_4d_rows(
+                self._map_data,
+                self._settings,
+                self._settings.postplot_4d_baseline,
+            )
+            if row.has_match
+        ]
+        points: list[tuple[float, float, str, float, float]] = []
+        for entry in active_entries:
+            for match_row in match_rows:
+                if not sequence_id_matches(match_row.sequence_id, entry.sequence_ids):
+                    continue
+                diff_rows = self._cached_match_diff_rows(match_row, positions)
+                for diff_row in diff_rows:
+                    rule = self._conditional_rule_for_diff_row(
+                        entry.conditional_colors,
+                        diff_row,
+                    )
+                    if rule is None:
+                        continue
+                    points.append(
+                        (
+                            diff_row.source_x,
+                            diff_row.source_y,
+                            rule.color,
+                            rule.opacity,
+                            entry.dot_radius if entry.dot_radius > 0 else 0.8,
+                        )
+                    )
+        self._map.set_conditional_postplot_points(points)
+        self._conditional_points_signature_cache = signature
+
+    def _cached_match_diff_rows(
+        self,
+        match_row,
+        positions: list[PositionRecord],
+    ) -> list:
+        """Return 4D diff rows for a match row, preferring saved DB data.
+
+        Diff geometry depends only on parsed positions/baseline/CRS, never on
+        legend color/style/width. Use persisted diff rows first, then calculate
+        and save only when the DB has no rows for this match.
+        """
+        if self._match_diff_cache_version != self._conditional_data_version:
+            self._match_diff_cache = {}
+            self._match_diff_cache_version = self._conditional_data_version
+        key = (
+            match_row.sequence_id,
+            match_row.baseline_kind,
+            match_row.baseline_name,
+            match_row.baseline_file_name,
+            match_row.line_direction,
+            self._settings.postplot_4d_baseline,
+        )
+        cached = self._match_diff_cache.get(key)
+        if cached is None:
+            cached = []
+            project_name = self._settings.name.strip()
+            if project_name:
+                cached = self._db.load_postplot_4d_diffs(
+                    project_name,
+                    match_row.baseline_kind,
+                    match_row.sequence_id,
+                )
+            if cached:
+                self._match_diff_cache[key] = cached
+                return cached
+            cached = calculate_match_diff_rows(
+                self._map_data,
+                self._settings,
+                positions,
+                match_row,
+                database=self._db,
+                project_name=self._settings.name,
+            )
+            if project_name:
+                self._db.save_postplot_4d_diffs(
+                    project_name,
+                    match_row.baseline_kind,
+                    match_row.baseline_name,
+                    match_row.sequence_id,
+                    cached,
+                )
+            self._match_diff_cache[key] = cached
+        return cached
+
+    def _invalidate_conditional_diff_cache(self) -> None:
+        """Drop cached 4D diff rows after the underlying data changes."""
+        self._conditional_data_version += 1
+        self._match_diff_cache = {}
+        self._conditional_points_signature_cache = None
+
+    def _delete_saved_postplot_4d_diffs_for_baseline(self, baseline_kind: str) -> None:
+        name = self._settings.name.strip()
+        if name:
+            self._db.delete_postplot_4d_diffs_for_baseline(name, baseline_kind)
+        self._invalidate_conditional_diff_cache()
+
+    @staticmethod
+    def _file_signature(paths: list[Path]) -> tuple:
+        signature = []
+        for path in sorted(paths, key=lambda p: str(p).lower()):
+            try:
+                stat = path.stat()
+            except OSError:
+                signature.append((str(path), None, None))
+                continue
+            signature.append((str(path), int(stat.st_mtime_ns), int(stat.st_size)))
+        return tuple(signature)
+
+    def _refresh_postplot_4d_input_signatures(self, *, invalidate: bool) -> None:
+        preplot_sig = self._file_signature(resolve_preplot_files(self._settings))
+        navplan_sig = self._file_signature(resolve_navplan_files(self._settings))
+        if invalidate:
+            if self._preplot_file_signature is not None and preplot_sig != self._preplot_file_signature:
+                self._delete_saved_postplot_4d_diffs_for_baseline("preplot")
+            if self._navplan_file_signature is not None and navplan_sig != self._navplan_file_signature:
+                self._delete_saved_postplot_4d_diffs_for_baseline("navplan")
+        self._preplot_file_signature = preplot_sig
+        self._navplan_file_signature = navplan_sig
+
     def _invalidate_postplot_4d_diffs(self, map_data: MapData) -> None:
+        self._invalidate_conditional_diff_cache()
         name = self._settings.name.strip()
         if not name:
             return
         parsed_names = map_data.stats.get("nav_files_parsed_names") or []
-        if not parsed_names and map_data.sequences:
-            parsed_names = sorted({seq.file_name for seq in map_data.sequences if seq.file_name})
         if parsed_names:
             self._db.delete_postplot_4d_diffs_for_files(name, set(parsed_names))
-        preplot_refs = {
-            entry.file_path
-            for entry in self._settings.preplot_catalog
-            if entry.file_path
-        }
-        preplot_refs.update(raw for raw in self._settings.preplot_files if raw)
-        if preplot_refs:
-            self._db.delete_postplot_4d_preplot_shotpoints_for_files(name, preplot_refs)
 
     @staticmethod
     def _summary_value(values: set[str]) -> str:
@@ -513,6 +749,7 @@ class MainWindow(QMainWindow):
         QTimer.singleShot(0, self._complete_legend_apply)
 
     def _complete_legend_apply(self) -> None:
+        self._refresh_conditional_postplot_points()
         self._map.render(self._map_data, force=True)
         self._right.update_from_project(self._settings, self._map_data)
         self._ensure_project_name()
@@ -566,10 +803,13 @@ class MainWindow(QMainWindow):
         self._track_left_dialog("navplan", dialog)
 
     def _on_preplot_settings_changed(self, settings: ProjectSettings) -> None:
+        old_files = set(self._settings.preplot_files)
         self._settings.preplot_files = settings.preplot_files
         self._settings.preplot_files_explicit = settings.preplot_files_explicit
         self._settings.preplots_dir = settings.preplots_dir
         self._settings.preplot_catalog = list(settings.preplot_catalog)
+        if old_files != set(settings.preplot_files):
+            self._delete_saved_postplot_4d_diffs_for_baseline("preplot")
         sync_preplot_legend_entries(
             self._settings.legend_config,
             self._settings.preplot_catalog,
@@ -579,10 +819,13 @@ class MainWindow(QMainWindow):
         self._start_parse()
 
     def _on_navplan_settings_changed(self, settings: ProjectSettings) -> None:
+        old_files = set(self._settings.navplan_files)
         self._settings.navplan_files = settings.navplan_files
         self._settings.navplan_files_explicit = settings.navplan_files_explicit
         self._settings.navplans_dir = settings.navplans_dir
         self._settings.navplan_catalog = list(settings.navplan_catalog)
+        if old_files != set(settings.navplan_files):
+            self._delete_saved_postplot_4d_diffs_for_baseline("navplan")
         sync_navplan_legend_entries(
             self._settings.legend_config,
             self._settings.navplan_catalog,
@@ -593,6 +836,9 @@ class MainWindow(QMainWindow):
 
     def _apply_nav_file_selection(self, files: list[str], folder: str) -> None:
         """Apply nav file list and re-parse so the map and database stay in sync."""
+        if set(self._settings.nav_files) != set(files):
+            self._delete_saved_postplot_4d_diffs_for_baseline("navplan")
+            self._delete_saved_postplot_4d_diffs_for_baseline("preplot")
         self._settings.nav_files = files
         self._settings.nav_files_explicit = True
         self._settings.p111_p190_dir = folder
@@ -686,6 +932,7 @@ class MainWindow(QMainWindow):
 
         self._map_data = map_data
         self._ensure_project_info_date(map_data)
+        self._refresh_postplot_4d_input_signatures(invalidate=True)
         self._invalidate_postplot_4d_diffs(map_data)
         self._prune_legend_sequence_refs()
         if self._settings.preplot_files:
@@ -735,6 +982,8 @@ class MainWindow(QMainWindow):
         started = time.perf_counter()
         self._map.set_legend(self._settings.legend_config)
         self._map.set_display_mode(self._settings.display_mode)
+        self._invalidate_conditional_diff_cache()
+        self._refresh_conditional_postplot_points()
         self._map.render(self._map_data, force=True)
         print(f"[xPostMaps timing] Map render after parse: {(time.perf_counter() - started) * 1000:.1f} ms")
         self._left.set_status("Map rendered. Updating right pane…")
@@ -913,6 +1162,7 @@ class MainWindow(QMainWindow):
         try:
             self._settings = settings
             self._map_data = map_data
+            self._refresh_postplot_4d_input_signatures(invalidate=False)
             if settings.preplot_files and not settings.preplot_catalog:
                 settings.preplot_catalog = build_preplot_catalog_from_segments(
                     settings.preplot_files,
@@ -951,6 +1201,8 @@ class MainWindow(QMainWindow):
             self._map.clear()
             self._map.set_legend(self._settings.legend_config)
             self._map.set_display_mode(self._settings.display_mode)
+            self._invalidate_conditional_diff_cache()
+            self._refresh_conditional_postplot_points()
             self._map.render(self._map_data, force=True)
             self._map.restore_view(settings.map_view)
             self._map.render(self._map_data, force=True)

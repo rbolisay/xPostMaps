@@ -54,6 +54,7 @@ class ResidentGlLineLayer:
         self,
         *,
         parts: list[tuple[np.ndarray, np.ndarray]],
+        color_parts: list[np.ndarray] | None = None,
         pen: QPen,
         export_pen: QPen,
         line_style: LineStyle = LineStyle.SOLID,
@@ -66,6 +67,7 @@ class ResidentGlLineLayer:
         self._layer_id = ResidentGlLineLayer._next_layer_id
         ResidentGlLineLayer._next_layer_id += 1
         self._parts = parts
+        self._color_parts = color_parts
         self._map_layer = map_layer
         index_x, index_y = concat_polylines(parts)
         self._index_x = index_x
@@ -96,6 +98,64 @@ class ResidentGlLineLayer:
         ]
         self._uploaded_runs: set[int] = set()
 
+    @staticmethod
+    def _segment_gl_geometry(
+        px: np.ndarray,
+        py: np.ndarray,
+        colors: np.ndarray,
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        """Expand a colored polyline into independent colored GL segments."""
+        if px.size < 2 or colors.shape[0] != px.size:
+            empty = np.empty(0, dtype=np.float64)
+            return empty, empty, np.empty((0, 4), dtype=np.float32)
+        finite = np.isfinite(px[:-1]) & np.isfinite(py[:-1]) & np.isfinite(px[1:]) & np.isfinite(py[1:])
+        if not np.any(finite):
+            empty = np.empty(0, dtype=np.float64)
+            return empty, empty, np.empty((0, 4), dtype=np.float32)
+        x_pairs = np.column_stack((px[:-1][finite], px[1:][finite])).reshape(-1)
+        y_pairs = np.column_stack((py[:-1][finite], py[1:][finite])).reshape(-1)
+        edge_colors = colors[:-1][finite].astype(np.float32, copy=False)
+        color_pairs = np.repeat(edge_colors, 2, axis=0)
+        return x_pairs, y_pairs, color_pairs
+
+    @staticmethod
+    def _colored_runs(
+        px: np.ndarray,
+        py: np.ndarray,
+        colors: np.ndarray,
+    ) -> list[tuple[np.ndarray, np.ndarray, tuple[float, float, float, float]]]:
+        """Group consecutive line segments that share the same RGBA color."""
+        if px.size < 2 or colors.shape[0] != px.size:
+            return []
+        runs: list[tuple[np.ndarray, np.ndarray, tuple[float, float, float, float]]] = []
+        start: int | None = None
+        active_color: tuple[float, float, float, float] | None = None
+        for i in range(px.size - 1):
+            if not (
+                np.isfinite(px[i])
+                and np.isfinite(py[i])
+                and np.isfinite(px[i + 1])
+                and np.isfinite(py[i + 1])
+            ):
+                if start is not None and active_color is not None and i + 1 - start >= 2:
+                    runs.append((px[start : i + 1], py[start : i + 1], active_color))
+                start = None
+                active_color = None
+                continue
+            color = tuple(float(v) for v in colors[i])
+            if start is None:
+                start = i
+                active_color = color
+                continue
+            if color != active_color:
+                if i + 1 - start >= 2 and active_color is not None:
+                    runs.append((px[start : i + 1], py[start : i + 1], active_color))
+                start = i
+                active_color = color
+        if start is not None and active_color is not None and px.size - start >= 2:
+            runs.append((px[start:], py[start:], active_color))
+        return runs
+
     @property
     def layer_id(self) -> int:
         return self._layer_id
@@ -103,6 +163,10 @@ class ResidentGlLineLayer:
     @property
     def map_layer(self) -> str:
         return self._map_layer
+
+    @property
+    def has_vertex_colors(self) -> bool:
+        return self._color_parts is not None
 
     @property
     def has_pending_uploads(self) -> bool:
@@ -131,13 +195,27 @@ class ResidentGlLineLayer:
             py = np.asarray(py, dtype=np.float64)
             if px.size < 2:
                 continue
+            color_arg: tuple[float, float, float, float] | np.ndarray = self._gl_color
+            mode = "line_strip"
+            if self._color_parts is not None and run_index < len(self._color_parts):
+                rx, ry, color_array = self._segment_gl_geometry(
+                    px,
+                    py,
+                    np.asarray(self._color_parts[run_index], dtype=np.float32),
+                )
+                if rx.size < 2:
+                    continue
+                px, py = rx, ry
+                color_arg = color_array
+                mode = "lines"
             self._gl_overlay.add_line_run(
                 self._layer_id,
                 run_index,
                 px,
                 py,
-                color=self._gl_color,
+                color=color_arg,
                 width=self._gl_width,
+                mode=mode,
             )
             self._uploaded_runs.add(run_index)
         self._gl_overlay.set_layer_visible(self._layer_id, self._visible and not self._export_mode)
@@ -163,27 +241,41 @@ class ResidentGlLineLayer:
         pad_y = max((by1 - by0) * 0.02, 1.0)
         view_bbox = (bx0 - pad_x, bx1 + pad_x, by0 - pad_y, by1 + pad_y)
         self._gl_overlay.set_layer_visible(self._layer_id, False)
-        for px, py in self._parts:
+        for run_index, (px, py) in enumerate(self._parts):
             px = np.asarray(px, dtype=np.float64)
             py = np.asarray(py, dtype=np.float64)
             run_bbox = _run_bbox(px, py)
             if run_bbox is None or not _bbox_intersects(run_bbox, view_bbox):
                 continue
-            cx, cy = clip_arrays_to_bbox(px, py, bbox, kind="line")
-            if cx.size < 2:
-                continue
-            curve = pg.PlotCurveItem(
-                cx,
-                cy,
-                pen=self._pen,
-                connect="finite",
-                antialias=False,
-                skipFiniteCheck=True,
-            )
-            curve.setSegmentedLineMode("off")
-            self._plot_item.addItem(curve)
-            self._plot_items.append(curve)
-            self._settle_cpu_items.append(curve)
+            colored_runs = []
+            if self._color_parts is not None and run_index < len(self._color_parts):
+                colored_runs = self._colored_runs(
+                    px,
+                    py,
+                    np.asarray(self._color_parts[run_index], dtype=np.float32),
+                )
+            if not colored_runs:
+                colored_runs = [(px, py, self._gl_color)]
+            for rx, ry, color in colored_runs:
+                cx, cy = clip_arrays_to_bbox(rx, ry, bbox, kind="line")
+                if cx.size < 2:
+                    continue
+                pen = QPen(self._pen)
+                pen_color = pen.color()
+                pen_color.setRgbF(color[0], color[1], color[2], color[3])
+                pen.setColor(pen_color)
+                curve = pg.PlotCurveItem(
+                    cx,
+                    cy,
+                    pen=pen,
+                    connect="finite",
+                    antialias=False,
+                    skipFiniteCheck=True,
+                )
+                curve.setSegmentedLineMode("off")
+                self._plot_item.addItem(curve)
+                self._plot_items.append(curve)
+                self._settle_cpu_items.append(curve)
 
     def clear_settled_detail(self) -> None:
         for item in self._settle_cpu_items:

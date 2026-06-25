@@ -1187,6 +1187,23 @@ class Database:
             )
         self._conn.commit()
 
+    def delete_postplot_4d_diffs_for_baseline(
+        self,
+        project_name: str,
+        baseline_kind: str,
+    ) -> None:
+        project_id = self.get_project_id(project_name)
+        if project_id is None:
+            return
+        self._conn.execute(
+            """
+            DELETE FROM postplot_4d_diffs
+            WHERE project_id=? AND baseline_kind=?
+            """,
+            (project_id, baseline_kind),
+        )
+        self._conn.commit()
+
     def load_postplot_4d_preplot_shotpoints(
         self,
         project_name: str,

@@ -6,9 +6,20 @@ from xpostmaps.core.coord_format import (
     format_dd_mm,
     format_geo_display,
 )
-from xpostmaps.core.models import PositionRecord, RecordType
+from xpostmaps.core.legend_utils import legend_from_dict, legend_to_dict
+from xpostmaps.core.database import Database
+from xpostmaps.core.models import (
+    ConditionalColorRule,
+    LegendConfig,
+    MapData,
+    PositionRecord,
+    PostplotLegendEntry,
+    ProjectSettings,
+    RecordType,
+)
 from xpostmaps.core.postplot_4d_diff import (
     BaselineShotpoint,
+    Postplot4DDiffRow,
     _generate_preplot_shotpoints,
     _read_preplot_header_info,
     compute_postplot_4d_diff_rows,
@@ -20,6 +31,7 @@ from xpostmaps.core.postplot_4d_diff import (
 )
 from xpostmaps.core.postplot_4d_matching import Postplot4DMatchRow
 from xpostmaps.parsers.preplot_parser import parse_preplot_file
+from xpostmaps.ui.main_window import MainWindow
 
 
 def test_decimal_lat_lon_formats_to_dd_mm() -> None:
@@ -374,3 +386,107 @@ def test_source_shotpoints_filter_by_sequence_group() -> None:
     sources = source_shotpoints_for_match(positions, match_row)
     assert list(sources) == [100]
     assert sources[100].x == 1.0
+
+
+def test_conditional_color_range_matching_uses_absolute_values() -> None:
+    assert MainWindow._conditional_range_matches(-3.0, "<=3")
+    assert MainWindow._conditional_range_matches(3.0, "0-3")
+    assert not MainWindow._conditional_range_matches(-3.01, "<=3")
+    assert MainWindow._conditional_range_matches(-3.01, ">3")
+
+
+def test_postplot_conditional_colors_round_trip_in_legend_config() -> None:
+    config = LegendConfig(
+        postplot_lines=[
+            PostplotLegendEntry(
+                name="Acceptance",
+                conditional_colors=[
+                    ConditionalColorRule(
+                        diff_stat="radial",
+                        range_value="0-3",
+                        color="#22c55e",
+                        opacity=0.75,
+                    )
+                ],
+            )
+        ]
+    )
+    restored = legend_from_dict(legend_to_dict(config))
+    rule = restored.postplot_lines[0].conditional_colors[0]
+    assert rule.diff_stat == "radial"
+    assert rule.range_value == "0-3"
+    assert rule.color == "#22c55e"
+    assert rule.opacity == 0.75
+
+
+def test_conditional_points_signature_uses_diff_stat_field() -> None:
+    settings = ProjectSettings(
+        legend_config=LegendConfig(
+            postplot_lines=[
+                PostplotLegendEntry(
+                    name="Acceptance",
+                    sequence_ids=["0103643A"],
+                    conditional_colors=[
+                        ConditionalColorRule(
+                            diff_stat="radial",
+                            range_value="0-3",
+                            color="#22c55e",
+                            opacity=0.75,
+                        )
+                    ],
+                )
+            ]
+        )
+    )
+
+    signature = MainWindow._conditional_points_signature(settings, 7)
+
+    assert signature[0] == 7
+    assert signature[1][0][3][0][0] == "radial"
+
+
+def test_conditional_diff_cache_reads_saved_database_rows(tmp_path) -> None:
+    db = Database(tmp_path / "project.db")
+    settings = ProjectSettings(name="proj")
+    db.save_project(settings, MapData())
+    saved = [
+        Postplot4DDiffRow(
+            shotpoint=101,
+            baseline_x=1.0,
+            baseline_y=2.0,
+            baseline_latitude="",
+            baseline_longitude="",
+            source_x=4.0,
+            source_y=6.0,
+            source_latitude="",
+            source_longitude="",
+            crossline_m=1.5,
+            inline_m=2.5,
+            radial_m=3.0,
+        )
+    ]
+    db.save_postplot_4d_diffs("proj", "navplan", "baseline", "file.p190|1", saved)
+    window = MainWindow.__new__(MainWindow)
+    window._settings = settings
+    window._map_data = MapData()
+    window._db = db
+    window._match_diff_cache = {}
+    window._match_diff_cache_version = -1
+    window._conditional_data_version = 0
+    match_row = Postplot4DMatchRow(
+        baseline_name="baseline",
+        baseline_kind="navplan",
+        line_name="0100001A",
+        subline="",
+        sequence_no="1",
+        first_sp=101,
+        last_sp=101,
+        line_direction="",
+        sequence_id="file.p190|1",
+        baseline_file_name="baseline.navplan",
+    )
+
+    rows = MainWindow._cached_match_diff_rows(window, match_row, [])
+
+    assert rows == saved
+    db.close()

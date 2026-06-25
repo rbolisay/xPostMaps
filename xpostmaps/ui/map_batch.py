@@ -16,6 +16,7 @@ class LineBatchKey:
     width: float
     dotted: bool
     dot_radius: float = 3.0
+    dash_length_mm: float = 3.0
 
 
 def _rgba_tuple(color: str, opacity: float) -> tuple[int, int, int, int]:

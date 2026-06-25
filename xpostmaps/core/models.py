@@ -66,6 +66,15 @@ class NavDataType(str, Enum):
 
 
 @dataclass
+class ConditionalColorRule:
+    diff_stat: str = "radial"
+    range_value: str = ""
+    color: str = "#22c55e"
+    opacity: float = 1.0
+    disabled: bool = False
+
+
+@dataclass
 class PreplotCatalogEntry:
     preplot_number: int = 0
     file_path: str = ""
@@ -93,6 +102,7 @@ class PreplotLegendEntry:
     opacity: float = 1.0
     line_width: float = 0.35  # mm on screen (QGIS canvas units)
     dot_radius: float = 0.8  # mm marker radius
+    dash_length_mm: float = 3.0  # mm dash repeat for dash line style
     hidden: bool = False
 
 
@@ -104,6 +114,7 @@ class NavplanLegendEntry:
     opacity: float = 1.0
     line_width: float = 0.35  # mm on screen (QGIS canvas units)
     dot_radius: float = 0.8  # mm marker radius
+    dash_length_mm: float = 3.0  # mm dash repeat for dash line style
     hidden: bool = False
     navplan_source_indices: list[int] = field(default_factory=list)
     navplan_filter_active: bool = False
@@ -117,10 +128,12 @@ class PostplotLegendEntry:
     opacity: float = 1.0
     line_width: float = 0.35  # mm on screen (QGIS canvas units)
     dot_radius: float = 0.8  # mm marker radius
+    dash_length_mm: float = 3.0  # mm dash repeat for dash line style
     hidden: bool = False
     data_type: NavDataType = NavDataType.SOURCE
     sequence_ids: list[str] = field(default_factory=list)
     sequence_filter_active: bool = False
+    conditional_colors: list[ConditionalColorRule] = field(default_factory=list)
 
 
 @dataclass

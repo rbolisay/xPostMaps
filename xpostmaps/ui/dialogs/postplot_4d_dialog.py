@@ -279,8 +279,7 @@ class Postplot4DDialog:
             match_row: Postplot4DMatchRow,
         ) -> tuple[list[Postplot4DDiffRow], str]:
             if (
-                match_row.baseline_kind != "preplot"
-                and database is not None
+                database is not None
                 and project_name.strip()
             ):
                 stored = database.load_postplot_4d_diffs(

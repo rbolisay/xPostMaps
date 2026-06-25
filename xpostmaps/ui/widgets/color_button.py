@@ -38,8 +38,9 @@ def pick_color_with_opacity(
     metric_value: float,
     metric_min: int,
     metric_max: int,
+    secondary_metric: tuple[str, float, int, int] | None = None,
     parent=None,
-) -> tuple[str, float, float] | None:
+) -> tuple[str, float, float, float | None] | None:
     """Show the standard color palette with opacity and size sliders."""
     initial = QColor(color)
     initial.setAlphaF(max(0.0, min(1.0, opacity)))
@@ -87,6 +88,37 @@ def pick_color_with_opacity(
     metric_layout.addWidget(metric_slider, stretch=1)
     metric_layout.addWidget(metric_value_lbl)
 
+    secondary_slider: QSlider | None = None
+    secondary_label = ""
+    secondary_row: QWidget | None = None
+    if secondary_metric is not None:
+        secondary_label, secondary_value, secondary_min, secondary_max = secondary_metric
+        secondary_row = QWidget()
+        secondary_layout = QHBoxLayout(secondary_row)
+        secondary_layout.setContentsMargins(8, 4, 8, 4)
+        secondary_lbl = QLabel(secondary_label)
+        secondary_slider = QSlider(Qt.Orientation.Horizontal)
+        secondary_slider.setRange(secondary_min, secondary_max)
+        secondary_slider.setSingleStep(1)
+        secondary_slider.setPageStep(1)
+        secondary_initial = (
+            mm_to_metric_slider(secondary_value, secondary_min, secondary_max)
+            if _metric_uses_mm(secondary_label)
+            else int(max(secondary_min, min(secondary_max, round(secondary_value))))
+        )
+        secondary_slider.setValue(secondary_initial)
+        secondary_value_lbl = QLabel(
+            _format_metric_label(secondary_label, secondary_slider.value())
+        )
+        secondary_slider.valueChanged.connect(
+            lambda value: secondary_value_lbl.setText(
+                _format_metric_label(secondary_label, value)
+            )
+        )
+        secondary_layout.addWidget(secondary_lbl)
+        secondary_layout.addWidget(secondary_slider, stretch=1)
+        secondary_layout.addWidget(secondary_value_lbl)
+
     buttons = QDialogButtonBox(
         QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
     )
@@ -95,6 +127,8 @@ def pick_color_with_opacity(
 
     dialog.layout().addWidget(opacity_row)
     dialog.layout().addWidget(metric_row)
+    if secondary_row is not None:
+        dialog.layout().addWidget(secondary_row)
     dialog.layout().addWidget(buttons)
 
     if dialog.exec() != QDialog.DialogCode.Accepted:
@@ -108,10 +142,18 @@ def pick_color_with_opacity(
         if _metric_uses_mm(metric_label)
         else float(metric_slider.value())
     )
+    secondary_out = None
+    if secondary_slider is not None:
+        secondary_out = (
+            metric_slider_to_mm(secondary_slider.value())
+            if _metric_uses_mm(secondary_label)
+            else float(secondary_slider.value())
+        )
     return (
         chosen.name(QColor.NameFormat.HexRgb),
         opacity_slider.value() / 100.0,
         metric_out,
+        secondary_out,
     )
 
 
@@ -119,6 +161,7 @@ class ColorButton(QPushButton):
     color_changed = Signal(str)
     opacity_changed = Signal(float)
     metric_changed = Signal(float)
+    secondary_metric_changed = Signal(float)
 
     def __init__(
         self,
@@ -126,6 +169,8 @@ class ColorButton(QPushButton):
         opacity: float = 1.0,
         metric_value: float = 1.0,
         metric_provider: Callable[[], tuple[str, int, int]] | None = None,
+        secondary_metric_value: float = 1.0,
+        secondary_metric_provider: Callable[[], tuple[str, int, int] | None] | None = None,
         parent=None,
     ) -> None:
         super().__init__(parent)
@@ -133,6 +178,8 @@ class ColorButton(QPushButton):
         self._opacity = max(0.0, min(1.0, opacity))
         self._metric_value = max(0.1, float(metric_value))
         self._metric_provider = metric_provider or (lambda: ("Line thickness", 1, 10))
+        self._secondary_metric_value = max(0.1, float(secondary_metric_value))
+        self._secondary_metric_provider = secondary_metric_provider or (lambda: None)
         self.setFixedSize(36, 28)
         self.clicked.connect(self._pick_color)
         self._apply_style()
@@ -149,17 +196,24 @@ class ColorButton(QPushButton):
     def metric_value(self) -> float:
         return self._metric_value
 
+    @property
+    def secondary_metric_value(self) -> float:
+        return self._secondary_metric_value
+
     def set_color(
         self,
         color: str,
         opacity: float | None = None,
         metric_value: float | None = None,
+        secondary_metric_value: float | None = None,
     ) -> None:
         self._color = color
         if opacity is not None:
             self._opacity = max(0.0, min(1.0, opacity))
         if metric_value is not None:
             self._metric_value = max(0.1, float(metric_value))
+        if secondary_metric_value is not None:
+            self._secondary_metric_value = max(0.1, float(secondary_metric_value))
         self._apply_style()
 
     def _apply_style(self) -> None:
@@ -173,6 +227,17 @@ class ColorButton(QPushButton):
 
     def _pick_color(self) -> None:
         label, minimum, maximum = self._metric_provider()
+        secondary_config = self._secondary_metric_provider()
+        secondary_metric = (
+            (
+                secondary_config[0],
+                self._secondary_metric_value,
+                secondary_config[1],
+                secondary_config[2],
+            )
+            if secondary_config is not None
+            else None
+        )
         result = pick_color_with_opacity(
             self._color,
             self._opacity,
@@ -180,15 +245,20 @@ class ColorButton(QPushButton):
             self._metric_value,
             minimum,
             maximum,
+            secondary_metric,
             self.window(),
         )
         if result is None:
             return
-        chosen, opacity, metric_value = result
+        chosen, opacity, metric_value, secondary_metric_value = result
         self._color = chosen
         self._opacity = opacity
         self._metric_value = metric_value
+        if secondary_metric_value is not None:
+            self._secondary_metric_value = secondary_metric_value
         self._apply_style()
         self.color_changed.emit(self._color)
         self.opacity_changed.emit(self._opacity)
         self.metric_changed.emit(self._metric_value)
+        if secondary_metric_value is not None:
+            self.secondary_metric_changed.emit(self._secondary_metric_value)

@@ -24,6 +24,7 @@ class ResidentGlScatterLayer:
         self,
         *,
         parts: list[tuple[np.ndarray, np.ndarray]],
+        color_parts: list[np.ndarray] | None = None,
         rgba: tuple[int, int, int, int],
         screen_size: float,
         export_size: float,
@@ -36,6 +37,7 @@ class ResidentGlScatterLayer:
         self._layer_id = ResidentGlScatterLayer._next_layer_id
         ResidentGlScatterLayer._next_layer_id += 1
         self._parts = parts
+        self._color_parts = color_parts
         self._map_layer = map_layer
         self._rgba = rgba
         self._screen_size = screen_size
@@ -69,6 +71,10 @@ class ResidentGlScatterLayer:
         return self._map_layer
 
     @property
+    def has_vertex_colors(self) -> bool:
+        return self._color_parts is not None
+
+    @property
     def has_pending_uploads(self) -> bool:
         return bool(self._pending_runs)
 
@@ -91,12 +97,18 @@ class ResidentGlScatterLayer:
             marker_x, marker_y = shotpoint_marker_coords([(px, py)])
             if marker_x.size < 1:
                 continue
+            color_arg: tuple[float, float, float, float] | np.ndarray = self._gl_color
+            if self._color_parts is not None and run_index < len(self._color_parts):
+                colors = np.asarray(self._color_parts[run_index], dtype=np.float32)
+                finite = np.isfinite(px) & np.isfinite(py)
+                if colors.shape[0] == px.size:
+                    color_arg = np.ascontiguousarray(colors[finite], dtype=np.float32)
             self._gl_overlay.add_scatter_run(
                 self._layer_id,
                 run_index,
                 marker_x,
                 marker_y,
-                color=self._gl_color,
+                color=color_arg,
                 size=self._screen_size,
             )
             self._uploaded_runs.add(run_index)
