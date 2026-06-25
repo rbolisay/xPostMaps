@@ -1,3 +1,5 @@
+from pathlib import Path
+
 from xpostmaps.core.models import (
     LineSegment,
     LineSequence,
@@ -8,6 +10,10 @@ from xpostmaps.core.models import (
     RecordType,
 )
 from xpostmaps.core.postplot_4d_matching import build_postplot_4d_rows
+from xpostmaps.parsers.preplot_parser import parse_preplot_files
+
+
+ROOT = Path(__file__).resolve().parents[1]
 
 
 def _sequence(line_name: str, sequence_no: str = "1") -> LineSequence:
@@ -251,6 +257,30 @@ def test_preplot_prefix_matching_prefers_longest_preplot_id() -> None:
     assert matched[0].line_name == "51988113004"
 
 
+def test_single_preplot_baseline_creates_extra_rows_for_multiple_matches() -> None:
+    map_data = MapData(
+        sequences=[
+            _sequence("1486A177", sequence_no="177"),
+            _sequence("1486A178", sequence_no="178"),
+        ],
+        preplot_segments=[
+            LineSegment(
+                line_name="1486",
+                record_type=RecordType.PREPLOT,
+                file_name="3190_TTUD1_Main_v2.WGS84.p190",
+            )
+        ],
+    )
+
+    rows = build_postplot_4d_rows(map_data, ProjectSettings(), "preplot")
+    matched = [(row.baseline_name, row.line_name, row.sequence_no) for row in rows if row.has_match]
+
+    assert matched == [
+        ("1486", "1486A177", "177"),
+        ("1486", "1486A178", "178"),
+    ]
+
+
 def test_navplan_matching_ignores_file_format_tokens() -> None:
     settings = ProjectSettings(
         navplan_catalog=[
@@ -402,3 +432,86 @@ def test_4030_single_digit_prefix_line_maps_to_zero_prefixed_baseline() -> None:
     assert rows[0].has_match
     assert rows[0].baseline_name == "0116875A"
     assert rows[0].line_name == "1116875A-038"
+
+
+def test_3190_preplot_name_matches_acquired_header_prefix() -> None:
+    map_data = MapData(
+        sequences=[_sequence("1486A177", sequence_no="0177")],
+        preplot_segments=[
+            LineSegment(
+                line_name="1486",
+                record_type=RecordType.PREPLOT,
+                file_name="3190_TTUD1_Main_v2.WGS84.p190",
+            )
+        ],
+    )
+
+    rows = build_postplot_4d_rows(map_data, ProjectSettings(), "preplot")
+
+    assert len(rows) == 1
+    assert rows[0].has_match
+    assert rows[0].baseline_name == "1486"
+    assert rows[0].line_name == "1486A177"
+
+
+def test_3190_preplot_name_matches_acquired_filename_fallback() -> None:
+    map_data = MapData(
+        sequences=[
+            LineSequence(
+                seq_id="0003.T26A.1018A003.c0003.GFUNREG.VES.p111|0003|UNNAMED",
+                file_name="0003.T26A.1018A003.c0003.GFUNREG.VES.p111",
+                sequence_no="0003",
+                line_name="UNNAMED",
+                subline="",
+                line_direction="",
+                first_sp=100,
+                last_sp=200,
+                record_type=RecordType.SOURCE,
+            )
+        ],
+        preplot_segments=[
+            LineSegment(
+                line_name="1018",
+                record_type=RecordType.PREPLOT,
+                file_name="3190_TTUD1_Main_v2.WGS84.p190",
+            )
+        ],
+    )
+
+    rows = build_postplot_4d_rows(map_data, ProjectSettings(), "preplot")
+
+    assert len(rows) == 1
+    assert rows[0].has_match
+    assert rows[0].baseline_name == "1018"
+    assert rows[0].line_name == "UNNAMED"
+
+
+def test_3190_real_preplot_lines_match_header_and_filename_cases() -> None:
+    preplot = ROOT / "Sample Preplots" / "3190_TTUD1_Main_v2.WGS84.p190"
+    segments, _meta, _stats = parse_preplot_files([preplot])
+    selected = [segment for segment in segments if segment.line_name in {"1018", "1486"}]
+    map_data = MapData(
+        sequences=[
+            _sequence("1486A177", sequence_no="0177"),
+            LineSequence(
+                seq_id="0003.T26A.1018A003.c0003.GFUNREG.VES.p111|0003|UNNAMED",
+                file_name="0003.T26A.1018A003.c0003.GFUNREG.VES.p111",
+                sequence_no="0003",
+                line_name="UNNAMED",
+                subline="",
+                line_direction="",
+                first_sp=100,
+                last_sp=200,
+                record_type=RecordType.SOURCE,
+            ),
+        ],
+        preplot_segments=selected,
+    )
+
+    rows = build_postplot_4d_rows(map_data, ProjectSettings(), "preplot")
+    matched = {(row.baseline_name, row.line_name) for row in rows if row.has_match}
+
+    assert matched == {
+        ("1018", "UNNAMED"),
+        ("1486", "1486A177"),
+    }

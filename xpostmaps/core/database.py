@@ -1166,6 +1166,26 @@ class Database:
             for row in rows
         ]
 
+    def has_postplot_4d_diffs(
+        self,
+        project_name: str,
+        baseline_kind: str,
+        sequence_id: str,
+    ) -> bool:
+        project_id = self.get_project_id(project_name)
+        if project_id is None:
+            return False
+        row = self._conn.execute(
+            """
+            SELECT 1
+            FROM postplot_4d_diffs
+            WHERE project_id=? AND baseline_kind=? AND sequence_id=?
+            LIMIT 1
+            """,
+            (project_id, baseline_kind, sequence_id),
+        ).fetchone()
+        return row is not None
+
     def delete_postplot_4d_diffs_for_files(
         self,
         project_name: str,

@@ -28,6 +28,7 @@ _LEADING_PREFIX_LINE_RE = re.compile(r"^[1-9](?P<rest>\d{6}[A-Z]\d?)$", re.IGNOR
 _TRINAV_LINE_SUFFIX_RE = re.compile(r"^(?P<root>\d+)113\d+$")
 _TRINAV_LINE_L_SUFFIX_RE = re.compile(r"^(?P<root>\d+)[1-9]L\d+$", re.IGNORECASE)
 _TRINAV_EMBEDDED_SUFFIX_RE = re.compile(r"^(?:113|[1-9]L|[1-9]\d+)\d+$", re.IGNORECASE)
+_PREPLOT_ACQUIRED_SUFFIX_RE = re.compile(r"^[A-Z]+\d+[A-Z0-9_-]*$", re.IGNORECASE)
 _STOP_TOKENS = {
     "H",
     "LINE",
@@ -148,18 +149,23 @@ def _preplot_line_root_forms(text: str) -> set[str]:
 
 
 def _preplot_prefix_root_forms(text: str, preplot_names: set[str]) -> set[str]:
-    """Match acquired TRINAV-style names to catalog preplot ids by longest valid prefix."""
-    value = (text or "").strip().upper().strip("/\\ .:")
-    if not value or not preplot_names:
+    """Match acquired names to catalog preplot ids by longest valid prefix."""
+    if not text or not preplot_names:
         return set()
     matches: list[str] = []
-    for name in preplot_names:
-        candidate = (name or "").strip().upper()
-        if not candidate or not value.startswith(candidate) or len(value) <= len(candidate):
-            continue
-        rest = value[len(candidate):]
-        if _TRINAV_EMBEDDED_SUFFIX_RE.match(rest):
-            matches.append(candidate)
+    values = [
+        value.strip().upper().strip("/\\ .:")
+        for value in (text, *_tokens(text))
+        if value.strip().upper().strip("/\\ .:")
+    ]
+    for value in values:
+        for name in preplot_names:
+            candidate = (name or "").strip().upper()
+            if not candidate or not value.startswith(candidate) or len(value) <= len(candidate):
+                continue
+            rest = value[len(candidate):]
+            if _TRINAV_EMBEDDED_SUFFIX_RE.match(rest) or _PREPLOT_ACQUIRED_SUFFIX_RE.match(rest):
+                matches.append(candidate)
     if not matches:
         return set()
     return {max(matches, key=len)}
@@ -188,19 +194,22 @@ def _sequence_forms(
     seq: LineSequence,
     *,
     include_context: bool = True,
+    include_file_name: bool = False,
     preplot_names: set[str] | None = None,
 ) -> set[str]:
     forms = set()
     texts = [seq.line_name]
     if include_context:
         texts.extend([seq.sequence_no, seq.file_name, Path(seq.file_name).stem])
+    elif include_file_name:
+        texts.extend([seq.file_name, Path(seq.file_name).stem])
     for text in texts:
         forms.update(_text_forms(text))
         forms.update(_parent_line_forms(text))
         forms.update(_leading_prefix_alias_forms(text))
         forms.update(_preplot_line_root_forms(text))
-    if preplot_names:
-        forms.update(_preplot_prefix_root_forms(seq.line_name, preplot_names))
+        if preplot_names:
+            forms.update(_preplot_prefix_root_forms(text, preplot_names))
     return forms
 
 
@@ -228,6 +237,7 @@ def _sequence_form_index(
     sequences: list[LineSequence],
     *,
     include_context: bool = True,
+    include_file_name: bool = False,
     preplot_names: set[str] | None = None,
 ) -> tuple[list[LineSequence], dict[str, list[LineSequence]]]:
     """Index imported sequences once so large preplot sets do not hang the UI."""
@@ -237,6 +247,7 @@ def _sequence_form_index(
         for form in _sequence_forms(
             seq,
             include_context=include_context,
+            include_file_name=include_file_name,
             preplot_names=preplot_names,
         ):
             index.setdefault(form, []).append(seq)
@@ -378,14 +389,18 @@ def build_postplot_4d_rows(
         if baseline_kind == "navplan"
         else build_preplot_candidates(map_data)
     )
-    preplot_names = (
-        {(candidate.name or "").strip().upper() for candidate in candidates if candidate.name}
-        if baseline_kind == "preplot"
-        else None
-    )
+    preplot_names = None
+    if baseline_kind == "preplot":
+        preplot_names = {
+            form
+            for candidate in candidates
+            for form in _candidate_forms(candidate)
+            if len(form) >= 3 and form not in _STOP_TOKENS
+        }
     sequences, sequence_index = _sequence_form_index(
         map_data.sequences,
         include_context=baseline_kind == "navplan",
+        include_file_name=baseline_kind == "preplot",
         preplot_names=preplot_names,
     )
 

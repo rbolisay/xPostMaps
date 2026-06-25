@@ -262,7 +262,12 @@ class Postplot4DDialog:
                 return list(active_map_data.positions) if active_map_data else []
             return list(positions_provider())
 
-        def persist_diff_rows(match_row: Postplot4DMatchRow, rows: list[Postplot4DDiffRow]) -> None:
+        def persist_diff_rows(
+            match_row: Postplot4DMatchRow,
+            rows: list[Postplot4DDiffRow],
+            *,
+            notify: bool = True,
+        ) -> None:
             if database is None or not project_name.strip():
                 return
             database.save_postplot_4d_diffs(
@@ -272,7 +277,7 @@ class Postplot4DDialog:
                 match_row.sequence_id,
                 rows,
             )
-            if on_diffs_saved is not None:
+            if notify and on_diffs_saved is not None:
                 on_diffs_saved()
 
         def load_or_calculate_diffs(
@@ -299,6 +304,15 @@ class Postplot4DDialog:
             )
             persist_diff_rows(match_row, rows)
             return rows, "calculated"
+
+        def has_saved_diffs(match_row: Postplot4DMatchRow) -> bool:
+            if database is None or not project_name.strip():
+                return False
+            return database.has_postplot_4d_diffs(
+                project_name.strip(),
+                match_row.baseline_kind,
+                match_row.sequence_id,
+            )
 
         def refresh_diff_table() -> None:
             match_row = state["active_match"]
@@ -479,6 +493,77 @@ class Postplot4DDialog:
                 recalc_btn.setText("Recalculate Diffs")
                 QApplication.restoreOverrideCursor()
 
+        def recalculate_missing_diffs() -> None:
+            nonlocal diff_rows
+            active_baseline = state["baseline"]
+            assert active_baseline in ("navplan", "preplot")
+            matched_rows = [row for row in rows_for(active_baseline) if row.has_match]
+            if not matched_rows:
+                summary.setText(
+                    f"No matched {active_baseline} rows available for Diff Stat recalculation."
+                )
+                return
+
+            bulk_recalc_btn.setEnabled(False)
+            _set_diff_summary(diff_summary, "Recalculating missing Diff Stat rows…", tone="busy")
+            summary.setText("Checking saved Diff Stat rows…")
+            QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+            QApplication.processEvents()
+
+            started = time.perf_counter()
+            recalculated = 0
+            skipped = 0
+            failed = 0
+            active_match = state["active_match"]
+            try:
+                for index, match_row in enumerate(matched_rows, start=1):
+                    if has_saved_diffs(match_row):
+                        skipped += 1
+                        continue
+                    summary.setText(
+                        f"Recalculating Diff Stat {index}/{len(matched_rows)}: "
+                        f"{match_row.baseline_name} -> {match_row.line_name}"
+                    )
+                    QApplication.processEvents()
+                    try:
+                        rows = calculate_match_diff_rows(
+                            current_map_data(),
+                            settings,
+                            positions(),
+                            match_row,
+                            database=database,
+                            project_name=project_name,
+                        )
+                        persist_diff_rows(match_row, rows, notify=False)
+                        recalculated += 1
+                        if (
+                            isinstance(active_match, Postplot4DMatchRow)
+                            and active_match.sequence_id == match_row.sequence_id
+                            and active_match.baseline_kind == match_row.baseline_kind
+                        ):
+                            diff_rows = rows
+                    except Exception:  # noqa: BLE001
+                        failed += 1
+                elapsed = time.perf_counter() - started
+                message = (
+                    f"Diff Stat check complete: {recalculated} recalculated, "
+                    f"{skipped} already saved"
+                    + (f", {failed} failed" if failed else "")
+                    + f" ({elapsed:.1f} s)"
+                )
+                summary.setText(message)
+                if isinstance(active_match, Postplot4DMatchRow) and stack.currentIndex() == 1:
+                    refresh_diff_table()
+                    _set_diff_summary(diff_summary, message, tone="done")
+                if recalculated and on_diffs_saved is not None:
+                    on_diffs_saved()
+                if parent is not None:
+                    _show_host_status(parent, message)
+                QTimer.singleShot(6000, refresh_table)
+            finally:
+                bulk_recalc_btn.setEnabled(True)
+                QApplication.restoreOverrideCursor()
+
         def toggle_coord_mode() -> None:
             state["coord_mode"] = "lat" if state["coord_mode"] == "en" else "en"
             coord_toggle.setText(_coord_toggle_label(state["coord_mode"]))  # type: ignore[arg-type]
@@ -585,7 +670,7 @@ class Postplot4DDialog:
             refresh_table()
 
         def build(dialog: SingleInstanceDialog) -> None:
-            nonlocal summary, table, stack, diff_title, diff_table, diff_summary, coord_toggle, recalc_btn, host_dialog
+            nonlocal summary, table, stack, diff_title, diff_table, diff_summary, coord_toggle, recalc_btn, bulk_recalc_btn, host_dialog
             host_dialog = dialog
             layout = dialog.content_layout
             _clear_layout(layout)
@@ -622,6 +707,11 @@ class Postplot4DDialog:
             baseline_row.addWidget(navplan_radio)
             baseline_row.addWidget(preplot_radio)
             baseline_row.addStretch()
+            bulk_recalc_btn = QPushButton("Recalculate Diff Stat")
+            bulk_recalc_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+            bulk_recalc_btn.setMinimumSize(170, 32)
+            bulk_recalc_btn.clicked.connect(recalculate_missing_diffs)
+            baseline_row.addWidget(bulk_recalc_btn)
             main_layout.addLayout(baseline_row)
 
             summary = QLabel("")
@@ -695,6 +785,7 @@ class Postplot4DDialog:
         diff_summary = QLabel("")
         coord_toggle = QPushButton()
         recalc_btn = QPushButton()
+        bulk_recalc_btn = QPushButton()
 
         return SingleInstanceDialog.show_dialog(
             cls.KEY,
