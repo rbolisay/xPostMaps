@@ -15,6 +15,30 @@ TRAILING_INT_RE = re.compile(r"(\d+)\s*$")
 TRAILING_FLOAT_RE = re.compile(r"([\d.]+)\s*$")
 
 
+PROJECTION_KEYWORDS = (
+    "UTM",
+    "TRANSVERSE MERCATOR",
+    "MERCATOR",
+    "LAMBERT",
+    "STEREOGRAPHIC",
+    "GAUSS",
+    "ALBERS",
+    "POLYCONIC",
+    "KROVAK",
+    "CASSINI",
+    "OBLIQUE MERCATOR",
+    "NATIONAL GRID",
+    "STATE PLANE",
+)
+
+
+def _is_projected_crs_name(name: str, type_name: str) -> bool:
+    if type_name.strip().lower() == "projected":
+        return True
+    upper = name.upper()
+    return any(keyword in upper for keyword in PROJECTION_KEYWORDS)
+
+
 def _normalize_key(key: str) -> str:
     return re.sub(r"\s+", " ", key.strip().lower())
 
@@ -50,10 +74,26 @@ def _apply_p111_hc_row(info: dict[str, str], row: list[str]) -> None:
         _set_if_empty(info, "survey description", row[5].strip())
         if len(row) >= 8 and row[7].strip():
             _set_if_empty(info, "area", row[7].strip())
-    elif label.startswith("CRS Number/EPSG Code") and len(row) >= 10:
-        crs_name = row[9].strip() if len(row) > 9 else ""
-        epsg = row[6].strip()
-        if "UTM" in crs_name or "utm" in crs_name.lower():
+    elif label.startswith("CRS Number/EPSG Code"):
+        # Two IOGP P1/11 row shapes share this label prefix:
+        #   HC,1,3,0 "CRS Number/EPSG Code/Name/Source": epsg=row[6], name=row[7]
+        #   HC,1,4,0 "CRS Number/EPSG Code/Type/Name"  : epsg=row[6], type=row[8], name=row[9]
+        subtype = row[2].strip() if len(row) > 2 else ""
+        if subtype == "3" and len(row) >= 8:
+            epsg, crs_name, type_name = row[6].strip(), row[7].strip(), ""
+        elif subtype == "4" and len(row) >= 10:
+            epsg, crs_name, type_name = row[6].strip(), row[9].strip(), row[8].strip()
+        else:
+            return
+        # Compound / vertical CRS rows carry no single usable EPSG; never let
+        # their (often empty) EPSG clobber a valid projected horizontal CRS.
+        if (
+            not epsg.isdigit()
+            or type_name.lower() in ("compound", "vertical")
+            or "COMPOUND" in crs_name.upper()
+        ):
+            return
+        if _is_projected_crs_name(crs_name, type_name):
             info["epsg code"] = epsg
             info["crs name"] = crs_name
             info["projection"] = crs_name

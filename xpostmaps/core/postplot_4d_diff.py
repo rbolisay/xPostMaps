@@ -4,7 +4,8 @@ from __future__ import annotations
 
 import math
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
+from collections import defaultdict
 from pathlib import Path
 
 from xpostmaps.core.models import (
@@ -21,6 +22,7 @@ from xpostmaps.core.postplot_4d_matching import (
     Postplot4DMatchRow,
     _text_forms,
 )
+from xpostmaps.parsers.metadata_parser import parse_file_metadata
 from xpostmaps.parsers.p190_parser import parse_p190_header
 from xpostmaps.parsers.preplot_parser import parse_navplan_source_file, parse_preplot_file
 from xpostmaps.core.crs_utils import WGS84_EPSG, normalize_epsg, transform_coordinates
@@ -670,6 +672,126 @@ def _generated_preplot_baseline_from_segment(
     )
 
 
+def _file_epsg(path: Path | None) -> str:
+    """Resolve the EPSG (datum + projection) declared in a nav/preplot file."""
+    if path is None or not path.is_file():
+        return ""
+    try:
+        metadata = parse_file_metadata(path)
+    except OSError:
+        return ""
+    return normalize_epsg(metadata.get("epsg code", ""))
+
+
+def _source_file_epsg(settings: ProjectSettings | None, file_name: str) -> str:
+    if settings is None or not file_name:
+        return ""
+    target = Path(file_name).name
+    for raw in settings.nav_files:
+        path = Path(raw)
+        if path.name == target and path.is_file():
+            return _file_epsg(path)
+    folder = getattr(settings, "p111_p190_dir", "") or ""
+    if folder:
+        candidate = Path(folder) / target
+        if candidate.is_file():
+            return _file_epsg(candidate)
+    return ""
+
+
+def _wgs84_lat_lon(xs: list[float], ys: list[float], map_epsg: str) -> tuple[list[str], list[str]]:
+    try:
+        lons, lats = transform_coordinates(xs, ys, map_epsg, WGS84_EPSG)
+    except Exception:  # noqa: BLE001
+        return [], []
+    if len(lons) != len(xs) or len(lats) != len(ys):
+        return [], []
+    return (
+        [f"{float(lat):.8f}" for lat in lats],
+        [f"{float(lon):.8f}" for lon in lons],
+    )
+
+
+def _reproject_baseline(
+    baseline: dict[BaselineKey, BaselineShotpoint],
+    src_epsg: str,
+    dst_epsg: str,
+) -> dict[BaselineKey, BaselineShotpoint]:
+    """Reproject baseline shotpoints into the common map CRS (no-op if equal)."""
+    src = normalize_epsg(src_epsg)
+    dst = normalize_epsg(dst_epsg)
+    if not src or not dst or src == dst or not baseline:
+        return baseline
+    keys = list(baseline)
+    new_x, new_y = transform_coordinates(
+        [baseline[k].x for k in keys],
+        [baseline[k].y for k in keys],
+        src,
+        dst,
+    )
+    if len(new_x) != len(keys) or len(new_y) != len(keys):
+        return baseline  # refuse to corrupt on a partial transform
+    lats, lons = _wgs84_lat_lon(new_x, new_y, dst)
+    result: dict[BaselineKey, BaselineShotpoint] = {}
+    for index, key in enumerate(keys):
+        point = baseline[key]
+        result[key] = BaselineShotpoint(
+            shotpoint=point.shotpoint,
+            x=new_x[index],
+            y=new_y[index],
+            latitude=lats[index] if lats else point.latitude,
+            longitude=lons[index] if lons else point.longitude,
+            source_id=point.source_id,
+            source_index=point.source_index,
+        )
+    return result
+
+
+def _reproject_sources(
+    sources: dict[int, PositionRecord],
+    settings: ProjectSettings | None,
+    dst_epsg: str,
+) -> dict[int, PositionRecord]:
+    """Reproject firing-source shotpoints into the common map CRS (no-op if equal)."""
+    dst = normalize_epsg(dst_epsg)
+    if not dst or not sources:
+        return sources
+    by_file: dict[str, list[int]] = defaultdict(list)
+    for shotpoint, record in sources.items():
+        by_file[record.file_name].append(shotpoint)
+    result: dict[int, PositionRecord] = {}
+    epsg_cache: dict[str, str] = {}
+    for file_name, shotpoints in by_file.items():
+        if file_name not in epsg_cache:
+            epsg_cache[file_name] = normalize_epsg(_source_file_epsg(settings, file_name))
+        src = epsg_cache[file_name]
+        if not src or src == dst:
+            for shotpoint in shotpoints:
+                result[shotpoint] = sources[shotpoint]
+            continue
+        new_x, new_y = transform_coordinates(
+            [sources[sp].x for sp in shotpoints],
+            [sources[sp].y for sp in shotpoints],
+            src,
+            dst,
+        )
+        if len(new_x) != len(shotpoints) or len(new_y) != len(shotpoints):
+            for shotpoint in shotpoints:
+                result[shotpoint] = sources[shotpoint]
+            continue
+        lats, lons = _wgs84_lat_lon(new_x, new_y, dst)
+        for index, shotpoint in enumerate(shotpoints):
+            record = sources[shotpoint]
+            result[shotpoint] = replace(
+                record,
+                x=new_x[index],
+                y=new_y[index],
+                latitude=lats[index] if lats else record.latitude,
+                longitude=lons[index] if lons else record.longitude,
+            )
+    return result
+
+
 def _offset_components(
     delta_e: float,
     delta_n: float,
@@ -750,7 +872,11 @@ def calculate_match_diff_rows(
         project_name=project_name,
         map_epsg=map_epsg,
     )
+    # Ensure baseline and firing sources share one projected CRS (datum +
+    # projection) before differencing. No-op when files already match map_epsg.
+    baseline = _reproject_baseline(baseline, _file_epsg(baseline_path), map_epsg)
     sources = source_shotpoints_for_match(positions, match_row)
+    sources = _reproject_sources(sources, settings, map_epsg)
     return compute_postplot_4d_diff_rows(
         baseline,
         sources,

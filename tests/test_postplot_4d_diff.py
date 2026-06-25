@@ -258,6 +258,80 @@ def test_offset_components_use_line_azimuth() -> None:
     assert abs(row.radial_m - (125.0**0.5)) < 1e-6
 
 
+def test_7027_multisource_diff_compares_each_gun_to_its_own_offset_source() -> None:
+    """Real flip-flop dual-source: G01/G02 must diff vs their own +/-25 m
+    baseline source, not the line centre (which would leave a ~25 m bias)."""
+    import math
+
+    from xpostmaps.core.models import MapData, ProjectSettings, RecordType
+    from xpostmaps.core.postplot_4d_diff import (
+        _read_preplot_generation_info,
+        calculate_match_diff_rows,
+        load_baseline_shotpoints,
+    )
+    from xpostmaps.core.postplot_4d_matching import build_postplot_4d_rows
+    from xpostmaps.parsers.p111_parser import parse_p111_file
+    from xpostmaps.parsers.preplot_parser import parse_preplot_files
+    from xpostmaps.parsers.sequence_builder import build_display_sequences
+
+    preplot = Path("4D/7027/Preplot/7027_S_TRINAV_v2.p190")
+    p111 = Path("4D/7027/P111V_S/3237.53196213237.a3237.GFUNREG.p111")
+    if not preplot.is_file() or not p111.is_file():
+        return  # dataset not present in this checkout
+
+    info = _read_preplot_generation_info(preplot)
+    assert info.number_of_sources == 2
+    assert info.source_separation_m == 50.0
+
+    segments, _meta, _stats = parse_preplot_files([preplot])
+    src = [r for r in parse_p111_file(p111) if r.record_type == RecordType.SOURCE]
+    map_data = MapData()
+    map_data.preplot_segments = segments
+    map_data.positions = src
+    map_data.sequences = build_display_sequences(src)
+    settings = ProjectSettings(
+        preplot_files=[str(preplot.resolve())],
+        nav_files=[str(p111.resolve())],
+        postplot_4d_baseline="preplot",
+    )
+    rows = build_postplot_4d_rows(map_data, settings, "preplot")
+    match_row = next(r for r in rows if r.has_match)
+
+    # baseline places two sources exactly 50 m apart per shotpoint
+    baseline = load_baseline_shotpoints(
+        map_data, settings, "preplot", match_row.baseline_name,
+        match_row.baseline_file_name, map_epsg="32621",
+    )
+    sp_both = [k[0] for k in baseline
+               if isinstance(k, tuple) and (k[0], "1") in baseline and (k[0], "2") in baseline]
+    sample = sp_both[len(sp_both) // 2]
+    d = math.hypot(
+        baseline[(sample, "1")].x - baseline[(sample, "2")].x,
+        baseline[(sample, "1")].y - baseline[(sample, "2")].y,
+    )
+    assert abs(d - 50.0) < 1e-3
+
+    diff_rows = calculate_match_diff_rows(map_data, settings, src, match_row)
+    src_by_sp = {r.point_num: r for r in src}
+    g01 = [r.crossline_m for r in diff_rows if src_by_sp.get(r.shotpoint, src[0]).source_id == "G01"]
+    g02 = [r.crossline_m for r in diff_rows if src_by_sp.get(r.shotpoint, src[0]).source_id == "G02"]
+    assert g01 and g02
+    # Correct separation + side -> small residual bias (NOT ~25 m).
+    assert abs(sum(g01) / len(g01)) < 5.0
+    assert abs(sum(g02) / len(g02)) < 5.0
+
+
+def test_p111_compound_crs_row_does_not_clobber_projected_epsg() -> None:
+    from xpostmaps.parsers.metadata_parser import parse_p111_metadata
+
+    path = Path("4D/4030/P111V/069.0103643A-069.nrt.GFUNREG.p111")
+    metadata = parse_p111_metadata(path)
+    # The file lists a compound CRS ("ED50 / UTM zone 31N / Instantaneous Water
+    # Level depth") with an empty EPSG field. That row must NOT overwrite the
+    # real projected horizontal CRS, ED50 / UTM zone 31N == EPSG:23031.
+    assert metadata.get("epsg code") == "23031"
+
+
 def test_source_shotpoints_filter_by_sequence_group() -> None:
     match_row = Postplot4DMatchRow(
         baseline_name="0103643A",
