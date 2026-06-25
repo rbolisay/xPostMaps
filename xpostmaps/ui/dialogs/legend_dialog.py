@@ -12,6 +12,7 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QHeaderView,
     QLabel,
+    QLayout,
     QLineEdit,
     QMessageBox,
     QPushButton,
@@ -344,7 +345,7 @@ def _autosize_legend_dialog(
     QApplication.processEvents()
 
 _COND_MIN_DIALOG_WIDTH = 480
-_COND_MIN_DIALOG_HEIGHT = 180
+_COND_MIN_DIALOG_HEIGHT = 120
 
 
 def _conditional_table_width(table: QTableWidget) -> int:
@@ -414,16 +415,21 @@ def _autosize_conditional_colors_dialog(
         table_h = table.minimumHeight()
         target_h = min(chrome_h + table_h + pad_h, max_h)
     else:
-        target_h = max(natural_h, _COND_MIN_DIALOG_HEIGHT)
+        target_h = natural_h
 
     target_w = min(
         max(_COND_MIN_DIALOG_WIDTH, pad_w + max(table_w, layout.sizeHint().width())),
         max_w,
     )
+    target_h = min(target_h, max_h)
 
-    dialog.setMinimumSize(_COND_MIN_DIALOG_WIDTH, _COND_MIN_DIALOG_HEIGHT)
-    dialog.setMaximumSize(max_w, max_h)
+    dialog.setMinimumSize(target_w, target_h)
+    dialog.setMaximumSize(target_w, target_h)
     dialog.resize(target_w, target_h)
+    if outer is not None:
+        outer.setSizeConstraint(QLayout.SizeConstraint.SetFixedSize)
+    layout.setAlignment(Qt.AlignmentFlag.AlignTop)
+    dialog._glass.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
     layout.activate()
     QApplication.processEvents()
 
@@ -985,6 +991,8 @@ class LegendDialog:
                 )
 
             def add_area_row(entry: AreaLegendEntry | None = None) -> None:
+                if entry is not None and not isinstance(entry, AreaLegendEntry):
+                    entry = None
                 row = area_table.rowCount()
                 area_table.insertRow(row)
                 name_edit = _table_name_edit(entry.name if entry else "")
@@ -1054,7 +1062,6 @@ class LegendDialog:
                     if row < len(row_custom_points):
                         del row_custom_points[row]
                     schedule_refit()
-                    apply_legend()
 
             def _postplot_names() -> list[str]:
                 names: list[str] = []
@@ -1129,14 +1136,24 @@ class LegendDialog:
                 def build_conditional_dialog(cond_dialog: SingleInstanceDialog) -> None:
                     cond_layout = cond_dialog.content_layout
                     _clear_layout(cond_layout)
-                    cond_layout.setSpacing(8)
+                    cond_layout.setContentsMargins(6, 0, 6, 6)
+                    cond_layout.setSpacing(2)
+                    cond_layout.setAlignment(Qt.AlignmentFlag.AlignTop)
+
+                    outer = cond_dialog.layout()
+                    if outer is not None:
+                        outer.setContentsMargins(6, 2, 6, 6)
+                        outer.setSizeConstraint(QLayout.SizeConstraint.SetNoConstraint)
 
                     title = QLabel(f"Conditional Colors - {row_name}")
-                    title.setStyleSheet("font-weight: 600;")
-                    title.setAlignment(
-                        Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter
+                    title.setStyleSheet("font-weight: 600; margin: 0; padding: 0;")
+                    title.setContentsMargins(0, 0, 0, 0)
+                    title.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop)
+                    title.setSizePolicy(
+                        QSizePolicy.Policy.Preferred,
+                        QSizePolicy.Policy.Fixed,
                     )
-                    cond_layout.addWidget(title)
+                    title.setFixedHeight(title.fontMetrics().height())
 
                     cond_table = QTableWidget(0, 4)
                     cond_table.setHorizontalHeaderLabels(
@@ -1193,11 +1210,36 @@ class LegendDialog:
                             QComboBox.SizeAdjustPolicy.AdjustToContents
                         )
                         stat_combo.setMaxVisibleItems(stat_combo.count())
-                        stat_combo.view().setMinimumWidth(
+                        stat_view = stat_combo.view()
+                        stat_view.setMinimumWidth(
                             max(
                                 stat_combo.fontMetrics().horizontalAdvance(label) + 40
                                 for label in ("Crossline", "Inline", "Radial")
                             )
+                        )
+                        stat_view.setMinimumHeight(
+                            stat_combo.fontMetrics().height() * stat_combo.count() + 18
+                        )
+                        stat_view.setStyleSheet(
+                            """
+                            QListView {
+                                background: #172235;
+                                color: #e6edf3;
+                                border: 1px solid #3b4a5f;
+                                selection-background-color: #3b82f6;
+                                selection-color: #ffffff;
+                                outline: 0;
+                            }
+                            QListView::item {
+                                min-height: 24px;
+                                padding: 4px 8px;
+                                color: #e6edf3;
+                            }
+                            QListView::item:selected {
+                                background: #3b82f6;
+                                color: #ffffff;
+                            }
+                            """
                         )
                         current = (rule.diff_stat if rule else "radial").lower()
                         stat_combo.setCurrentIndex(
@@ -1237,6 +1279,7 @@ class LegendDialog:
 
                     toolbar = QHBoxLayout()
                     toolbar.setContentsMargins(0, 0, 0, 0)
+                    toolbar.setSpacing(6)
                     add_btn = _legend_section_toolbar_button("Add Condition Row", kind="add")
                     remove_btn = _legend_section_toolbar_button("Remove Selected", kind="remove")
                     add_btn.clicked.connect(lambda: add_condition())
@@ -1244,7 +1287,13 @@ class LegendDialog:
                     toolbar.addWidget(add_btn)
                     toolbar.addWidget(remove_btn)
                     toolbar.addStretch()
-                    cond_layout.addLayout(toolbar)
+
+                    header = QVBoxLayout()
+                    header.setContentsMargins(0, 0, 0, 0)
+                    header.setSpacing(8)
+                    header.addWidget(title)
+                    header.addLayout(toolbar)
+                    cond_layout.addLayout(header)
                     cond_layout.addWidget(cond_table)
 
                     action_row = QHBoxLayout()
@@ -1334,6 +1383,8 @@ class LegendDialog:
                 )
 
             def add_post_row(entry: PostplotLegendEntry | None = None) -> None:
+                if entry is not None and not isinstance(entry, PostplotLegendEntry):
+                    entry = None
                 row = post_table.rowCount()
                 post_table.insertRow(row)
                 name = entry.name if entry else ""
@@ -1461,7 +1512,6 @@ class LegendDialog:
                     if row < len(row_post_dash_lengths):
                         del row_post_dash_lengths[row]
                     schedule_refit()
-                    apply_legend()
 
             # Only show area rows the user has explicitly added. Imported
             # polygons, preplots and survey perimeters are NOT auto-added.
@@ -1472,7 +1522,7 @@ class LegendDialog:
             area_btns = QHBoxLayout()
             add_area_btn = _legend_section_toolbar_button("Add Area Row", kind="add")
             rem_area_btn = _legend_section_toolbar_button("Remove Selected", kind="remove")
-            add_area_btn.clicked.connect(add_area_row)
+            add_area_btn.clicked.connect(lambda _checked=False: add_area_row())
             rem_area_btn.clicked.connect(remove_area_row)
             area_btns.addWidget(add_area_btn)
             area_btns.addWidget(rem_area_btn)
@@ -1499,6 +1549,8 @@ class LegendDialog:
             legend_tables.append(preplot_table)
 
             def add_preplot_row(entry: PreplotLegendEntry | None = None) -> None:
+                if entry is not None and not isinstance(entry, PreplotLegendEntry):
+                    entry = None
                 row = preplot_table.rowCount()
                 preplot_table.insertRow(row)
                 pp_name = _table_name_edit(entry.name if entry else "")
@@ -1592,7 +1644,6 @@ class LegendDialog:
                     if row < len(row_preplot_dash_lengths):
                         del row_preplot_dash_lengths[row]
                     schedule_refit()
-                    apply_legend()
 
             navplan_lbl = QLabel("Navplan")
             navplan_lbl.setStyleSheet("font-weight: 600; margin-top: 8px;")
@@ -1672,6 +1723,8 @@ class LegendDialog:
                 )
 
             def add_navplan_row(entry: NavplanLegendEntry | None = None) -> None:
+                if entry is not None and not isinstance(entry, NavplanLegendEntry):
+                    entry = None
                 row = navplan_table.rowCount()
                 navplan_table.insertRow(row)
                 name = entry.name if entry else ""
@@ -1782,7 +1835,6 @@ class LegendDialog:
                     if row < len(row_navplan_dash_lengths):
                         del row_navplan_dash_lengths[row]
                     schedule_refit()
-                    apply_legend()
 
             for entry in legend.preplot_lines:
                 add_preplot_row(entry)
@@ -1791,7 +1843,7 @@ class LegendDialog:
             preplot_btns = QHBoxLayout()
             add_preplot_btn = _legend_section_toolbar_button("Add Preplot Row", kind="add")
             rem_preplot_btn = _legend_section_toolbar_button("Remove Selected", kind="remove")
-            add_preplot_btn.clicked.connect(add_preplot_row)
+            add_preplot_btn.clicked.connect(lambda _checked=False: add_preplot_row())
             rem_preplot_btn.clicked.connect(remove_preplot_row)
             preplot_btns.addWidget(add_preplot_btn)
             preplot_btns.addWidget(rem_preplot_btn)
@@ -1814,7 +1866,7 @@ class LegendDialog:
             navplan_btns = QHBoxLayout()
             add_navplan_btn = _legend_section_toolbar_button("Add Navplan Row", kind="add")
             rem_navplan_btn = _legend_section_toolbar_button("Remove Selected", kind="remove")
-            add_navplan_btn.clicked.connect(add_navplan_row)
+            add_navplan_btn.clicked.connect(lambda _checked=False: add_navplan_row())
             rem_navplan_btn.clicked.connect(remove_navplan_row)
             navplan_btns.addWidget(add_navplan_btn)
             navplan_btns.addWidget(rem_navplan_btn)
@@ -1840,7 +1892,7 @@ class LegendDialog:
             post_btns = QHBoxLayout()
             add_post_btn = _legend_section_toolbar_button("Add PostPlot Row", kind="add")
             rem_post_btn = _legend_section_toolbar_button("Remove Selected", kind="remove")
-            add_post_btn.clicked.connect(add_post_row)
+            add_post_btn.clicked.connect(lambda _checked=False: add_post_row())
             rem_post_btn.clicked.connect(remove_post_row)
             post_btns.addWidget(add_post_btn)
             post_btns.addWidget(rem_post_btn)
@@ -1857,18 +1909,25 @@ class LegendDialog:
             action_row = QHBoxLayout()
             apply_btn = QPushButton("Apply")
             apply_btn.setObjectName("primaryBtn")
+            ok_btn = QPushButton("Ok")
             close_btn = QPushButton("Close")
 
             def apply_changes() -> None:
                 apply_legend()
 
-            def close_dialog() -> None:
+            def ok_dialog() -> None:
                 apply_legend()
                 dialog.close()
 
+            def close_dialog() -> None:
+                dialog.close()
+
             apply_btn.clicked.connect(apply_changes)
+            ok_btn.clicked.connect(ok_dialog)
             close_btn.clicked.connect(close_dialog)
+            action_row.addStretch()
             action_row.addWidget(apply_btn)
+            action_row.addWidget(ok_btn)
             action_row.addWidget(close_btn)
             layout.addLayout(action_row)
 

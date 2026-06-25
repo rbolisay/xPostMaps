@@ -745,8 +745,15 @@ class MainWindow(QMainWindow):
         self._settings.legend_config = legend_from_dict(legend_to_dict(legend))
         self._sync_map_data_preplot_order()
         self._map.set_legend(self._settings.legend_config)
-        # Defer the heavy map rebuild so the legend dialog stays responsive.
-        QTimer.singleShot(0, self._complete_legend_apply)
+        # Debounce the heavy map rebuild so repeated Apply/Ok clicks don't stack
+        # multiple full renders while the legend dialog is still active.
+        timer = getattr(self, "_legend_apply_timer", None)
+        if timer is None:
+            timer = QTimer(self)
+            timer.setSingleShot(True)
+            timer.timeout.connect(self._complete_legend_apply)
+            self._legend_apply_timer = timer
+        timer.start(75)
 
     def _complete_legend_apply(self) -> None:
         self._refresh_conditional_postplot_points()
