@@ -4,18 +4,91 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from PySide6.QtCore import Qt, Signal
+from PySide6.QtCore import Qt, QRectF, Signal
+from PySide6.QtGui import QBrush, QColor, QImage, QLinearGradient, QPainter, QPixmap
 from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QLineEdit,
     QProgressBar,
     QPushButton,
+    QSizePolicy,
     QVBoxLayout,
+    QWidget,
 )
 
-from xpostmaps.core.branding import APP_NAME, APP_SUBTITLE
+from xpostmaps.core.branding import APP_LOGO_PATH, APP_SUBTITLE
 from xpostmaps.ui.glass_widget import GlassPanel
+
+
+def _trim_logo_pixmap(path: str) -> QPixmap:
+    """Load the transparent logo and trim empty margins."""
+    img = QImage(path)
+    if img.isNull():
+        return QPixmap()
+    img = img.convertToFormat(QImage.Format.Format_ARGB32)
+
+    width = img.width()
+    height = img.height()
+    min_x, min_y, max_x, max_y = width, height, -1, -1
+    for y in range(height):
+        for x in range(width):
+            if img.pixelColor(x, y).alpha() != 0:
+                min_x = min(min_x, x)
+                min_y = min(min_y, y)
+                max_x = max(max_x, x)
+                max_y = max(max_y, y)
+
+    if max_x >= min_x and max_y >= min_y:
+        img = img.copy(min_x, min_y, max_x - min_x + 1, max_y - min_y + 1)
+
+    return QPixmap.fromImage(img)
+
+
+class _BrandLogoHeader(QWidget):
+    """Full-width brand strip with a darker gradient and centered logo."""
+
+    _LOGO_TARGET_WIDTH = 210
+    _VERT_PAD = 12
+
+    def __init__(self, logo_path: str, parent=None) -> None:
+        super().__init__(parent)
+        self._source = _trim_logo_pixmap(logo_path)
+        self._logo = QPixmap()
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        self._sync_logo_size()
+
+    def _sync_logo_size(self) -> None:
+        if self._source.isNull():
+            self.setFixedHeight(48)
+            return
+        self._logo = self._source.scaledToWidth(
+            self._LOGO_TARGET_WIDTH,
+            Qt.TransformationMode.SmoothTransformation,
+        )
+        self.setFixedHeight(self._logo.height() + self._VERT_PAD * 2)
+
+    def paintEvent(self, event) -> None:  # noqa: N802
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+
+        width = self.width()
+        height = self.height()
+        gradient = QLinearGradient(0, 0, width, height)
+        gradient.setColorAt(0.0, QColor("#b8c5d4"))
+        gradient.setColorAt(0.45, QColor("#8fa3b8"))
+        gradient.setColorAt(1.0, QColor("#6b849c"))
+
+        painter.setBrush(QBrush(gradient))
+        painter.setPen(QColor(255, 255, 255, 55))
+        painter.drawRoundedRect(QRectF(0.5, 0.5, width - 1, height - 1), 10, 10)
+
+        if not self._logo.isNull():
+            x = (width - self._logo.width()) // 2
+            y = (height - self._logo.height()) // 2
+            painter.drawPixmap(x, y, self._logo)
+
+        painter.end()
 
 
 class LeftPanel(GlassPanel):
@@ -38,18 +111,27 @@ class LeftPanel(GlassPanel):
 
     def _build_ui(self) -> None:
         layout = self.content_layout
+        layout.setContentsMargins(0, 16, 0, 16)
 
-        header = QLabel(APP_NAME)
-        header.setStyleSheet("font-size: 20px; font-weight: 700; letter-spacing: 0.5px;")
+        header = _BrandLogoHeader(str(APP_LOGO_PATH))
         layout.addWidget(header)
 
         sub = QLabel(APP_SUBTITLE)
-        sub.setStyleSheet("color: #8b949e; font-size: 12px; margin-bottom: 4px;")
+        sub.setAlignment(Qt.AlignmentFlag.AlignHCenter)
+        sub.setStyleSheet(
+            "color: #8b949e; font-size: 12px; margin: 0 16px 4px 16px;"
+        )
         layout.addWidget(sub)
+
+        body = QWidget()
+        body_layout = QVBoxLayout(body)
+        body_layout.setContentsMargins(16, 0, 16, 0)
+        body_layout.setSpacing(12)
+        layout.addWidget(body, stretch=1)
 
         proj_title = QLabel("Project")
         proj_title.setObjectName("sectionTitle")
-        layout.addWidget(proj_title)
+        body_layout.addWidget(proj_title)
 
         name_row = QHBoxLayout()
         self._project_input = QLineEdit()
@@ -67,13 +149,13 @@ class LeftPanel(GlassPanel):
         self._browse_load_btn.clicked.connect(self.browse_load_project.emit)
         name_row.addWidget(self._browse_load_btn)
 
-        layout.addLayout(name_row)
+        body_layout.addLayout(name_row)
 
-        layout.addSpacing(8)
+        body_layout.addSpacing(8)
 
         dirs_title = QLabel("Data Sources")
         dirs_title.setObjectName("sectionTitle")
-        layout.addWidget(dirs_title)
+        body_layout.addWidget(dirs_title)
 
         self._preplot_btn = QPushButton("Preplot")
         self._preplot_btn.setObjectName("dirBtn")
@@ -98,8 +180,8 @@ class LeftPanel(GlassPanel):
             (self._navplan_btn, self._navplan_path),
             (self._p111_btn, self._p111_path),
         ):
-            layout.addWidget(btn)
-            layout.addWidget(path_lbl)
+            body_layout.addWidget(btn)
+            body_layout.addWidget(path_lbl)
 
         self._preplot_btn.clicked.connect(self.select_preplot_navplan.emit)
         self._navplan_btn.clicked.connect(self.import_navplan.emit)
@@ -110,19 +192,19 @@ class LeftPanel(GlassPanel):
         self._import_polygons_path = QLabel("Not set")
         self._import_polygons_path.setWordWrap(True)
         self._import_polygons_path.setStyleSheet("color: #8b949e; font-size: 11px;")
-        layout.addWidget(self._import_polygons_btn)
-        layout.addWidget(self._import_polygons_path)
+        body_layout.addWidget(self._import_polygons_btn)
+        body_layout.addWidget(self._import_polygons_path)
         self._import_polygons_btn.clicked.connect(self.open_import_polygons.emit)
 
-        layout.addSpacing(8)
+        body_layout.addSpacing(8)
 
         tools_title = QLabel("Tools")
         tools_title.setObjectName("sectionTitle")
-        layout.addWidget(tools_title)
+        body_layout.addWidget(tools_title)
 
         self._logo_btn = QPushButton("Set Logo")
         self._logo_btn.setObjectName("dirBtn")
-        layout.addWidget(self._logo_btn)
+        body_layout.addWidget(self._logo_btn)
         self._logo_btn.clicked.connect(self.select_logo.emit)
 
         self._layer_styles_btn = QPushButton("Layer Styles")
@@ -133,21 +215,21 @@ class LeftPanel(GlassPanel):
         self._info_btn.setObjectName("dirBtn")
 
         for btn in (self._info_btn, self._layer_styles_btn, self._pdf_btn):
-            layout.addWidget(btn)
+            body_layout.addWidget(btn)
 
         self._layer_styles_btn.clicked.connect(self.open_layer_styles.emit)
         self._pdf_btn.clicked.connect(self.open_pdf_export.emit)
         self._info_btn.clicked.connect(self.open_postmap_info.emit)
 
-        layout.addSpacing(8)
+        body_layout.addSpacing(8)
 
         four_d_title = QLabel("4D Tools")
         four_d_title.setObjectName("sectionTitle")
-        layout.addWidget(four_d_title)
+        body_layout.addWidget(four_d_title)
 
         self._postplot_4d_btn = QPushButton("Postplot 4D")
         self._postplot_4d_btn.setObjectName("dirBtn")
-        layout.addWidget(self._postplot_4d_btn)
+        body_layout.addWidget(self._postplot_4d_btn)
         self._postplot_4d_btn.clicked.connect(self.open_postplot_4d.emit)
 
         self._active_buttons = {
@@ -168,14 +250,14 @@ class LeftPanel(GlassPanel):
         self._progress = QProgressBar()
         self._progress.setVisible(False)
         self._progress.setTextVisible(False)
-        layout.addWidget(self._progress)
+        body_layout.addWidget(self._progress)
 
         self._status = QLabel("")
         self._status.setWordWrap(True)
         self._status.setStyleSheet("color: #8b949e; font-size: 11px;")
-        layout.addWidget(self._status)
+        body_layout.addWidget(self._status)
 
-        layout.addStretch()
+        body_layout.addStretch()
 
         tips = QLabel(
             "Hold Right Click to Pan on Main Map and Mini Map\n"
@@ -185,7 +267,7 @@ class LeftPanel(GlassPanel):
         tips.setWordWrap(True)
         tips.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignBottom)
         tips.setStyleSheet("color: #6e7681; font-size: 10px; padding-top: 8px;")
-        layout.addWidget(tips)
+        body_layout.addWidget(tips)
 
     def set_project_name(self, name: str) -> None:
         self._project_input.blockSignals(True)

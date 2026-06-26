@@ -20,7 +20,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from xpostmaps.core.branding import APP_WINDOW_TITLE, DEVELOPER_CREDIT
+from xpostmaps.core.branding import APP_WINDOW_TITLE, DEVELOPER_CREDIT_HTML
 
 from xpostmaps.core.autosave import AutosaveController
 from xpostmaps.core.database import Database
@@ -135,8 +135,15 @@ class MainWindow(QMainWindow):
         content.addWidget(sheet_host, stretch=1)
         root.addLayout(content, stretch=1)
 
-        credit = QLabel(DEVELOPER_CREDIT)
-        credit.setStyleSheet("color: #6e7681; font-size: 10px; padding-left: 2px;")
+        credit = QLabel(DEVELOPER_CREDIT_HTML)
+        credit.setTextFormat(Qt.TextFormat.RichText)
+        credit.setOpenExternalLinks(True)
+        credit.setTextInteractionFlags(Qt.TextInteractionFlag.TextBrowserInteraction)
+        credit.setStyleSheet(
+            "color: #6e7681; font-size: 10px; padding-left: 2px;"
+            " a { color: #8b949e; text-decoration: none; }"
+            " a:hover { text-decoration: underline; }"
+        )
         root.addWidget(credit, alignment=Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignBottom)
 
         status = QStatusBar()
