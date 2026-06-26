@@ -451,6 +451,27 @@ def apply_menu_theme(menu) -> None:
     menu.setStyleSheet(app_stylesheet())
 
 
+def themed_open_file(
+    parent,
+    title: str,
+    start_dir: str = "",
+    file_filter: str = "",
+) -> str:
+    """Show a dark-themed single-file picker."""
+    from PySide6.QtWidgets import QFileDialog
+
+    picker = QFileDialog(parent, title, start_dir)
+    picker.setFileMode(QFileDialog.FileMode.ExistingFile)
+    if file_filter:
+        picker.setNameFilter(file_filter)
+    picker.setOption(QFileDialog.Option.DontUseNativeDialog, True)
+    apply_file_dialog_theme(picker)
+    if picker.exec() != QFileDialog.DialogCode.Accepted:
+        return ""
+    selected = picker.selectedFiles()
+    return selected[0] if selected else ""
+
+
 def themed_open_files(parent, title: str, file_filter: str) -> list[str]:
     """Show a dark-themed multi-file picker."""
     from PySide6.QtWidgets import QFileDialog

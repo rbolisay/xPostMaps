@@ -1230,4 +1230,6 @@ def test_conditional_diff_cache_reads_saved_database_rows(tmp_path) -> None:
 
     assert rows == saved
     assert db.postplot_4d_diffs_updated_at("proj", "navplan", "file.p190|1")
+    grouped = db.load_all_postplot_4d_diffs("proj", "navplan")
+    assert grouped == {"file.p190|1": saved}
     db.close()

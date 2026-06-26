@@ -9,7 +9,6 @@ from pathlib import Path
 from PySide6.QtCore import Qt, QTimer
 from PySide6.QtWidgets import (
     QApplication,
-    QFileDialog,
     QHBoxLayout,
     QInputDialog,
     QLabel,
@@ -69,7 +68,7 @@ from xpostmaps.ui.dialogs.project_browser_dialog import ProjectBrowserDialog
 from xpostmaps.ui.left_panel import LeftPanel
 from xpostmaps.ui.map_widget import PostplotMapWidget
 from xpostmaps.ui.right_pane import RightPane
-from xpostmaps.ui.theme import BG_DARK, app_stylesheet
+from xpostmaps.ui.theme import BG_DARK, app_stylesheet, themed_open_file
 
 
 class MainWindow(QMainWindow):
@@ -340,6 +339,9 @@ class MainWindow(QMainWindow):
             return
         self._right.sync_map_scale_from_map(self._map)
 
+    def _schedule_map_scale_sync(self, delay_ms: int = 0) -> None:
+        QTimer.singleShot(delay_ms, self._sync_map_scale_bar)
+
     def _set_left_button_active(self, key: str, active: bool) -> None:
         self._left.set_button_active(key, active)
 
@@ -366,7 +368,7 @@ class MainWindow(QMainWindow):
     def _select_logo(self) -> None:
         self._set_left_button_active("logo", True)
         try:
-            path, _ = QFileDialog.getOpenFileName(
+            path = themed_open_file(
                 self,
                 "Select Logo",
                 self._settings.logo_path or "",
@@ -581,7 +583,8 @@ class MainWindow(QMainWindow):
             self._conditional_points_signature_cache = signature
             return
 
-        positions = self._current_positions()
+        bulk_diffs = self._bulk_saved_postplot_diffs()
+        positions: list[PositionRecord] | None = None
         match_rows = [
             row
             for row in build_postplot_4d_rows(
@@ -596,7 +599,12 @@ class MainWindow(QMainWindow):
             for match_row in match_rows:
                 if not sequence_id_matches(match_row.sequence_id, entry.sequence_ids):
                     continue
-                diff_rows = self._cached_match_diff_rows(match_row, positions)
+                diff_rows = self._cached_match_diff_rows(
+                    match_row,
+                    positions,
+                    bulk_diffs=bulk_diffs,
+                    calculate_if_missing=False,
+                )
                 for diff_row in diff_rows:
                     rule = self._conditional_rule_for_diff_row(
                         entry.conditional_colors,
@@ -616,10 +624,21 @@ class MainWindow(QMainWindow):
         self._map.set_conditional_postplot_points(points)
         self._conditional_points_signature_cache = signature
 
+    def _deferred_refresh_conditional_postplot_points(self) -> None:
+        """Apply conditional postplot colors after the project shell is visible."""
+        if self._loading_project:
+            return
+        self._refresh_conditional_postplot_points()
+        if self._map_data is not None:
+            self._map.render(self._map_data, force=True)
+
     def _cached_match_diff_rows(
         self,
         match_row,
-        positions: list[PositionRecord],
+        positions: list[PositionRecord] | None = None,
+        *,
+        bulk_diffs: dict[str, list] | None = None,
+        calculate_if_missing: bool = True,
     ) -> list:
         """Return 4D diff rows for a match row, preferring saved DB data.
 
@@ -640,17 +659,25 @@ class MainWindow(QMainWindow):
         )
         cached = self._match_diff_cache.get(key)
         if cached is None:
-            cached = []
             project_name = self._settings.name.strip()
-            if project_name:
+            if bulk_diffs is not None:
+                cached = bulk_diffs.get(match_row.sequence_id, [])
+            elif project_name:
                 cached = self._db.load_postplot_4d_diffs(
                     project_name,
                     match_row.baseline_kind,
                     match_row.sequence_id,
                 )
+            else:
+                cached = []
             if cached:
                 self._match_diff_cache[key] = cached
                 return cached
+            if not calculate_if_missing:
+                self._match_diff_cache[key] = []
+                return []
+            if positions is None:
+                positions = self._current_positions()
             cached = calculate_match_diff_rows(
                 self._map_data,
                 self._settings,
@@ -669,6 +696,15 @@ class MainWindow(QMainWindow):
                 )
             self._match_diff_cache[key] = cached
         return cached
+
+    def _bulk_saved_postplot_diffs(self) -> dict[str, list]:
+        project_name = self._settings.name.strip()
+        if not project_name:
+            return {}
+        return self._db.load_all_postplot_4d_diffs(
+            project_name,
+            self._settings.postplot_4d_baseline,
+        )
 
     def _invalidate_conditional_diff_cache(self) -> None:
         """Drop cached 4D diff rows after the underlying data changes."""
@@ -1173,7 +1209,7 @@ class MainWindow(QMainWindow):
             self._load_project_by_name(name)
 
     def _load_project_by_name(self, name: str) -> None:
-        loaded = self._db.load_project(name)
+        loaded = self._db.load_project(name, with_positions=False)
         if loaded:
             self._apply_loaded_project(*loaded)
         else:
@@ -1220,14 +1256,12 @@ class MainWindow(QMainWindow):
             self._refresh_preplot_summary()
             if settings.logo_path:
                 self._right.set_logo(settings.logo_path)
-            self._map.clear()
             self._map.set_legend(self._settings.legend_config)
             self._map.set_display_mode(self._settings.display_mode)
             self._invalidate_conditional_diff_cache()
-            self._refresh_conditional_postplot_points()
             self._map.render(self._map_data, force=True)
             self._map.restore_view(settings.map_view)
-            self._map.render(self._map_data, force=True)
+            QTimer.singleShot(0, self._deferred_refresh_conditional_postplot_points)
             self._right.update_from_project(
                 self._settings,
                 self._map_data,
@@ -1244,7 +1278,8 @@ class MainWindow(QMainWindow):
             )
         finally:
             self._loading_project = False
-            self._sync_map_scale_bar()
+            self._schedule_map_scale_sync(0)
+            self._schedule_map_scale_sync(100)
 
     def _autosave_project(self) -> bool:
         return self._save_project(silent=True)

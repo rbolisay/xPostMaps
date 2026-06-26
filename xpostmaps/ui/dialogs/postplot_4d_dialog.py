@@ -34,6 +34,7 @@ from xpostmaps.core.postplot_4d_diff import (
     calculate_match_diff_rows,
     resolve_diff_map_epsg,
 )
+from xpostmaps.core.postplot_4d_diff_worker import DiffStatRecalcWorker
 from xpostmaps.core.postplot_4d_matching import (
     BaselineKind,
     Postplot4DMatchRow,
@@ -155,6 +156,9 @@ def _autosize_dialog_width(
     target = max(min_width, target)
     dialog.resize(target, dialog.height())
 
+
+_BULK_RECALC_LABEL = "Recalculate Diff Stat"
+_BULK_CANCEL_LABEL = "Cancel Recalc"
 
 _DIFF_SUMMARY_STYLE = "color: #8b949e; font-size: 11px;"
 _DIFF_SUMMARY_BUSY_STYLE = "color: #58a6ff; font-size: 11px;"
@@ -286,6 +290,8 @@ class Postplot4DDialog:
         row_cache: dict[BaselineKind, list[Postplot4DMatchRow]] = {}
         crs_cache: dict[str, str] = {}
         diff_rows: list[Postplot4DDiffRow] = []
+        bulk_recalc_worker: DiffStatRecalcWorker | None = None
+        bulk_recalc_launch_pending = False
         host_dialog: SingleInstanceDialog | None = None
         crs_note: QLabel | None = None
         diff_crs_note: QLabel | None = None
@@ -410,11 +416,15 @@ class Postplot4DDialog:
                 return False
             return modified_at > saved_at
 
-        def diff_needs_recalculate(match_row: Postplot4DMatchRow) -> bool:
-            if database is None or not project_name.strip():
+        def diff_needs_recalculate(
+            match_row: Postplot4DMatchRow,
+            db: Database | None = None,
+        ) -> bool:
+            active_db = database if db is None else db
+            if active_db is None or not project_name.strip():
                 return True
             saved_at = _parse_saved_at(
-                database.postplot_4d_diffs_updated_at(
+                active_db.postplot_4d_diffs_updated_at(
                     project_name.strip(),
                     match_row.baseline_kind,
                     match_row.sequence_id,
@@ -697,76 +707,151 @@ class Postplot4DDialog:
                 recalc_btn.setText("Recalculate Diffs")
                 QApplication.restoreOverrideCursor()
 
-        def recalculate_stale_diffs() -> None:
-            nonlocal diff_rows
+        def _bulk_recalc_running() -> bool:
+            return (
+                bulk_recalc_launch_pending
+                or bulk_recalc_worker is not None
+                and bulk_recalc_worker.isRunning()
+            )
+
+        def _reset_bulk_recalc_button() -> None:
+            bulk_recalc_btn.setText(_BULK_RECALC_LABEL)
+            bulk_recalc_btn.setEnabled(True)
+
+        def _cancel_bulk_recalc_if_running() -> None:
+            if bulk_recalc_worker is not None and bulk_recalc_worker.isRunning():
+                bulk_recalc_worker.cancel()
+
+        def _format_bulk_recalc_message(
+            recalculated: int,
+            skipped: int,
+            failed: int,
+            elapsed: float,
+            *,
+            cancelled: bool,
+        ) -> str:
+            prefix = "Diff Stat update cancelled" if cancelled else "Diff Stat update complete"
+            message = (
+                f"{prefix}: {recalculated} recalculated, {skipped} unchanged"
+                + (f", {failed} failed" if failed else "")
+                + f" ({elapsed:.1f} s)"
+            )
+            return message
+
+        def _on_bulk_recalc_progress(completed: int, total: int, detail: str) -> None:
+            if total <= 0:
+                summary.setText(detail)
+                return
+            summary.setText(
+                f"Recalculating Diff Stat {completed}/{total}: {detail}"
+            )
+
+        def _on_bulk_recalc_finished(
+            recalculated: int,
+            skipped: int,
+            failed: int,
+            elapsed: float,
+            cancelled: bool,
+        ) -> None:
+            nonlocal bulk_recalc_worker, diff_rows
+            bulk_recalc_worker = None
+            _reset_bulk_recalc_button()
+            if recalculated == 0 and failed == 0 and not cancelled:
+                if skipped:
+                    message = f"All {skipped} Diff Stat row(s) are up to date."
+                else:
+                    message = "No matched rows available for Diff Stat recalculation."
+            else:
+                message = _format_bulk_recalc_message(
+                    recalculated,
+                    skipped,
+                    failed,
+                    elapsed,
+                    cancelled=cancelled,
+                )
+            summary.setText(message)
+            active_match = state["active_match"]
+            if (
+                isinstance(active_match, Postplot4DMatchRow)
+                and stack.currentIndex() == 1
+                and database is not None
+                and project_name.strip()
+            ):
+                stored = database.load_postplot_4d_diffs(
+                    project_name.strip(),
+                    active_match.baseline_kind,
+                    active_match.sequence_id,
+                )
+                if stored:
+                    diff_rows = stored
+                refresh_diff_table()
+                _set_diff_summary(diff_summary, message, tone="done")
+            if recalculated and on_diffs_saved is not None:
+                on_diffs_saved()
+            if parent is not None:
+                _show_host_status(parent, message)
+            QTimer.singleShot(6000, refresh_table)
+
+        def _prepare_bulk_recalc_tasks(
+            cancelled: Callable[[], bool],
+        ) -> tuple[list[Postplot4DMatchRow], int]:
             active_baseline = state["baseline"]
             assert active_baseline in ("navplan", "preplot")
             matched_rows = [row for row in rows_for(active_baseline) if row.has_match]
-            if not matched_rows:
-                summary.setText(
-                    f"No matched {active_baseline} rows available for Diff Stat recalculation."
-                )
+            work_db = Database(database.db_path) if database is not None else None
+            try:
+                rows_to_recalc: list[Postplot4DMatchRow] = []
+                skipped = 0
+                for match_row in matched_rows:
+                    if cancelled():
+                        break
+                    if diff_needs_recalculate(match_row, work_db):
+                        rows_to_recalc.append(match_row)
+                    else:
+                        skipped += 1
+                return rows_to_recalc, skipped
+            finally:
+                if work_db is not None:
+                    work_db.close()
+
+        def _launch_bulk_recalc_worker() -> None:
+            nonlocal bulk_recalc_launch_pending, bulk_recalc_worker
+            if not bulk_recalc_launch_pending:
+                return
+            bulk_recalc_launch_pending = False
+            db_path = database.db_path if database is not None else None
+            bulk_recalc_worker = DiffStatRecalcWorker(
+                current_map_data,
+                settings,
+                positions,
+                prepare_tasks=_prepare_bulk_recalc_tasks,
+                load_source_positions_per_match=database is not None
+                and bool(project_name.strip()),
+                db_path=db_path,
+                project_name=project_name,
+                parent=host_dialog or parent,
+            )
+            bulk_recalc_worker.progress.connect(_on_bulk_recalc_progress)
+            bulk_recalc_worker.finished_batch.connect(_on_bulk_recalc_finished)
+            bulk_recalc_worker.start()
+
+        def _on_bulk_recalc_clicked() -> None:
+            nonlocal bulk_recalc_launch_pending
+            if _bulk_recalc_running():
+                if bulk_recalc_worker is not None:
+                    bulk_recalc_worker.cancel()
+                bulk_recalc_launch_pending = False
+                summary.setText("Cancelling Diff Stat recalculation…")
+                if bulk_recalc_worker is None:
+                    _reset_bulk_recalc_button()
+                    summary.setText("Diff Stat recalculation cancelled.")
                 return
 
-            bulk_recalc_btn.setEnabled(False)
-            _set_diff_summary(diff_summary, "Checking Diff Stat dependencies…", tone="busy")
-            summary.setText("Checking source and baseline file changes…")
-            QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
-            QApplication.processEvents()
-
-            started = time.perf_counter()
-            recalculated = 0
-            skipped = 0
-            failed = 0
-            active_match = state["active_match"]
-            try:
-                for index, match_row in enumerate(matched_rows, start=1):
-                    if not diff_needs_recalculate(match_row):
-                        skipped += 1
-                        continue
-                    summary.setText(
-                        f"Recalculating Diff Stat {index}/{len(matched_rows)}: "
-                        f"{match_row.baseline_name} -> {match_row.line_name}"
-                    )
-                    QApplication.processEvents()
-                    try:
-                        rows = calculate_match_diff_rows(
-                            current_map_data(),
-                            settings,
-                            positions(),
-                            match_row,
-                            database=database,
-                            project_name=project_name,
-                        )
-                        persist_diff_rows(match_row, rows, notify=False)
-                        recalculated += 1
-                        if (
-                            isinstance(active_match, Postplot4DMatchRow)
-                            and active_match.sequence_id == match_row.sequence_id
-                            and active_match.baseline_kind == match_row.baseline_kind
-                        ):
-                            diff_rows = rows
-                    except Exception:  # noqa: BLE001
-                        failed += 1
-                elapsed = time.perf_counter() - started
-                message = (
-                    f"Diff Stat update complete: {recalculated} recalculated, "
-                    f"{skipped} unchanged"
-                    + (f", {failed} failed" if failed else "")
-                    + f" ({elapsed:.1f} s)"
-                )
-                summary.setText(message)
-                if isinstance(active_match, Postplot4DMatchRow) and stack.currentIndex() == 1:
-                    refresh_diff_table()
-                    _set_diff_summary(diff_summary, message, tone="done")
-                if recalculated and on_diffs_saved is not None:
-                    on_diffs_saved()
-                if parent is not None:
-                    _show_host_status(parent, message)
-                QTimer.singleShot(6000, refresh_table)
-            finally:
-                bulk_recalc_btn.setEnabled(True)
-                QApplication.restoreOverrideCursor()
+            bulk_recalc_launch_pending = True
+            bulk_recalc_btn.setText(_BULK_CANCEL_LABEL)
+            _set_diff_summary(diff_summary, "Recalculating Diff Stat…", tone="busy")
+            summary.setText("Checking for stale Diff Stat rows…")
+            QTimer.singleShot(0, _launch_bulk_recalc_worker)
 
         def clear_saved_diffs() -> None:
             nonlocal diff_rows
@@ -775,31 +860,77 @@ class Postplot4DDialog:
             if database is None or not project_name.strip():
                 summary.setText("No project database available to clear Diff Stat rows.")
                 return
+            size_before_mb = database.file_size_bytes() / (1024 * 1024)
             reply = QMessageBox.warning(
                 host_dialog or parent,
                 "Clear Diff Stat",
                 (
-                    f"This will permanently delete all saved Diff Stat rows for the "
-                    f"{active_baseline} baseline.\n\n"
-                    "They will be recalculated when opened again or when Recalculate "
-                    "Diff Stat finds changed files.\n\nContinue?"
+                    f"This will permanently delete all saved Diff Stat rows and the "
+                    f"generated preplot baseline cache for the {active_baseline} baseline.\n\n"
+                    "Diff Stat and cache will be regenerated from source files when needed.\n"
+                    f"Current project file size: {size_before_mb:.0f} MB.\n"
+                    "The database will be compacted afterward to reclaim disk space "
+                    "(this may take a minute on large projects).\n\nContinue?"
                 ),
                 QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
                 QMessageBox.StandardButton.No,
             )
             if reply != QMessageBox.StandardButton.Yes:
                 return
-            database.delete_postplot_4d_diffs_for_baseline(project_name.strip(), active_baseline)
+            diff_rows_deleted = database.delete_postplot_4d_diffs_for_baseline(
+                project_name.strip(),
+                active_baseline,
+            )
+            cache_rows = database.clear_postplot_4d_preplot_shotpoints(project_name.strip())
             if isinstance(state["active_match"], Postplot4DMatchRow):
                 diff_rows = []
                 if stack.currentIndex() == 1:
                     refresh_diff_table()
                     _set_diff_summary(diff_summary, "Saved Diff Stat rows cleared.", tone="done")
-            summary.setText(f"Cleared saved Diff Stat rows for {active_baseline} baseline.")
+            if diff_rows_deleted == 0 and cache_rows == 0:
+                compact_reply = QMessageBox.question(
+                    host_dialog or parent,
+                    "Compact Database",
+                    (
+                        "No saved Diff Stat or preplot cache rows were found to delete.\n\n"
+                        f"The project file is still {size_before_mb:.0f} MB. "
+                        "Compact it now to reclaim space left by earlier deletes?"
+                    ),
+                    QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                    QMessageBox.StandardButton.Yes,
+                )
+                if compact_reply != QMessageBox.StandardButton.Yes:
+                    summary.setText(
+                        f"No saved Diff Stat or preplot cache rows found for project "
+                        f"{project_name.strip()!r}."
+                    )
+                    return
+            summary.setText(
+                "Compacting project database to reclaim disk space "
+                "(this may take a minute)…"
+            )
+            QApplication.processEvents()
+            wait_cursor = QApplication.overrideCursor()
+            if wait_cursor is None:
+                QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+            try:
+                size_after_bytes = database.vacuum()
+            finally:
+                if wait_cursor is None:
+                    QApplication.restoreOverrideCursor()
+            size_after_mb = size_after_bytes / (1024 * 1024)
+            summary.setText(
+                f"Cleared {diff_rows_deleted:,} Diff Stat row(s) and "
+                f"{cache_rows:,} preplot cache row(s) for {active_baseline} baseline. "
+                f"Database compacted from {size_before_mb:.0f} MB to {size_after_mb:.0f} MB."
+            )
             if on_diffs_saved is not None:
                 on_diffs_saved()
             if parent is not None:
-                _show_host_status(parent, "Saved Diff Stat rows cleared")
+                _show_host_status(
+                    parent,
+                    f"Diff Stat cleared; database compacted to {size_after_mb:.0f} MB",
+                )
             QTimer.singleShot(6000, refresh_table)
 
         def toggle_coord_mode() -> None:
@@ -948,10 +1079,10 @@ class Postplot4DDialog:
             baseline_row.addWidget(navplan_radio)
             baseline_row.addWidget(preplot_radio)
             baseline_row.addStretch()
-            bulk_recalc_btn = QPushButton("Recalculate Diff Stat")
+            bulk_recalc_btn = QPushButton(_BULK_RECALC_LABEL)
             bulk_recalc_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
             bulk_recalc_btn.setMinimumSize(170, 32)
-            bulk_recalc_btn.clicked.connect(recalculate_stale_diffs)
+            bulk_recalc_btn.clicked.connect(_on_bulk_recalc_clicked)
             baseline_row.addWidget(bulk_recalc_btn)
             clear_diff_btn = QPushButton("Clear Diff Stat")
             clear_diff_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
@@ -1024,6 +1155,10 @@ class Postplot4DDialog:
             stack.addWidget(main_page)
             stack.addWidget(diff_page)
             layout.addWidget(stack, stretch=1)
+
+            if not hasattr(dialog, "_xpost_bulk_recalc_hook"):
+                dialog.finished.connect(_cancel_bulk_recalc_if_running)
+                dialog._xpost_bulk_recalc_hook = True
 
             invalidate_row_cache()
             if isinstance(state["active_match"], Postplot4DMatchRow):

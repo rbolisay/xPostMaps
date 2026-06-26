@@ -917,6 +917,51 @@ class Database:
             return []
         return self._load_positions(project_id)
 
+    def load_source_positions_for_sequence_ids(
+        self,
+        name: str,
+        sequence_ids: list[str],
+    ) -> list[PositionRecord]:
+        """Fetch SOURCE records only for the requested sequence groups."""
+        project_id = self.get_project_id(name)
+        if project_id is None:
+            return []
+        groups: set[tuple[str, str, str]] = set()
+        for sequence_id in sequence_ids:
+            group = sequence_id.rsplit("|", 1)[0] if sequence_id.count("|") >= 3 else sequence_id
+            parts = group.split("|")
+            if len(parts) < 3:
+                continue
+            groups.add((parts[0], parts[1], parts[2]))
+        if not groups:
+            return []
+
+        records: list[PositionRecord] = []
+        sorted_groups = sorted(groups)
+        chunk_size = 250
+        for index in range(0, len(sorted_groups), chunk_size):
+            chunk = sorted_groups[index : index + chunk_size]
+            clauses = " OR ".join(
+                "(file_name=? AND sequence_no=? AND line_name=?)"
+                for _file_name, _sequence_no, _line_name in chunk
+            )
+            params: list[object] = [project_id, RecordType.SOURCE.value]
+            for file_name, sequence_no, line_name in chunk:
+                params.extend([file_name, sequence_no, line_name])
+            rows = self._conn.execute(
+                f"""
+                SELECT file_name, record_type, sequence_no, line_name, line_direction,
+                       subline, point_num, x, y, depth, latitude, longitude,
+                       vessel_id, source_id
+                FROM positions
+                WHERE project_id=? AND record_type=? AND ({clauses})
+                ORDER BY id
+                """,
+                params,
+            ).fetchall()
+            records.extend(self._position_records_from_rows(rows))
+        return records
+
     def delete_sequence_groups(self, project_id: int, group_ids: list[str]) -> None:
         if not group_ids:
             return
@@ -1041,6 +1086,10 @@ class Database:
             """,
             (project_id,),
         ).fetchall()
+        return self._position_records_from_rows(rows)
+
+    @staticmethod
+    def _position_records_from_rows(rows: list[sqlite3.Row]) -> list[PositionRecord]:
         return [
             PositionRecord(
                 file_name=row["file_name"],
@@ -1186,6 +1235,54 @@ class Database:
             for row in rows
         ]
 
+    def load_all_postplot_4d_diffs(
+        self,
+        project_name: str,
+        baseline_kind: str,
+    ) -> dict[str, list[Postplot4DDiffRow]]:
+        """Load every saved Diff Stat sequence for a baseline in one query."""
+        project_id = self.get_project_id(project_name)
+        if project_id is None:
+            return {}
+        rows = self._conn.execute(
+            """
+            SELECT sequence_id, shotpoint, baseline_x, baseline_y, baseline_latitude,
+                   baseline_longitude, source_x, source_y, source_latitude,
+                   source_longitude, crossline_m, inline_m, radial_m,
+                   navplan_feather_deg, line_feather_deg
+            FROM postplot_4d_diffs
+            WHERE project_id=? AND baseline_kind=?
+            ORDER BY sequence_id, shotpoint
+            """,
+            (project_id, baseline_kind),
+        ).fetchall()
+        grouped: dict[str, list[Postplot4DDiffRow]] = {}
+        for row in rows:
+            sequence_id = str(row["sequence_id"] or "")
+            if not sequence_id:
+                continue
+            grouped.setdefault(sequence_id, []).append(
+                diff_row_from_dict(
+                    {
+                        "shotpoint": row["shotpoint"],
+                        "baseline_x": row["baseline_x"],
+                        "baseline_y": row["baseline_y"],
+                        "baseline_latitude": row["baseline_latitude"] or "",
+                        "baseline_longitude": row["baseline_longitude"] or "",
+                        "source_x": row["source_x"],
+                        "source_y": row["source_y"],
+                        "source_latitude": row["source_latitude"] or "",
+                        "source_longitude": row["source_longitude"] or "",
+                        "crossline_m": row["crossline_m"],
+                        "inline_m": row["inline_m"],
+                        "radial_m": row["radial_m"],
+                        "navplan_feather_deg": row["navplan_feather_deg"],
+                        "line_feather_deg": row["line_feather_deg"],
+                    }
+                )
+            )
+        return grouped
+
     def has_postplot_4d_diffs(
         self,
         project_name: str,
@@ -1250,10 +1347,18 @@ class Database:
         self,
         project_name: str,
         baseline_kind: str,
-    ) -> None:
+    ) -> int:
         project_id = self.get_project_id(project_name)
         if project_id is None:
-            return
+            return 0
+        count_row = self._conn.execute(
+            """
+            SELECT COUNT(*) FROM postplot_4d_diffs
+            WHERE project_id=? AND baseline_kind=?
+            """,
+            (project_id, baseline_kind),
+        ).fetchone()
+        deleted = int(count_row[0] if count_row else 0)
         self._conn.execute(
             """
             DELETE FROM postplot_4d_diffs
@@ -1262,6 +1367,7 @@ class Database:
             (project_id, baseline_kind),
         )
         self._conn.commit()
+        return deleted
 
     def load_postplot_4d_preplot_shotpoints(
         self,
@@ -1357,6 +1463,32 @@ class Database:
                 ],
             )
         self._conn.commit()
+
+    def clear_postplot_4d_preplot_shotpoints(self, project_name: str) -> int:
+        """Remove generated preplot baseline cache rows for a project."""
+        project_id = self.get_project_id(project_name)
+        if project_id is None:
+            return 0
+        count_row = self._conn.execute(
+            "SELECT COUNT(*) FROM postplot_4d_preplot_shotpoints WHERE project_id=?",
+            (project_id,),
+        ).fetchone()
+        deleted = int(count_row[0] if count_row else 0)
+        self._conn.execute(
+            "DELETE FROM postplot_4d_preplot_shotpoints WHERE project_id=?",
+            (project_id,),
+        )
+        self._conn.commit()
+        return deleted
+
+    def file_size_bytes(self) -> int:
+        """Current on-disk database size."""
+        return self.db_path.stat().st_size
+
+    def vacuum(self) -> int:
+        """Reclaim disk space after large deletes; returns new file size in bytes."""
+        self._conn.execute("VACUUM")
+        return self.file_size_bytes()
 
     def delete_postplot_4d_preplot_shotpoints_for_files(
         self,
