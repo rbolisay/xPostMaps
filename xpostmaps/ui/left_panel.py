@@ -87,7 +87,7 @@ class LeftPanel(GlassPanel):
         self._navplan_path.setWordWrap(True)
         self._navplan_path.setStyleSheet("color: #8b949e; font-size: 11px;")
 
-        self._p111_btn = QPushButton("Import P111/P190")
+        self._p111_btn = QPushButton("P111/P190")
         self._p111_btn.setObjectName("dirBtn")
         self._p111_path = QLabel("Not set")
         self._p111_path.setWordWrap(True)
