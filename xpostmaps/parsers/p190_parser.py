@@ -141,6 +141,11 @@ def _apply_p190_header(
             state["line_direction"] = formatted
             if info is not None:
                 info["line direction"] = formatted
+                # Preserve the full-precision numeric form for geometry
+                # (e.g. feather): the formatted value is rounded to 2 dp.
+                raw_match = _NUMERIC_VALUE_RE.search(value.replace(",", ""))
+                if raw_match:
+                    info["line direction value"] = raw_match.group(0)
         return
     if _is_sequence_key(key):
         sequence_no = value.strip()

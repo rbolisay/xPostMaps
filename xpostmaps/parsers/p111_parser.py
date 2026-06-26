@@ -4,10 +4,18 @@ from __future__ import annotations
 
 import re
 import math
+from collections import defaultdict
 from dataclasses import dataclass
 from pathlib import Path
 
 from xpostmaps.core.models import PositionRecord, RecordType
+
+# If the header LINE-DIRECTION disagrees with the actual source track by more
+# than this, the header is treated as unreliable and the data-derived track is
+# used for the feather. A correctly headed line tracks within ~1-2 deg; a gross
+# mismatch (observed up to ~52 deg) yields physically impossible feathers.
+LINE_DIRECTION_TRACK_TOLERANCE_DEG = 5.0
+S1_REC_TIME_IDX = 7
 
 # CC header card prefixes (from xp111.py)
 CC_SEQUENCE_PREFIX = "CC,1,0,0,LINE SEQUENCE NUMBER ="
@@ -252,21 +260,138 @@ def _receiver_positions_from_r1_fields(
     return receivers
 
 
+def _circular_mean_deg(angles: list[float]) -> float | None:
+    if not angles:
+        return None
+    sin_sum = sum(math.sin(math.radians(a)) for a in angles)
+    cos_sum = sum(math.cos(math.radians(a)) for a in angles)
+    if abs(sin_sum) < 1e-12 and abs(cos_sum) < 1e-12:
+        return None
+    return math.degrees(math.atan2(sin_sum, cos_sum)) % 360.0
+
+
+def scan_p111_source_track_deg(
+    path: Path,
+    axis_order: tuple[str, str] | None,
+) -> float | None:
+    """Derive the directed sail-line azimuth from S1 source positions.
+
+    The header LINE-DIRECTION can be wrong; the over-ground track of a single
+    source (sorted by time) is an authoritative, data-derived line direction.
+    Using one source avoids the crossline jumps of an alternating flip-flop-flap
+    source array. Returns ``None`` when no usable track is present.
+    """
+    by_source: dict[str, list[tuple[float, float, float]]] = defaultdict(list)
+    try:
+        with path.open("r", encoding="utf-8", errors="replace") as handle:
+            for raw_line in handle:
+                if not raw_line.startswith("S1,"):
+                    continue
+                fields = raw_line.rstrip("\n\r").split(",")
+                if len(fields) <= max(
+                    S1_REC_SOURCE_FIRED_IDX, S1_REC_NORTHING_IDX, S1_REC_TIME_IDX
+                ):
+                    continue
+                source_id = _field(fields, S1_REC_SOURCE_FIRED_IDX)
+                try:
+                    timestamp = float(_field(fields, S1_REC_TIME_IDX))
+                except ValueError:
+                    continue
+                x, y = _projected_xy_from_fields(
+                    fields, S1_REC_EASTING_IDX, S1_REC_NORTHING_IDX, axis_order
+                )
+                if x == x and y == y:
+                    by_source[source_id].append((timestamp, x, y))
+    except OSError:
+        return None
+
+    if not by_source:
+        return None
+    source_id = max(by_source, key=lambda key: len(by_source[key]))
+    points = sorted(by_source[source_id])
+    if len(points) < 2:
+        return None
+    azimuths: list[float] = []
+    for (_, x0, y0), (_, x1, y1) in zip(points, points[1:]):
+        dx, dy = x1 - x0, y1 - y0
+        if dx * dx + dy * dy < 1.0:  # ignore sub-metre jitter between fixes
+            continue
+        azimuths.append(math.degrees(math.atan2(dx, dy)) % 360.0)
+    return _circular_mean_deg(azimuths)
+
+
+def _resolve_feather_line_direction(
+    header_direction: float | None,
+    track_direction: float | None,
+) -> float | None:
+    """Pick the line direction for feather, preferring a validated header."""
+    if track_direction is None:
+        return header_direction
+    if header_direction is None:
+        return track_direction
+    delta = abs(((header_direction - track_direction + 180.0) % 360.0) - 180.0)
+    if delta > LINE_DIRECTION_TRACK_TOLERANCE_DEG:
+        return track_direction
+    return header_direction
+
+
 def parse_p111_receiver_feathers(path: Path) -> list[ReceiverFeatherRecord]:
     """Parse per-streamer receiver feather from P1/11 R1 records.
 
-    Each R1 row contains one streamer's receiver positions for a shotpoint. The
-    feather is calculated from the first and last receiver positions using the
-    active line direction from the CC headers.
+    A streamer's receivers for one shotpoint may be split across several R1
+    rows (e.g. Shearwater files list ~800 receivers per row, 3200+ per
+    streamer). All rows for a (shotpoint, streamer) are accumulated and the
+    feather is computed from the GLOBAL first and last receiver (head to tail)
+    using the active line direction from the CC headers. Files that pack a
+    whole streamer in a single row (e.g. 10221, 240 receivers) behave
+    identically.
     """
     records: list[ReceiverFeatherRecord] = []
     file_name = path.name
     axis_order = scan_projected_axis_order(path)
+    track_direction = scan_p111_source_track_deg(path, axis_order)
     current_sequence = "N/A"
     current_line_name = "N/A"
     current_subline = ""
     current_line_direction: float | None = None
     has_cc_headers = False
+
+    # Per shotpoint: streamer_id -> endpoint extents.
+    # [min_num, (mx, my), max_num, (Mx, My), preplot_no]
+    current_shotpoint = 0
+    accumulator: dict[str, list] = {}
+
+    def flush() -> None:
+        if current_shotpoint <= 0:
+            return
+        effective_direction = _resolve_feather_line_direction(
+            current_line_direction, track_direction
+        )
+        if effective_direction is None:
+            return
+        line_name = current_line_name if has_cc_headers else file_name
+        for streamer_id, ext in accumulator.items():
+            min_num, first_xy, max_num, last_xy, preplot_no = ext
+            if max_num <= min_num:
+                continue
+            feather = calculate_receiver_feather_deg(
+                first_xy,
+                last_xy,
+                effective_direction,
+            )
+            if feather is None:
+                continue
+            records.append(
+                ReceiverFeatherRecord(
+                    shotpoint=current_shotpoint,
+                    line_name=line_name or "UNNAMED",
+                    streamer_id=streamer_id,
+                    feather_deg=feather,
+                    sequence_no=current_sequence,
+                    subline=current_subline,
+                    preplot_no=preplot_no,
+                )
+            )
 
     with path.open("r", encoding="utf-8", errors="replace") as handle:
         for raw_line in handle:
@@ -301,7 +426,9 @@ def parse_p111_receiver_feathers(path: Path) -> list[ReceiverFeatherRecord]:
                     current_line_direction = None
                 continue
 
-            if not line.startswith("R1,") or current_line_direction is None:
+            if not line.startswith("R1,"):
+                continue
+            if current_line_direction is None and track_direction is None:
                 continue
 
             fields = line.split(",")
@@ -313,30 +440,36 @@ def parse_p111_receiver_feathers(path: Path) -> list[ReceiverFeatherRecord]:
             if shotpoint <= 0 or not streamer_id:
                 continue
 
+            if shotpoint != current_shotpoint:
+                flush()
+                accumulator = {}
+                current_shotpoint = shotpoint
+
             receivers = _receiver_positions_from_r1_fields(fields, axis_order)
-            if len(receivers) < 2:
+            if not receivers:
                 continue
-            first_receiver = min(receivers, key=lambda item: item[0])
-            last_receiver = max(receivers, key=lambda item: item[0])
-            feather = calculate_receiver_feather_deg(
-                (first_receiver[1], first_receiver[2]),
-                (last_receiver[1], last_receiver[2]),
-                current_line_direction,
-            )
-            if feather is None:
-                continue
-            line_name = current_line_name if has_cc_headers else file_name
-            records.append(
-                ReceiverFeatherRecord(
-                    shotpoint=shotpoint,
-                    line_name=line_name or "UNNAMED",
-                    streamer_id=streamer_id,
-                    feather_deg=feather,
-                    sequence_no=current_sequence,
-                    subline=current_subline,
-                    preplot_no=_field(fields, R_REC_PREPLOT_IDX),
-                )
-            )
+            row_first = min(receivers, key=lambda item: item[0])
+            row_last = max(receivers, key=lambda item: item[0])
+            preplot_no = _field(fields, R_REC_PREPLOT_IDX)
+
+            ext = accumulator.get(streamer_id)
+            if ext is None:
+                accumulator[streamer_id] = [
+                    row_first[0],
+                    (row_first[1], row_first[2]),
+                    row_last[0],
+                    (row_last[1], row_last[2]),
+                    preplot_no,
+                ]
+            else:
+                if row_first[0] < ext[0]:
+                    ext[0] = row_first[0]
+                    ext[1] = (row_first[1], row_first[2])
+                if row_last[0] > ext[2]:
+                    ext[2] = row_last[0]
+                    ext[3] = (row_last[1], row_last[2])
+
+        flush()
     return records
 
 
@@ -392,9 +525,12 @@ def parse_p190_receiver_feathers(path: Path) -> list[ReceiverFeatherRecord]:
     )
 
     info = parse_p190_header(path)
-    direction_match = re.search(
-        r"[-+]?\d+(?:\.\d+)?", info.get("line direction", "")
+    # Prefer the full-precision numeric line direction; "line direction" is a
+    # display string rounded to 2 dp, which biases the feather angle.
+    direction_source = info.get("line direction value") or info.get(
+        "line direction", ""
     )
+    direction_match = re.search(r"[-+]?\d+(?:\.\d+)?", direction_source)
     if direction_match is None:
         return []
     line_direction = float(direction_match.group(0))

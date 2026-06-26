@@ -679,6 +679,135 @@ def test_10221_p190_receiver_feathers_parse_all_streamers() -> None:
     assert 1300 in navplan_avg
 
 
+def test_p111_multirow_streamer_feather_is_head_to_tail() -> None:
+    """Shearwater P111 splits one streamer across several R1 rows.
+
+    The parser must accumulate all rows and emit ONE feather per
+    (shotpoint, streamer), computed from the global first/last receiver.
+    """
+    from collections import Counter
+
+    from xpostmaps.parsers.p111_parser import parse_p111_receiver_feathers
+
+    path = Path("4D/0145.SUR633D2024.1736P2-145.a0145.SSFILTUNREG.v19.p111")
+    if not path.is_file():
+        return
+    records = parse_p111_receiver_feathers(path)
+    assert records
+    # Exactly one feather record per (shotpoint, streamer) despite 4 R1 rows.
+    per_key = Counter((r.shotpoint, r.streamer_id) for r in records)
+    assert per_key, "expected feather records"
+    assert max(per_key.values()) == 1
+    # 7-streamer survey.
+    streamers = {r.streamer_id for r in records}
+    assert streamers == {f"S0{i}" for i in range(1, 8)}
+
+
+def test_p111_feather_falls_back_to_track_when_header_is_wrong() -> None:
+    """A bad LINE-DIRECTION header must not produce an absurd feather.
+
+    File 0085 has header 247.33 deg but an actual source track of ~300 deg;
+    the feather must use the data-derived track (~-5 deg), not the header
+    (which would give ~-57 deg).
+    """
+    from xpostmaps.parsers.p111_parser import (
+        average_receiver_feathers_by_shotpoint,
+        parse_p111_receiver_feathers,
+        scan_p111_source_track_deg,
+        scan_projected_axis_order,
+    )
+
+    path = Path("4D/0085.T26A.6054B085.a0085.SSFILTREG.p111")
+    if not path.is_file():
+        return
+    axis = scan_projected_axis_order(path)
+    track = scan_p111_source_track_deg(path, axis)
+    assert track is not None
+    assert 290.0 < track < 310.0  # real sail line, not the 247.33 header
+
+    avg = average_receiver_feathers_by_shotpoint(parse_p111_receiver_feathers(path))
+    assert avg
+    # Every shotpoint feather must be physically plausible (well under the
+    # absurd ~-57 deg the bad header would yield).
+    assert all(abs(v) < 15.0 for v in avg.values())
+
+
+def test_p111_track_resolver_prefers_validated_header() -> None:
+    from xpostmaps.parsers.p111_parser import _resolve_feather_line_direction
+
+    # Header within tolerance of track -> keep header (validated).
+    assert _resolve_feather_line_direction(179.97, 179.66) == 179.97
+    # Header grossly disagrees with track -> use track.
+    assert _resolve_feather_line_direction(247.33, 299.6) == 299.6
+    # Missing pieces fall back gracefully.
+    assert _resolve_feather_line_direction(None, 300.0) == 300.0
+    assert _resolve_feather_line_direction(120.0, None) == 120.0
+
+
+def test_p190_header_preserves_full_precision_line_direction() -> None:
+    """The feather angle must use the unrounded line direction.
+
+    ``parse_p190_header`` exposes a display string rounded to 2 dp
+    ("179.97 deg"); a separate full-precision value must be available so the
+    streamer feather is not biased by ~0.004 deg.
+    """
+    from xpostmaps.parsers.p190_parser import parse_p190_header
+
+    source = Path("4D/10221/P1/70.1065P1A-070.a070.p190")
+    if not source.is_file():
+        return
+    info = parse_p190_header(source)
+    assert info.get("line direction value") == "179.9740"
+    # The display form remains rounded for the UI.
+    assert info.get("line direction", "").startswith("179.97")
+
+
+def test_p190_feather_matches_independent_calculation() -> None:
+    """Brutal check: parser feather equals a hand calculation from raw groups."""
+    import math
+
+    from xpostmaps.parsers.p111_parser import parse_p190_receiver_feathers
+
+    source = Path("4D/10221/P1/70.1065P1A-070.a070.p190")
+    if not source.is_file():
+        return
+
+    # Independent feather: streamer 1 at SP 1600 from raw min/max groups.
+    sp, target_streamer = 1600, "1"
+    groups: dict[int, tuple[float, float]] = {}
+    current = 0
+    with source.open("r", encoding="utf-8", errors="replace") as handle:
+        for raw in handle:
+            line = raw.rstrip("\n\r")
+            if not line:
+                continue
+            if line[0] == "S":
+                current = int(line[19:25])
+            elif line[0] == "R" and current == sp:
+                if len(line) <= 79 or line[79].strip() != target_streamer:
+                    continue
+                pos = 1
+                while pos + 22 <= len(line):
+                    g = line[pos : pos + 4].strip()
+                    e = line[pos + 4 : pos + 13].strip()
+                    n = line[pos + 13 : pos + 22].strip()
+                    if not (g and e and n):
+                        break
+                    groups[int(g)] = (float(e), float(n))
+                    pos += 26
+    assert groups
+    first, last = groups[min(groups)], groups[max(groups)]
+    dx, dy = last[0] - first[0], last[1] - first[1]
+    az = math.degrees(math.atan2(dx, dy)) % 360.0
+    expected = ((179.9740 + 180.0) - az + 180.0) % 360.0 - 180.0
+
+    parsed = {
+        (r.shotpoint, r.streamer_id): r.feather_deg
+        for r in parse_p190_receiver_feathers(source)
+    }
+    assert abs(parsed[(sp, target_streamer)] - expected) < 1e-9
+
+
 def test_p190_feather_dispatch_returns_values_with_sequence_fallback() -> None:
     from xpostmaps.core.postplot_4d_diff import _receiver_feathers_for_path
 
