@@ -75,13 +75,13 @@ class LeftPanel(GlassPanel):
         dirs_title.setObjectName("sectionTitle")
         layout.addWidget(dirs_title)
 
-        self._preplot_btn = QPushButton("Import Preplot")
+        self._preplot_btn = QPushButton("Preplot")
         self._preplot_btn.setObjectName("dirBtn")
         self._preplot_path = QLabel("Not set")
         self._preplot_path.setWordWrap(True)
         self._preplot_path.setStyleSheet("color: #8b949e; font-size: 11px;")
 
-        self._navplan_btn = QPushButton("Import Navplan")
+        self._navplan_btn = QPushButton("Navplan")
         self._navplan_btn.setObjectName("dirBtn")
         self._navplan_path = QLabel("Not set")
         self._navplan_path.setWordWrap(True)
@@ -105,7 +105,7 @@ class LeftPanel(GlassPanel):
         self._navplan_btn.clicked.connect(self.import_navplan.emit)
         self._p111_btn.clicked.connect(self.select_p111_p190_dir.emit)
 
-        self._import_polygons_btn = QPushButton("Import Polygons")
+        self._import_polygons_btn = QPushButton("Polygons")
         self._import_polygons_btn.setObjectName("dirBtn")
         self._import_polygons_path = QLabel("Not set")
         self._import_polygons_path.setWordWrap(True)
@@ -127,7 +127,7 @@ class LeftPanel(GlassPanel):
 
         self._legend_btn = QPushButton("Legend")
         self._legend_btn.setObjectName("dirBtn")
-        self._pdf_btn = QPushButton("Export to PDF")
+        self._pdf_btn = QPushButton("Export Map")
         self._pdf_btn.setObjectName("dirBtn")
         self._info_btn = QPushButton("Project Information")
         self._info_btn.setObjectName("dirBtn")
@@ -176,6 +176,16 @@ class LeftPanel(GlassPanel):
         layout.addWidget(self._status)
 
         layout.addStretch()
+
+        tips = QLabel(
+            "Hold Right Click to Pan on Main Map and Mini Map\n"
+            "Double right click on Main Map and Mini Map to Zoom Extent\n"
+            "Use Mouse Scroll to Zoom In/Out"
+        )
+        tips.setWordWrap(True)
+        tips.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignBottom)
+        tips.setStyleSheet("color: #6e7681; font-size: 10px; padding-top: 8px;")
+        layout.addWidget(tips)
 
     def set_project_name(self, name: str) -> None:
         self._project_input.blockSignals(True)

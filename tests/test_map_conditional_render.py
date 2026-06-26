@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import numpy as np
+import pyqtgraph as pg
 import pytest
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QApplication
@@ -171,3 +172,31 @@ def test_nav_pen_dash_uses_custom_dash_pattern(qapp) -> None:
     assert dash_px > gap_px
     assert 13.0 <= dash_px <= 17.0
     assert gap_px >= 2.5
+
+
+def test_finish_pan_interaction_restores_hidden_preplot(qapp) -> None:
+    widget = PostplotMapWidget()
+    curve = pg.PlotCurveItem()
+    widget._plot_item.addItem(curve)
+    widget._preplot_motion_items.append(curve)
+    widget._interacting = True
+    curve.setVisible(False)
+
+    widget._finish_pan_interaction()
+
+    assert not widget._interacting
+    assert curve.isVisible()
+
+
+def test_ensure_settled_for_capture_restores_hidden_preplot(qapp) -> None:
+    widget = PostplotMapWidget()
+    curve = pg.PlotCurveItem()
+    widget._plot_item.addItem(curve)
+    widget._preplot_motion_items.append(curve)
+    widget._interacting = True
+    curve.setVisible(False)
+
+    widget.ensure_settled_for_capture(max_wait_ms=0)
+
+    assert curve.isVisible()
+    assert not widget._interacting

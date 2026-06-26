@@ -185,6 +185,8 @@ class RightPane(PrintPanel):
         self,
         settings: ProjectSettings,
         map_data: MapData | None,
+        *,
+        apply_saved_minimap_view: bool = False,
     ) -> None:
         if settings.logo_path:
             self.set_logo(settings.logo_path)
@@ -199,11 +201,13 @@ class RightPane(PrintPanel):
         self._card.repaint()
         # Without a Fullfold area to focus on, zoom the minimap close to the
         # survey/main-map extent instead of the wide context view.
+        has_saved = MinimapWidget.has_saved_view(settings.minimap_view)
         self._minimap.set_location(
             geo,
             minimap_polygons,
             settings.minimap_view,
             tight_zoom=not has_fullfold,
+            recenter=(not has_saved) or apply_saved_minimap_view,
         )
 
     def refresh_postmap_info(self, map_data: MapData | None) -> None:

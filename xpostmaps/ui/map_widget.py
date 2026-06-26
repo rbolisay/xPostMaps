@@ -957,6 +957,7 @@ class PostplotMapWidget(QWidget):
         self._export_prepared = False
         self._pdf_pen_scale = 1.0
         if wysiwyg:
+            self._show_reference_layers()
             return
         self._remove_export_vector_dots()
         self._restore_screen_pens()
@@ -1012,6 +1013,10 @@ class PostplotMapWidget(QWidget):
         self.repaint()
         for _ in range(10):
             app.processEvents()
+        # processEvents above can re-enter motion LOD (sigRangeChanged); force restore.
+        self._clip_timer.stop()
+        self._gl_settle_timer.stop()
+        self._finish_pan_interaction()
 
     @staticmethod
     def _pixmap_has_map_content(pixmap: QPixmap, *, sample_step: int = 10) -> bool:
@@ -1277,6 +1282,7 @@ class PostplotMapWidget(QWidget):
         self._pending_clip_layers.clear()
         self._pending_clip_bbox = None
         self._pending_clip_layer_index = 0
+        self._clip_timer.stop()
         self._gl_upload_timer.stop()
         self._gl_settle_timer.stop()
         self._interacting = False
@@ -1481,6 +1487,11 @@ class PostplotMapWidget(QWidget):
         viewport = self._plot.viewport()
         if viewport is not None:
             viewport.update()
+        # Preplot is hidden during motion for speed; any path that ends interaction
+        # (settle timer, export capture, clip refresh) must restore it. Without
+        # this, stopping timers in ensure_settled_for_capture leaves preplot gone
+        # until the user re-applies the legend (full render).
+        self._show_reference_layers()
 
     @staticmethod
     def _record_type_for_data_type(data_type: NavDataType) -> RecordType:

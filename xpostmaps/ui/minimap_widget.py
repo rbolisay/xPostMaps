@@ -114,6 +114,11 @@ class MinimapWidget(QWidget):
         self._view_box.sigRangeChanged.connect(self._schedule_coast_refresh)
         self._view_box.sigRangeChangedManually.connect(self._schedule_coast_refresh)
         self._view_box.sigRangeChangedManually.connect(self._emit_view_changed)
+        self._view_save_timer = QTimer(self)
+        self._view_save_timer.setSingleShot(True)
+        self._view_save_timer.setInterval(250)
+        self._view_save_timer.timeout.connect(self._emit_view_changed)
+        self._view_box.sigRangeChanged.connect(self._schedule_view_save)
         self._load_world_data()
 
     def _coast_width(self) -> float:
@@ -218,6 +223,16 @@ class MinimapWidget(QWidget):
     def _emit_view_changed(self, *_args) -> None:
         if not self._suppress_view_changed:
             self.view_changed.emit(self.current_view())
+
+    def _schedule_view_save(self, *_args) -> None:
+        """Persist wheel-zoom and programmatic range updates (debounced)."""
+        if self._suppress_view_changed:
+            return
+        self._view_save_timer.start()
+
+    @classmethod
+    def has_saved_view(cls, view: dict | None) -> bool:
+        return cls._valid_saved_view(view) is not None
 
     def _load_world_data(self) -> None:
         if _LAND_ASSETS.exists():
@@ -340,6 +355,8 @@ class MinimapWidget(QWidget):
         area_polygons: list[tuple[list[float], list[float]]] | None = None,
         saved_view: dict | None = None,
         tight_zoom: bool = False,
+        *,
+        recenter: bool = True,
     ) -> None:
         if self._marker:
             self._plot.removeItem(self._marker)
@@ -407,12 +424,13 @@ class MinimapWidget(QWidget):
             y_range = (cy - span * 0.6, cy + span * 0.6)
         self._view_box.set_extent_range(x_range, y_range)
         saved_ranges = self._valid_saved_view(saved_view)
-        target_x, target_y = saved_ranges if saved_ranges is not None else (x_range, y_range)
-        self._suppress_view_changed = True
-        self._plot.setRange(
-            xRange=target_x,
-            yRange=target_y,
-            padding=0.05,
-        )
-        self._suppress_view_changed = False
+        if recenter:
+            target_x, target_y = saved_ranges if saved_ranges is not None else (x_range, y_range)
+            self._suppress_view_changed = True
+            self._plot.setRange(
+                xRange=target_x,
+                yRange=target_y,
+                padding=0.05,
+            )
+            self._suppress_view_changed = False
         self._refresh_visible_world()

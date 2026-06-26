@@ -1213,7 +1213,11 @@ class MainWindow(QMainWindow):
             self._map.render(self._map_data, force=True)
             self._map.restore_view(settings.map_view)
             self._map.render(self._map_data, force=True)
-            self._right.update_from_project(self._settings, self._map_data)
+            self._right.update_from_project(
+                self._settings,
+                self._map_data,
+                apply_saved_minimap_view=True,
+            )
             self._refresh_import_polygons_summary()
             total_records = int(map_data.stats.get("total_records", 0))
             self.statusBar().showMessage(
