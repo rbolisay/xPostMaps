@@ -14,6 +14,26 @@ from xpostmaps.parsers.preplot_parser import (
     NAVPLAN_IMPORT_EXTENSIONS,
     parse_navplan_source_file,
 )
+from xpostmaps.parsers.p190_parser import format_line_direction
+
+
+def line_direction_from_metadata(metadata: dict[str, str]) -> str:
+    """Return formatted navplan line direction from parsed file metadata."""
+    for key in ("line direction", "line heading"):
+        value = (metadata.get(key) or "").strip()
+        if not value:
+            continue
+        if "°" in value:
+            return value
+        formatted = format_line_direction(value)
+        return formatted or value
+    for key, raw in metadata.items():
+        normalized = key.lower().replace(" ", "")
+        if "line" in normalized and "direction" in normalized:
+            formatted = format_line_direction(raw)
+            if formatted:
+                return formatted
+    return ""
 
 
 def navplan_source_labels(count: int) -> list[str]:
@@ -73,6 +93,7 @@ def build_navplan_catalog(paths: list[Path]) -> list[NavplanCatalogEntry]:
             NavplanCatalogEntry(
                 navplan_number=index,
                 navplan_name=navplan_name.strip("/ ") or resolved.stem,
+                line_direction=line_direction_from_metadata(result.metadata),
                 file_path=str(resolved),
                 crs_code=normalize_epsg(crs) or crs,
                 fsp=fsp,
@@ -125,6 +146,7 @@ def build_navplan_catalog_from_segments(
             NavplanCatalogEntry(
                 navplan_number=index,
                 navplan_name=navplan_name.strip("/ ") or path.stem,
+                line_direction=line_direction_from_metadata(result.metadata),
                 file_path=str(path.resolve()),
                 crs_code=normalize_epsg(crs) or crs,
                 fsp=fsp,
@@ -213,6 +235,7 @@ def navplan_catalog_to_json(catalog: list[NavplanCatalogEntry]) -> list[dict]:
         {
             "navplan_number": entry.navplan_number,
             "navplan_name": entry.navplan_name,
+            "line_direction": entry.line_direction,
             "file_path": entry.file_path,
             "crs_code": entry.crs_code,
             "fsp": entry.fsp,
@@ -230,6 +253,7 @@ def navplan_catalog_from_json(data: list[dict] | None) -> list[NavplanCatalogEnt
         NavplanCatalogEntry(
             navplan_number=int(item.get("navplan_number", 0)),
             navplan_name=str(item.get("navplan_name", "")),
+            line_direction=str(item.get("line_direction", "")),
             file_path=str(item.get("file_path", "")),
             crs_code=str(item.get("crs_code", "")),
             fsp=int(item.get("fsp", 0)),

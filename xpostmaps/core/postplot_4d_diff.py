@@ -24,6 +24,11 @@ from xpostmaps.core.postplot_4d_matching import (
 )
 from xpostmaps.parsers.metadata_parser import parse_file_metadata
 from xpostmaps.parsers.p190_parser import parse_p190_header
+from xpostmaps.parsers.p111_parser import (
+    average_receiver_feathers_by_shotpoint,
+    parse_p111_receiver_feathers,
+    parse_p190_receiver_feathers,
+)
 from xpostmaps.parsers.preplot_parser import parse_navplan_source_file, parse_preplot_file
 from xpostmaps.core.crs_utils import (
     WGS84_EPSG,
@@ -116,6 +121,8 @@ class Postplot4DDiffRow:
     crossline_m: float
     inline_m: float
     radial_m: float
+    navplan_feather_deg: float | None = None
+    line_feather_deg: float | None = None
 
 
 def _parse_azimuth_degrees(line_direction: str) -> float | None:
@@ -895,6 +902,93 @@ def _source_file_epsg(settings: ProjectSettings | None, file_name: str) -> str:
     return ""
 
 
+def _resolve_source_path(settings: ProjectSettings | None, file_name: str) -> Path | None:
+    if settings is None or not file_name:
+        return None
+    target = Path(file_name).name
+    for raw in settings.nav_files:
+        path = Path(raw)
+        if path.name == target and path.is_file():
+            return path
+    folder = getattr(settings, "p111_p190_dir", "") or ""
+    if folder:
+        candidate = Path(folder) / target
+        if candidate.is_file():
+            return candidate
+    return None
+
+
+def _parse_receiver_feathers(path: Path) -> list:
+    """Parse receiver feathers from P111 (CSV R1) or P190 (fixed-width R) files."""
+    suffix = path.suffix.lower()
+    if suffix in (".p111", ".111"):
+        return parse_p111_receiver_feathers(path)
+    if suffix in (".p190", ".190", ".navplan"):
+        return parse_p190_receiver_feathers(path)
+    # Unknown extension: sniff the first records to pick the right parser.
+    try:
+        with path.open("r", encoding="utf-8", errors="replace") as handle:
+            for _ in range(200):
+                line = handle.readline()
+                if not line:
+                    break
+                if line.startswith("R1,") or line.startswith("S1,"):
+                    return parse_p111_receiver_feathers(path)
+                if line[:1] in ("R", "S") and "," not in line[:6]:
+                    return parse_p190_receiver_feathers(path)
+    except OSError:
+        return []
+    return parse_p111_receiver_feathers(path)
+
+
+def _receiver_feathers_for_path(
+    path: Path | None,
+    *,
+    line_name: str = "",
+    sequence_group: str = "",
+    subline: str = "",
+) -> dict[int, float]:
+    if path is None or not path.is_file():
+        return {}
+    try:
+        records = _parse_receiver_feathers(path)
+    except OSError:
+        return {}
+    if line_name:
+        by_line = [
+            record
+            for record in records
+            if _line_names_match(line_name, record.line_name)
+        ]
+        # The resolved path is already the file for this match; keep all records
+        # rather than dropping everything if the name forms do not intersect.
+        if by_line:
+            records = by_line
+    if sequence_group:
+        filtered = [
+            record
+            for record in records
+            if make_sequence_group_id(path.name, record.sequence_no, record.line_name)
+            == sequence_group
+        ]
+        # P190 line files are single-sequence and may not reproduce the exact
+        # sequence id; keep the unfiltered set rather than dropping everything.
+        if filtered:
+            records = filtered
+    if subline:
+        by_subline = [
+            record
+            for record in records
+            if not record.subline or record.subline == subline
+        ]
+        # A navplan baseline carries its own subline (e.g. "1") that differs
+        # from the acquired line's subline (e.g. "a070"); don't let that empty
+        # the per-shotpoint feathers for an already file-scoped path.
+        if by_subline:
+            records = by_subline
+    return average_receiver_feathers_by_shotpoint(records)
+
+
 def _wgs84_lat_lon(xs: list[float], ys: list[float], map_epsg: str) -> tuple[list[str], list[str]]:
     try:
         lons, lats = transform_coordinates(xs, ys, map_epsg, WGS84_EPSG)
@@ -1006,6 +1100,8 @@ def compute_postplot_4d_diff_rows(
     line_direction: str,
     *,
     baseline_path: Path | None = None,
+    navplan_feathers: dict[int, float] | None = None,
+    line_feathers: dict[int, float] | None = None,
 ) -> list[Postplot4DDiffRow]:
     if not baseline or not sources:
         return []
@@ -1043,6 +1139,12 @@ def compute_postplot_4d_diff_rows(
                 crossline_m=crossline,
                 inline_m=inline,
                 radial_m=radial,
+                navplan_feather_deg=(
+                    navplan_feathers.get(shotpoint) if navplan_feathers else None
+                ),
+                line_feather_deg=(
+                    line_feathers.get(shotpoint) if line_feathers else None
+                ),
             )
         )
     return rows
@@ -1193,11 +1295,38 @@ def calculate_match_diff_rows(
     baseline = _reproject_baseline(baseline, _file_epsg(baseline_path), map_epsg)
     sources = source_shotpoints_for_match(positions, match_row)
     sources = _reproject_sources(sources, settings, map_epsg)
+    navplan_feathers: dict[int, float] | None = None
+    line_feathers: dict[int, float] | None = None
+    if match_row.baseline_kind == "navplan":
+        navplan_feathers = _receiver_feathers_for_path(
+            baseline_path,
+            line_name=match_row.baseline_name,
+            subline=match_row.subline,
+        )
+        source_paths = {
+            _resolve_source_path(settings, record.file_name)
+            for record in sources.values()
+            if record.file_name
+        }
+        source_paths.discard(None)
+        combined_line_feathers: dict[int, float] = {}
+        target_group = sequence_group_id(match_row.sequence_id)
+        for source_path in source_paths:
+            combined_line_feathers.update(
+                _receiver_feathers_for_path(
+                    source_path,
+                    sequence_group=target_group,
+                    subline=match_row.subline,
+                )
+            )
+        line_feathers = combined_line_feathers
     return compute_postplot_4d_diff_rows(
         baseline,
         sources,
         match_row.line_direction,
         baseline_path=baseline_path,
+        navplan_feathers=navplan_feathers,
+        line_feathers=line_feathers,
     )
 
 
@@ -1215,7 +1344,18 @@ def diff_row_to_dict(row: Postplot4DDiffRow) -> dict:
         "crossline_m": row.crossline_m,
         "inline_m": row.inline_m,
         "radial_m": row.radial_m,
+        "navplan_feather_deg": row.navplan_feather_deg,
+        "line_feather_deg": row.line_feather_deg,
     }
+
+
+def _optional_float(value) -> float | None:
+    if value is None or value == "":
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
 
 
 def diff_row_from_dict(data: dict) -> Postplot4DDiffRow:
@@ -1232,4 +1372,6 @@ def diff_row_from_dict(data: dict) -> Postplot4DDiffRow:
         crossline_m=float(data.get("crossline_m", 0.0)),
         inline_m=float(data.get("inline_m", 0.0)),
         radial_m=float(data.get("radial_m", 0.0)),
+        navplan_feather_deg=_optional_float(data.get("navplan_feather_deg")),
+        line_feather_deg=_optional_float(data.get("line_feather_deg")),
     )

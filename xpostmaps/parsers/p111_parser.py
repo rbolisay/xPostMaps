@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+import math
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -21,6 +22,12 @@ P_REC_EASTING_IDX = 12
 P_REC_NORTHING_IDX = 13
 P_REC_LATITUDE_IDX = 15
 P_REC_LONGITUDE_IDX = 16
+R_REC_SPN_IDX = 4
+R_REC_PREPLOT_IDX = 5
+R_REC_STREAMER_ID_IDX = 9
+R_REC_RECEIVER_NUM_IDX = 11
+R_REC_EASTING_IDX = 12
+R_REC_NORTHING_IDX = 13
 
 # S1 record field indices
 S1_REC_SPN_IDX = 4
@@ -53,6 +60,17 @@ class _PendingFiringShot:
     line_name: str
 
 
+@dataclass(frozen=True)
+class ReceiverFeatherRecord:
+    shotpoint: int
+    line_name: str
+    streamer_id: str
+    feather_deg: float
+    sequence_no: str = ""
+    subline: str = ""
+    preplot_no: str = ""
+
+
 def _parse_float(value: str) -> float:
     try:
         return float(value.replace(",", "").strip())
@@ -81,6 +99,32 @@ def _format_line_direction(value: float | None) -> str:
 
 def _fallback_gun_code(code: str) -> bool:
     return code.startswith("G") and len(code) == 3 and code[1:].isdigit()
+
+
+def _calculate_azimuth_degrees(x1: float, y1: float, x2: float, y2: float) -> float | None:
+    dx = x2 - x1
+    dy = y2 - y1
+    if abs(dx) < 1e-9 and abs(dy) < 1e-9:
+        return None
+    return math.degrees(math.atan2(dx, dy)) % 360.0
+
+
+def calculate_receiver_feather_deg(
+    first_receiver: tuple[float, float],
+    last_receiver: tuple[float, float],
+    line_direction_deg: float,
+) -> float | None:
+    """Return signed streamer feather angle: starboard positive, port negative."""
+    streamer_azimuth = _calculate_azimuth_degrees(
+        first_receiver[0],
+        first_receiver[1],
+        last_receiver[0],
+        last_receiver[1],
+    )
+    if streamer_azimuth is None:
+        return None
+    reciprocal_line = (line_direction_deg + 180.0) % 360.0
+    return (reciprocal_line - streamer_azimuth + 180.0) % 360.0 - 180.0
 
 
 def scan_gun_array_codes(path: Path, scan_limit: int = 5000) -> frozenset[str]:
@@ -182,6 +226,247 @@ def scan_projected_axis_order(path: Path, scan_limit: int = 2000) -> tuple[str, 
         if set(ordered) == {"easting", "northing"} and len(ordered) >= 2:
             return ordered[:2]
     return None
+
+
+def _receiver_positions_from_r1_fields(
+    fields: list[str],
+    axis_order: tuple[str, str] | None,
+) -> list[tuple[int, float, float]]:
+    receivers: list[tuple[int, float, float]] = []
+    index = R_REC_RECEIVER_NUM_IDX
+    while index + 2 < len(fields):
+        receiver_text = _field(fields, index)
+        if receiver_text.isdigit():
+            receiver_num = _parse_int(receiver_text)
+            x, y = _projected_xy_from_fields(
+                fields,
+                index + 1,
+                index + 2,
+                axis_order,
+            )
+            if receiver_num > 0 and x == x and y == y:
+                receivers.append((receiver_num, x, y))
+                index += 3
+                continue
+        index += 1
+    return receivers
+
+
+def parse_p111_receiver_feathers(path: Path) -> list[ReceiverFeatherRecord]:
+    """Parse per-streamer receiver feather from P1/11 R1 records.
+
+    Each R1 row contains one streamer's receiver positions for a shotpoint. The
+    feather is calculated from the first and last receiver positions using the
+    active line direction from the CC headers.
+    """
+    records: list[ReceiverFeatherRecord] = []
+    file_name = path.name
+    axis_order = scan_projected_axis_order(path)
+    current_sequence = "N/A"
+    current_line_name = "N/A"
+    current_subline = ""
+    current_line_direction: float | None = None
+    has_cc_headers = False
+
+    with path.open("r", encoding="utf-8", errors="replace") as handle:
+        for raw_line in handle:
+            line = raw_line.strip()
+            if not line or line.startswith("#"):
+                continue
+
+            if line.startswith(CC_SEQUENCE_PREFIX):
+                has_cc_headers = True
+                try:
+                    current_sequence = line.split("=", 1)[1].strip() or "N/A"
+                except IndexError:
+                    pass
+                continue
+
+            if line.startswith(CC_LINENAME_PREFIX):
+                has_cc_headers = True
+                try:
+                    parts = line.split("=", 1)[1].strip()
+                    name_parts = [p for p in parts.split("/") if p]
+                    current_line_name = name_parts[0] if name_parts else "N/A"
+                    current_subline = name_parts[1] if len(name_parts) > 1 else ""
+                except (IndexError, ValueError):
+                    pass
+                continue
+
+            if line.startswith(CC_LINE_DIRECTION_PREFIX):
+                has_cc_headers = True
+                try:
+                    current_line_direction = float(line.split("=", 1)[1].strip())
+                except (IndexError, ValueError, TypeError):
+                    current_line_direction = None
+                continue
+
+            if not line.startswith("R1,") or current_line_direction is None:
+                continue
+
+            fields = line.split(",")
+            if len(fields) <= max(R_REC_SPN_IDX, R_REC_STREAMER_ID_IDX, R_REC_RECEIVER_NUM_IDX):
+                continue
+
+            shotpoint = _parse_int(_field(fields, R_REC_SPN_IDX))
+            streamer_id = _field(fields, R_REC_STREAMER_ID_IDX)
+            if shotpoint <= 0 or not streamer_id:
+                continue
+
+            receivers = _receiver_positions_from_r1_fields(fields, axis_order)
+            if len(receivers) < 2:
+                continue
+            first_receiver = min(receivers, key=lambda item: item[0])
+            last_receiver = max(receivers, key=lambda item: item[0])
+            feather = calculate_receiver_feather_deg(
+                (first_receiver[1], first_receiver[2]),
+                (last_receiver[1], last_receiver[2]),
+                current_line_direction,
+            )
+            if feather is None:
+                continue
+            line_name = current_line_name if has_cc_headers else file_name
+            records.append(
+                ReceiverFeatherRecord(
+                    shotpoint=shotpoint,
+                    line_name=line_name or "UNNAMED",
+                    streamer_id=streamer_id,
+                    feather_deg=feather,
+                    sequence_no=current_sequence,
+                    subline=current_subline,
+                    preplot_no=_field(fields, R_REC_PREPLOT_IDX),
+                )
+            )
+    return records
+
+
+_P190_R_GROUP_WIDTH = 26
+_P190_R_STREAMER_COL = 79
+
+
+def _parse_p190_r_groups(line: str) -> list[tuple[int, float, float]]:
+    """Parse up to 3 receiver groups (group_no, easting, northing) from an R record."""
+    groups: list[tuple[int, float, float]] = []
+    pos = 1
+    length = len(line)
+    while pos + 22 <= length:
+        block = line[pos : pos + _P190_R_GROUP_WIDTH]
+        group_text = block[0:4].strip()
+        easting_text = block[4:13].strip()
+        northing_text = block[13:22].strip()
+        if not group_text or not easting_text or not northing_text:
+            break
+        try:
+            group_no = int(group_text)
+            easting = float(easting_text)
+            northing = float(northing_text)
+        except ValueError:
+            break
+        groups.append((group_no, easting, northing))
+        pos += _P190_R_GROUP_WIDTH
+    return groups
+
+
+def _p190_streamer_id(line: str) -> str:
+    """Streamer/cable id from the trailing P190 R-record column (col 80)."""
+    if len(line) > _P190_R_STREAMER_COL:
+        token = line[_P190_R_STREAMER_COL].strip()
+        if token:
+            return token
+    stripped = line.rstrip()
+    return stripped[-1] if stripped else ""
+
+
+def parse_p190_receiver_feathers(path: Path) -> list[ReceiverFeatherRecord]:
+    """Parse per-streamer receiver feather from a P190 file.
+
+    P190 receiver (``R``) records pack up to three receiver groups per line and
+    carry the streamer/cable number in the final column. Receiver group numbers
+    restart per streamer, so the first/last receiver of each streamer is found
+    by min/max group number within that streamer for each shotpoint.
+    """
+    # Avoid a circular import at module load time.
+    from xpostmaps.parsers.p190_parser import (
+        _parse_linename_subline_from_filename,
+        parse_p190_header,
+    )
+
+    info = parse_p190_header(path)
+    direction_match = re.search(
+        r"[-+]?\d+(?:\.\d+)?", info.get("line direction", "")
+    )
+    if direction_match is None:
+        return []
+    line_direction = float(direction_match.group(0))
+    sequence_no = info.get("line sequence number", "") or "N/A"
+    fallback_line, fallback_subline = _parse_linename_subline_from_filename(path)
+    header_line_name = info.get("line name", "") or fallback_line
+    subline = info.get("subline", "") or fallback_subline
+
+    records: list[ReceiverFeatherRecord] = []
+    current_shotpoint = 0
+    current_line_name = header_line_name
+    accumulator: dict[str, list[tuple[int, float, float]]] = {}
+
+    def flush() -> None:
+        if current_shotpoint <= 0 or not accumulator:
+            return
+        for streamer_id, groups in accumulator.items():
+            if len(groups) < 2:
+                continue
+            first = min(groups, key=lambda item: item[0])
+            last = max(groups, key=lambda item: item[0])
+            feather = calculate_receiver_feather_deg(
+                (first[1], first[2]),
+                (last[1], last[2]),
+                line_direction,
+            )
+            if feather is None:
+                continue
+            records.append(
+                ReceiverFeatherRecord(
+                    shotpoint=current_shotpoint,
+                    line_name=current_line_name or "UNNAMED",
+                    streamer_id=streamer_id,
+                    feather_deg=feather,
+                    sequence_no=sequence_no,
+                    subline=subline,
+                    preplot_no="",
+                )
+            )
+
+    with path.open("r", encoding="utf-8", errors="replace") as handle:
+        for raw_line in handle:
+            line = raw_line.rstrip("\n\r")
+            if not line:
+                continue
+            record_id = line[0].upper()
+            if record_id == "S":
+                flush()
+                accumulator = {}
+                current_shotpoint = _parse_int(line[19:25])
+                name = line[1:13].strip()
+                current_line_name = name or header_line_name
+            elif record_id == "R" and current_shotpoint > 0:
+                streamer_id = _p190_streamer_id(line) or "1"
+                groups = _parse_p190_r_groups(line)
+                if groups:
+                    accumulator.setdefault(streamer_id, []).extend(groups)
+    flush()
+    return records
+
+
+def average_receiver_feathers_by_shotpoint(
+    records: list[ReceiverFeatherRecord],
+) -> dict[int, float]:
+    grouped: dict[int, list[float]] = {}
+    for record in records:
+        grouped.setdefault(record.shotpoint, []).append(record.feather_deg)
+    return {
+        shotpoint: sum(values) / len(values)
+        for shotpoint, values in grouped.items()
+        if values
+    }
 
 
 def _projected_xy_from_fields(

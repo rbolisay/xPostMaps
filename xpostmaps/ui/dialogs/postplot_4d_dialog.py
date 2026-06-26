@@ -122,6 +122,40 @@ def _finalize_diff_table_layout(table: QTableWidget) -> None:
     header.resizeSections(QHeaderView.ResizeMode.ResizeToContents)
 
 
+def _table_content_width(table: QTableWidget) -> int:
+    """Total pixel width needed to show every column without truncation."""
+    width = 0
+    v_header = table.verticalHeader()
+    if v_header is not None and v_header.isVisible():
+        width += v_header.width()
+    for col in range(table.columnCount()):
+        width += table.columnWidth(col)
+    width += table.frameWidth() * 2
+    scrollbar = table.verticalScrollBar()
+    if scrollbar is not None and scrollbar.maximum() > 0:
+        width += scrollbar.sizeHint().width()
+    return width
+
+
+def _autosize_dialog_width(
+    dialog: QWidget | None,
+    table: QTableWidget,
+    *,
+    min_width: int = 760,
+    chrome: int = 90,
+) -> None:
+    """Resize the dialog width to fit the table contents, clamped to the screen."""
+    if dialog is None:
+        return
+    target = _table_content_width(table) + chrome
+    screen = QApplication.primaryScreen()
+    if screen is not None:
+        max_width = int(screen.availableGeometry().width() * 0.96)
+        target = min(target, max_width)
+    target = max(min_width, target)
+    dialog.resize(target, dialog.height())
+
+
 _DIFF_SUMMARY_STYLE = "color: #8b949e; font-size: 11px;"
 _DIFF_SUMMARY_BUSY_STYLE = "color: #58a6ff; font-size: 11px;"
 _DIFF_SUMMARY_DONE_STYLE = "color: #3fb950; font-size: 11px;"
@@ -151,6 +185,12 @@ def _format_coord(value: float) -> str:
 
 def _format_offset(value: float) -> str:
     return f"{value:.3f}"
+
+
+def _format_feather(value: float | None) -> str:
+    if value is None:
+        return ""
+    return f"{value:.1f}"
 
 
 def _natural_sort_key(text: str) -> tuple:
@@ -405,6 +445,17 @@ class Postplot4DDialog:
             if notify and on_diffs_saved is not None:
                 on_diffs_saved()
 
+        def _diffs_missing_feather(
+            match_row: Postplot4DMatchRow,
+            rows: list[Postplot4DDiffRow],
+        ) -> bool:
+            # Older saved navplan diffs predate P190 feather parsing (or a
+            # subline-filter bug) and stored navplan feathers as nulls; recompute
+            # them so the navplan feather column populates.
+            if match_row.baseline_kind != "navplan" or not rows:
+                return False
+            return all(row.navplan_feather_deg is None for row in rows)
+
         def load_or_calculate_diffs(
             match_row: Postplot4DMatchRow,
         ) -> tuple[list[Postplot4DDiffRow], str]:
@@ -417,7 +468,7 @@ class Postplot4DDialog:
                     match_row.baseline_kind,
                     match_row.sequence_id,
                 )
-                if stored:
+                if stored and not _diffs_missing_feather(match_row, stored):
                     return stored, "loaded"
             rows = calculate_match_diff_rows(
                 current_map_data(),
@@ -438,16 +489,16 @@ class Postplot4DDialog:
             assert coord_mode in ("en", "lat")
             baseline_h1, baseline_h2 = _baseline_coord_headers(match_row.baseline_kind, coord_mode)
             source_h1, source_h2 = _source_coord_headers(coord_mode)
-            header = diff_table.horizontalHeader()
-            header.blockSignals(True)
-            header.setSectionResizeMode(QHeaderView.ResizeMode.Fixed)
-            diff_table.setUpdatesEnabled(False)
-            diff_table.setSortingEnabled(False)
-            diff_table.setHorizontalHeaderLabels(
+            show_feather = match_row.baseline_kind == "navplan"
+            column_labels = [
+                "Shotpoint No.",
+                baseline_h1,
+                baseline_h2,
+            ]
+            if show_feather:
+                column_labels.append("Navplan Feather")
+            column_labels.extend(
                 [
-                    "Shotpoint No.",
-                    baseline_h1,
-                    baseline_h2,
                     source_h1,
                     source_h2,
                     "Crossline (m)",
@@ -455,6 +506,15 @@ class Postplot4DDialog:
                     "Radial (m)",
                 ]
             )
+            if show_feather:
+                column_labels.append("Line Feather")
+            header = diff_table.horizontalHeader()
+            header.blockSignals(True)
+            header.setSectionResizeMode(QHeaderView.ResizeMode.Fixed)
+            diff_table.setUpdatesEnabled(False)
+            diff_table.setSortingEnabled(False)
+            diff_table.setColumnCount(len(column_labels))
+            diff_table.setHorizontalHeaderLabels(column_labels)
             row_count = len(diff_rows)
             if diff_table.rowCount() != row_count:
                 diff_table.setRowCount(row_count)
@@ -503,18 +563,27 @@ class Postplot4DDialog:
                         str(diff_row.shotpoint),
                         baseline_a,
                         baseline_b,
-                        source_a,
-                        source_b,
-                        _format_offset(diff_row.crossline_m),
-                        _format_offset(diff_row.inline_m),
-                        _format_offset(diff_row.radial_m),
                     ]
+                    if show_feather:
+                        values.append(_format_feather(diff_row.navplan_feather_deg))
+                    values.extend(
+                        [
+                            source_a,
+                            source_b,
+                            _format_offset(diff_row.crossline_m),
+                            _format_offset(diff_row.inline_m),
+                            _format_offset(diff_row.radial_m),
+                        ]
+                    )
+                    if show_feather:
+                        values.append(_format_feather(diff_row.line_feather_deg))
                     for col, value in enumerate(values):
                         _set_diff_table_item(diff_table, row_idx, col, value)
             finally:
                 diff_table.setUpdatesEnabled(True)
                 header.blockSignals(False)
             _finalize_diff_table_layout(diff_table)
+            _autosize_dialog_width(host_dialog, diff_table)
 
         def show_diff_stat(match_row: Postplot4DMatchRow) -> None:
             nonlocal diff_rows
@@ -558,6 +627,7 @@ class Postplot4DDialog:
         def show_main_view() -> None:
             state["active_match"] = None
             stack.setCurrentIndex(0)
+            _autosize_dialog_width(host_dialog, table)
             if host_dialog is not None:
                 host_dialog.setWindowTitle("Postplot 4D")
 
@@ -807,6 +877,7 @@ class Postplot4DDialog:
                 f"{sum(1 for row in rows if row.has_match)} matched imported line(s)"
             )
             _fit_table(table)
+            _autosize_dialog_width(host_dialog, table)
             if crs_note is not None:
                 crs_note.setText(_crs_note_for_match(None))
 
@@ -976,5 +1047,5 @@ class Postplot4DDialog:
             build,
             parent,
             width=1120,
-            height=680,
+            height=884,
         )

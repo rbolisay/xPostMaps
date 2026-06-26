@@ -31,10 +31,133 @@ def epsg_label(code: str | int | None) -> str:
     return f"EPSG:{normalized}" if normalized else "unknown CRS"
 
 
+def _approx_equal(left: float, right: float, tolerance: float = 1e-3) -> bool:
+    return abs(left - right) <= tolerance
+
+
+# Geographic (datum) EPSG codes used as the base CRS when reconstructing a
+# projected CRS from raw grid parameters via pyproj.
+_GEOGRAPHIC_CRS_BY_DATUM = {
+    "WGS 84": "EPSG:4326",
+    "ED50": "EPSG:4230",
+    "ETRS89": "EPSG:4258",
+    "NAD83": "EPSG:4269",
+    "NAD27": "EPSG:4267",
+    "NZGD2000": "EPSG:4167",
+    "GDA94": "EPSG:4283",
+    "GDA2020": "EPSG:7844",
+    "OSGB36": "EPSG:4277",
+}
+
+# Fallback geographic bases tried (in order) when the detected datum does not
+# yield a match. Kept small and ordered by global frequency to limit the risk
+# of a false positive.
+_GEOGRAPHIC_CRS_FALLBACKS = (
+    "EPSG:4167",  # NZGD2000 (NZTM headers often mislabel datum as WGS-84)
+    "EPSG:4326",  # WGS 84
+    "EPSG:4258",  # ETRS89
+    "EPSG:4283",  # GDA94
+    "EPSG:7844",  # GDA2020
+    "EPSG:4230",  # ED50
+)
+
+
+def detect_datum_name(datum: str) -> str:
+    """Return a canonical datum label from free-form P190/P111 datum text."""
+    datum_text = (datum or "").upper()
+    if "ED50" in datum_text or "ED-50" in datum_text:
+        return "ED50"
+    if "GDA2020" in datum_text or "GDA 2020" in datum_text:
+        return "GDA2020"
+    if "GDA94" in datum_text or "GDA 94" in datum_text:
+        return "GDA94"
+    if "NZGD2000" in datum_text or "NZTM2000" in datum_text or "NZGD 2000" in datum_text:
+        return "NZGD2000"
+    if "ETRS89" in datum_text or "ETRS 89" in datum_text:
+        return "ETRS89"
+    if "NAD83" in datum_text or "NAD 83" in datum_text:
+        return "NAD83"
+    if "NAD27" in datum_text or "NAD 27" in datum_text:
+        return "NAD27"
+    if "OSGB" in datum_text or "OSGB36" in datum_text:
+        return "OSGB36"
+    if re.search(r"WGS[\s\-]?84", datum_text):
+        return "WGS 84"
+    return ""
+
+
+def epsg_from_grid_parameters(
+    datum_name: str,
+    central_meridian: float | None,
+    false_easting: float | None,
+    false_northing: float | None,
+    scale_factor: float | None,
+    latitude_of_origin: float = 0.0,
+) -> str:
+    """Resolve an EPSG code for a Transverse Mercator grid via pyproj.
+
+    Reconstructs the projected CRS from raw grid parameters and asks PROJ for
+    the matching authority code. Tries the detected datum first, then a small
+    set of common geographic bases. Returns "" when pyproj is unavailable or no
+    confident match is found.
+    """
+    if (
+        central_meridian is None
+        or false_easting is None
+        or false_northing is None
+        or scale_factor is None
+    ):
+        return ""
+    try:
+        from pyproj import CRS
+        from pyproj.crs import ProjectedCRS
+        from pyproj.crs.coordinate_operation import TransverseMercatorConversion
+    except Exception:  # noqa: BLE001
+        return ""
+
+    candidates: list[str] = []
+    base = _GEOGRAPHIC_CRS_BY_DATUM.get(datum_name)
+    if base:
+        candidates.append(base)
+    for code in _GEOGRAPHIC_CRS_FALLBACKS:
+        if code not in candidates:
+            candidates.append(code)
+
+    try:
+        conversion = TransverseMercatorConversion(
+            latitude_natural_origin=latitude_of_origin,
+            longitude_natural_origin=central_meridian,
+            false_easting=false_easting,
+            false_northing=false_northing,
+            scale_factor_natural_origin=scale_factor,
+        )
+    except Exception:  # noqa: BLE001
+        return ""
+
+    for geo in candidates:
+        try:
+            geographic_crs = CRS.from_user_input(geo)
+            projected = ProjectedCRS(
+                conversion=conversion,
+                geodetic_crs=geographic_crs,
+            )
+            epsg = projected.to_epsg(min_confidence=70)
+        except Exception:  # noqa: BLE001
+            continue
+        if epsg is not None:
+            return str(epsg)
+    return ""
+
+
 def infer_epsg_from_header(
     datum: str = "",
     projection: str = "",
     zone: str = "",
+    *,
+    central_meridian: float | None = None,
+    false_easting: float | None = None,
+    false_northing: float | None = None,
+    scale_factor: float | None = None,
 ) -> str:
     """Infer an EPSG code from P190/P111 datum + projection + zone headers.
 
@@ -42,23 +165,10 @@ def infer_epsg_from_header(
     remain authoritative. This helper only covers unambiguous common cases and
     asks pyproj/PROJ to resolve the final authority code.
     """
-    datum_text = (datum or "").upper()
     projection_text = (projection or "").upper()
     zone_text = (zone or "").upper().strip()
 
-    datum_name = ""
-    if "ED50" in datum_text or "ED-50" in datum_text:
-        datum_name = "ED50"
-    elif "WGS84" in datum_text or "WGS 84" in datum_text:
-        datum_name = "WGS 84"
-    elif "ETRS89" in datum_text or "ETRS 89" in datum_text:
-        datum_name = "ETRS89"
-    elif "NAD83" in datum_text or "NAD 83" in datum_text:
-        datum_name = "NAD83"
-    elif "NAD27" in datum_text or "NAD 27" in datum_text:
-        datum_name = "NAD27"
-    elif "NZGD2000" in datum_text or "NZTM2000" in datum_text:
-        datum_name = "NZGD2000"
+    datum_name = detect_datum_name(datum)
 
     try:
         from pyproj import CRS
@@ -108,11 +218,44 @@ def infer_epsg_from_header(
                 )
             return fallback_epsg
 
-    if (
+    is_transverse_mercator = (
         "TRANSVERSE MERCATOR" in projection_text
-        and ("NEW ZEALAND" in projection_text or datum_name == "NZGD2000")
-    ):
-        return from_user_input("NZGD2000 / New Zealand Transverse Mercator 2000") or "2193"
+        or projection_text.strip() in {"TM", "003"}
+        or projection_text.endswith(" TM")
+    )
+    if is_transverse_mercator:
+        # NZTM grid fingerprint: stable even when pyproj is unavailable or the
+        # header mislabels the datum as WGS-84 instead of NZGD2000.
+        if (
+            central_meridian is not None
+            and false_easting is not None
+            and false_northing is not None
+            and scale_factor is not None
+            and _approx_equal(central_meridian, 173.0)
+            and _approx_equal(false_easting, 1_600_000.0)
+            and _approx_equal(false_northing, 10_000_000.0)
+            and _approx_equal(scale_factor, 0.9996, tolerance=1e-5)
+        ):
+            return (
+                from_user_input("NZGD2000 / New Zealand Transverse Mercator 2000")
+                or "2193"
+            )
+        if "NEW ZEALAND" in projection_text or datum_name == "NZGD2000":
+            return (
+                from_user_input("NZGD2000 / New Zealand Transverse Mercator 2000")
+                or "2193"
+            )
+        # General case: reconstruct the TM grid from raw parameters and let
+        # PROJ resolve the authority code (covers arbitrary TM zones/datums).
+        grid_epsg = epsg_from_grid_parameters(
+            datum_name,
+            central_meridian,
+            false_easting,
+            false_northing,
+            scale_factor,
+        )
+        if grid_epsg:
+            return grid_epsg
 
     return ""
 

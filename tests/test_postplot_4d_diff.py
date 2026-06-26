@@ -33,7 +33,12 @@ from xpostmaps.core.postplot_4d_diff import (
     source_shotpoints_for_match,
 )
 from xpostmaps.core.postplot_4d_matching import Postplot4DMatchRow
-from xpostmaps.parsers.p111_parser import parse_p111_file, scan_projected_axis_order
+from xpostmaps.parsers.p111_parser import (
+    average_receiver_feathers_by_shotpoint,
+    parse_p111_receiver_feathers,
+    parse_p111_file,
+    scan_projected_axis_order,
+)
 from xpostmaps.parsers.p190_parser import parse_p190_file
 from xpostmaps.parsers.preplot_parser import parse_preplot_file
 from xpostmaps.ui.main_window import MainWindow
@@ -437,6 +442,56 @@ def test_10221_p111_firing_source_axis_order_matches_p190_sample() -> None:
         assert p111_source.source_id[-1] == p190_source.source_id
 
 
+def test_10221_p111_receiver_feathers_average_all_streamers() -> None:
+    p111 = Path("Sample P111-P190/10221/70.1065P1A-070.a070.p111")
+    if not p111.is_file():
+        return
+
+    feathers = parse_p111_receiver_feathers(p111)
+    by_sp = average_receiver_feathers_by_shotpoint(feathers)
+    sp1600 = [record for record in feathers if record.shotpoint == 1600]
+
+    assert len(sp1600) == 8
+    assert set(record.streamer_id for record in sp1600) == {
+        "S01",
+        "S02",
+        "S03",
+        "S04",
+        "S05",
+        "S06",
+        "S07",
+        "S08",
+    }
+    assert 0.0 < by_sp[1600] < 10.0
+
+
+def test_diff_rows_include_optional_feather_values() -> None:
+    baseline = {100: BaselineShotpoint(shotpoint=100, x=0.0, y=0.0)}
+    sources = {
+        100: PositionRecord(
+            file_name="line.p111",
+            record_type=RecordType.SOURCE,
+            line_name="0103643A",
+            vessel_id="",
+            source_id="G01",
+            point_num=100,
+            x=0.0,
+            y=0.0,
+        )
+    }
+
+    rows = compute_postplot_4d_diff_rows(
+        baseline,
+        sources,
+        "0.0",
+        navplan_feathers={100: 1.25},
+        line_feathers={100: -2.5},
+    )
+
+    assert rows[0].navplan_feather_deg == 1.25
+    assert rows[0].line_feather_deg == -2.5
+
+
 def test_4030_generated_preplot_position_matches_interval_and_rotation() -> None:
     preplot = Path("4D/4030/Preplot/4030_Mariner4D_Preplots_v2.190")
     result = parse_preplot_file(preplot)
@@ -577,6 +632,143 @@ def test_p111_compound_crs_row_does_not_clobber_projected_epsg() -> None:
     assert metadata.get("epsg code") == "23031"
 
 
+def test_10221_preplot_infers_nztm_from_tm_grid_parameters() -> None:
+    path = Path("4D/10221/Preplot/10221_AWA_Maui4D_v2.190")
+    if not path.is_file():
+        return
+
+    from xpostmaps.parsers.metadata_parser import parse_p190_metadata
+    from xpostmaps.core.preplot_catalog_utils import build_preplot_catalog
+
+    metadata = parse_p190_metadata(path)
+    assert metadata.get("epsg code") == "2193"
+    assert metadata.get("projection", "").upper().find("TRANSVERSE MERCATOR") >= 0
+    assert metadata.get("projection zone", "").strip() == ""
+
+    catalog = build_preplot_catalog([path])
+    assert len(catalog) == 1
+    assert catalog[0].crs_code == "2193"
+
+
+def test_10221_p190_receiver_feathers_parse_all_streamers() -> None:
+    from xpostmaps.parsers.p111_parser import (
+        average_receiver_feathers_by_shotpoint,
+        parse_p190_receiver_feathers,
+    )
+
+    source = Path("4D/10221/P1/70.1065P1A-070.a070.p190")
+    navplan = Path("4D/10221/Navplan/1065P1.p190")
+    if not source.is_file() or not navplan.is_file():
+        return
+
+    source_records = parse_p190_receiver_feathers(source)
+    assert source_records, "expected per-streamer feather records from P190 source"
+    # 8-streamer survey: each shotpoint should yield 8 streamer feathers.
+    from collections import Counter
+
+    per_shot = Counter(record.shotpoint for record in source_records)
+    assert max(per_shot.values()) == 8
+    source_avg = average_receiver_feathers_by_shotpoint(source_records)
+    assert 1300 in source_avg
+    assert -45.0 < source_avg[1300] < 45.0
+
+    navplan_avg = average_receiver_feathers_by_shotpoint(
+        parse_p190_receiver_feathers(navplan)
+    )
+    assert navplan_avg, "expected navplan feather records from P190 navplan"
+    assert 1300 in navplan_avg
+
+
+def test_p190_feather_dispatch_returns_values_with_sequence_fallback() -> None:
+    from xpostmaps.core.postplot_4d_diff import _receiver_feathers_for_path
+
+    source = Path("4D/10221/P1/70.1065P1A-070.a070.p190")
+    if not source.is_file():
+        return
+    # A non-matching sequence group must not wipe out single-line P190 feathers.
+    feathers = _receiver_feathers_for_path(
+        source, sequence_group="does|not|match", subline=""
+    )
+    assert feathers
+    assert 1300 in feathers
+
+
+def test_navplan_feather_survives_subline_mismatch() -> None:
+    from xpostmaps.core.postplot_4d_diff import _receiver_feathers_for_path
+
+    navplan = Path("4D/10221/Navplan/1065P1.p190")
+    if not navplan.is_file():
+        return
+    # The navplan carries its own subline ("1"); the acquired line's subline
+    # ("a070") must not empty the navplan feather column.
+    feathers = _receiver_feathers_for_path(
+        navplan, line_name="1065P1A-070", subline="a070"
+    )
+    assert feathers
+    assert 1300 in feathers
+
+
+def test_4030_preplot_crs_resolves_to_ed50_utm31n() -> None:
+    path = Path("4D/4030/Preplot/4030_Mariner4D_Preplots_v2.190")
+    if not path.is_file():
+        return
+    from xpostmaps.core.preplot_catalog_utils import build_preplot_catalog
+    from xpostmaps.parsers.metadata_parser import parse_p190_metadata
+
+    metadata = parse_p190_metadata(path)
+    assert metadata.get("epsg code") == "23031"
+    catalog = build_preplot_catalog([path])
+    assert catalog and catalog[0].crs_code == "23031"
+
+
+def test_7027_preplot_crs_resolves_to_wgs84_utm21n() -> None:
+    path = Path("4D/7027/Preplot/7027_S_TRINAV_v2.p190")
+    if not path.is_file():
+        return
+    from xpostmaps.core.preplot_catalog_utils import build_preplot_catalog
+    from xpostmaps.parsers.metadata_parser import (
+        _p190_grid_parameters,
+        parse_p190_metadata,
+    )
+
+    metadata = parse_p190_metadata(path)
+    assert metadata.get("epsg code") == "32621"
+    # Packed-DMS central meridian (0570000.000W) must parse to -57.0 degrees.
+    central_meridian, _, _, _ = _p190_grid_parameters(metadata)
+    assert central_meridian is not None
+    assert abs(central_meridian - (-57.0)) < 1e-6
+    catalog = build_preplot_catalog([path])
+    assert catalog and catalog[0].crs_code == "32621"
+
+
+def test_parse_central_meridian_accepts_dms_and_packed_formats() -> None:
+    from xpostmaps.parsers.metadata_parser import _parse_p190_central_meridian_deg
+
+    assert _parse_p190_central_meridian_deg("173 0 0.000E") == 173.0
+    assert _parse_p190_central_meridian_deg("  3 0 0.000E") == 3.0
+    assert _parse_p190_central_meridian_deg("0570000.000W") == -57.0
+    assert _parse_p190_central_meridian_deg("57.0W") == -57.0
+    assert _parse_p190_central_meridian_deg("-57.0") == -57.0
+    assert _parse_p190_central_meridian_deg("") is None
+
+
+def test_grid_parameter_resolver_handles_common_tm_grids() -> None:
+    from xpostmaps.core.crs_utils import epsg_from_grid_parameters, pyproj_available
+
+    if not pyproj_available():
+        return
+    # British National Grid (OSGB36 / TM).
+    assert (
+        epsg_from_grid_parameters("OSGB36", -2.0, 400000.0, -100000.0, 0.9996012717, 49.0)
+        == "27700"
+    )
+    # GDA94 / MGA zone 55.
+    assert (
+        epsg_from_grid_parameters("GDA94", 147.0, 500000.0, 10000000.0, 0.9996)
+        == "28355"
+    )
+
+
 def test_navplan_header_infers_epsg_from_datum_projection_zone() -> None:
     from xpostmaps.parsers.metadata_parser import parse_file_metadata
 
@@ -586,6 +778,27 @@ def test_navplan_header_infers_epsg_from_datum_projection_zone() -> None:
     assert metadata.get("projection") == "001 U.T.M. NORTHERN HEMISPHERE"
     assert metadata.get("projection zone") == "31N"
     assert metadata.get("epsg code") == "23031"
+
+
+def test_navplan_header_line_direction_from_h2600() -> None:
+    from xpostmaps.core.navplan_catalog_utils import build_navplan_catalog
+    from xpostmaps.parsers.metadata_parser import parse_file_metadata
+
+    path = Path("4D/4030/Navplans/Priority1/0103643A.navplan")
+    if not path.is_file():
+        return
+
+    metadata = parse_file_metadata(path)
+    assert metadata.get("line direction") == "123.10°"
+
+    catalog = build_navplan_catalog([path])
+    assert len(catalog) == 1
+    assert catalog[0].line_direction == "123.10°"
+
+    reverse_path = Path("4D/4030/Navplans/Priority2/0122936A.navplan")
+    if reverse_path.is_file():
+        reverse_catalog = build_navplan_catalog([reverse_path])
+        assert reverse_catalog[0].line_direction == "303.10°"
 
 
 def test_infer_epsg_from_header_known_utm_families_without_pyproj() -> None:

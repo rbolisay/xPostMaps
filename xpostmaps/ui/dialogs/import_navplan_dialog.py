@@ -180,8 +180,9 @@ class ImportNavplanDialog:
                         entry.navplan_name or Path(entry.file_path).name
                     ),
                 )
+                table.setItem(row, 2, QTableWidgetItem(entry.line_direction or ""))
                 crs_text = epsg_label(entry.crs_code) if entry.crs_code else "Unknown"
-                table.setItem(row, 2, QTableWidgetItem(crs_text))
+                table.setItem(row, 3, QTableWidgetItem(crs_text))
             _fit_table(table)
             _set_table_viewport_rows(table, 8)
             folder_count = len(state["folders"])
@@ -302,8 +303,10 @@ class ImportNavplanDialog:
             layout.addWidget(summary)
 
             nonlocal table
-            table = QTableWidget(0, 3)
-            table.setHorizontalHeaderLabels(["Navplan No.", "Navplan Name", "CRS Code"])
+            table = QTableWidget(0, 4)
+            table.setHorizontalHeaderLabels(
+                ["Navplan No.", "Navplan Name", "Navplan Line Direction", "CRS Code"]
+            )
             _configure_table(table)
             layout.addWidget(table)
 

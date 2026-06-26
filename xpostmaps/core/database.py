@@ -266,6 +266,8 @@ class Database:
                 crossline_m REAL NOT NULL,
                 inline_m REAL NOT NULL,
                 radial_m REAL NOT NULL,
+                navplan_feather_deg REAL,
+                line_feather_deg REAL,
                 updated_at TEXT NOT NULL,
                 FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE,
                 UNIQUE(project_id, baseline_kind, sequence_id, shotpoint)
@@ -278,6 +280,18 @@ class Database:
                 ON postplot_4d_diffs(project_id)
             """
         )
+        diff_cols = {
+            row[1]
+            for row in self._conn.execute("PRAGMA table_info(postplot_4d_diffs)")
+        }
+        if "navplan_feather_deg" not in diff_cols:
+            self._conn.execute(
+                "ALTER TABLE postplot_4d_diffs ADD COLUMN navplan_feather_deg REAL"
+            )
+        if "line_feather_deg" not in diff_cols:
+            self._conn.execute(
+                "ALTER TABLE postplot_4d_diffs ADD COLUMN line_feather_deg REAL"
+            )
         self._conn.execute(
             """
             CREATE TABLE IF NOT EXISTS postplot_4d_preplot_shotpoints (
@@ -1098,8 +1112,9 @@ class Database:
                 project_id, baseline_kind, baseline_name, sequence_id, shotpoint,
                 baseline_x, baseline_y, baseline_latitude, baseline_longitude,
                 source_x, source_y, source_latitude, source_longitude,
-                crossline_m, inline_m, radial_m, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                crossline_m, inline_m, radial_m,
+                navplan_feather_deg, line_feather_deg, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             [
                 (
@@ -1119,6 +1134,8 @@ class Database:
                     row.crossline_m,
                     row.inline_m,
                     row.radial_m,
+                    row.navplan_feather_deg,
+                    row.line_feather_deg,
                     now,
                 )
                 for row in rows
@@ -1139,7 +1156,8 @@ class Database:
             """
             SELECT shotpoint, baseline_x, baseline_y, baseline_latitude, baseline_longitude,
                    source_x, source_y, source_latitude, source_longitude,
-                   crossline_m, inline_m, radial_m
+                   crossline_m, inline_m, radial_m,
+                   navplan_feather_deg, line_feather_deg
             FROM postplot_4d_diffs
             WHERE project_id=? AND baseline_kind=? AND sequence_id=?
             ORDER BY shotpoint
@@ -1161,6 +1179,8 @@ class Database:
                     "crossline_m": row["crossline_m"],
                     "inline_m": row["inline_m"],
                     "radial_m": row["radial_m"],
+                    "navplan_feather_deg": row["navplan_feather_deg"],
+                    "line_feather_deg": row["line_feather_deg"],
                 }
             )
             for row in rows

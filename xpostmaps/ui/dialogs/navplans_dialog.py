@@ -129,6 +129,7 @@ class NavplansDialog:
                     columns = [
                         (str(entry.navplan_number), float(entry.navplan_number)),
                         (navplan_name, _text_sort_key(navplan_name)),
+                        (entry.line_direction or "", _text_sort_key(entry.line_direction or "")),
                         (str(entry.fsp or ""), float(entry.fsp or 0)),
                         (str(entry.lsp or ""), float(entry.lsp or 0)),
                     ]
@@ -144,10 +145,10 @@ class NavplansDialog:
                         _assignment_sort_key(assigned),
                         source_index,
                     )
-                    table.setItem(row, 4, sort_item)
+                    table.setItem(row, 5, sort_item)
                     table.setCellWidget(
                         row,
-                        4,
+                        5,
                         _assignment_combo(assigned, sort_item, source_index),
                     )
                 table.setSortingEnabled(was_sorting or True)
@@ -164,17 +165,17 @@ class NavplansDialog:
                     if source_index is None:
                         continue
                     sid = int(source_index)
-                    sort_item = table.item(row, 4)
+                    sort_item = table.item(row, 5)
                     if not isinstance(sort_item, _SortableTableWidgetItem):
                         continue
                     assigned = pending_assignments.get(sid, "")
-                    existing = table.cellWidget(row, 4)
+                    existing = table.cellWidget(row, 5)
                     if isinstance(existing, QComboBox):
                         assigned = str(existing.currentData() or "")
-                    table.removeCellWidget(row, 4)
+                    table.removeCellWidget(row, 5)
                     table.setCellWidget(
                         row,
-                        4,
+                        5,
                         _assignment_combo(assigned, sort_item, sid),
                     )
 
@@ -190,7 +191,7 @@ class NavplansDialog:
                     source_index = id_item.data(Qt.ItemDataRole.UserRole)
                     if source_index is None:
                         continue
-                    combo = table.cellWidget(row, 4)
+                    combo = table.cellWidget(row, 5)
                     if not isinstance(combo, QComboBox):
                         continue
                     legend_name = str(combo.currentData() or "").strip()
@@ -203,8 +204,8 @@ class NavplansDialog:
                 if table is None:
                     return
                 for row in rows:
-                    combo = table.cellWidget(row, 4)
-                    sort_item = table.item(row, 4)
+                    combo = table.cellWidget(row, 5)
+                    sort_item = table.item(row, 5)
                     if not isinstance(combo, QComboBox) or not isinstance(
                         sort_item, _SortableTableWidgetItem
                     ):
@@ -245,11 +246,12 @@ class NavplansDialog:
                 )
                 menu.exec(table.viewport().mapToGlobal(pos))
 
-            table = QTableWidget(0, 5)
+            table = QTableWidget(0, 6)
             table.setHorizontalHeaderLabels(
                 [
                     "Navplan No.",
                     "Navplan Name",
+                    "Navplan Line Direction",
                     "FSP",
                     "LSP",
                     "Assigned Navplan Name",

@@ -91,6 +91,11 @@ def _format_line_direction(value: str) -> str:
         return ""
 
 
+def format_line_direction(value: str) -> str:
+    """Format a raw line-direction or heading value as degrees with suffix."""
+    return _format_line_direction(value)
+
+
 def _is_linename_subline_key(key: str) -> bool:
     return "line" in key and "name" in key and "subline" in key
 

@@ -86,6 +86,7 @@ class PreplotCatalogEntry:
 class NavplanCatalogEntry:
     navplan_number: int = 0
     navplan_name: str = ""
+    line_direction: str = ""
     file_path: str = ""
     crs_code: str = ""
     fsp: int = 0
