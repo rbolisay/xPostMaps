@@ -142,6 +142,61 @@ def scan_vessel_id(path: Path, scan_limit: int = 2000) -> str | None:
     return None
 
 
+def scan_projected_axis_order(path: Path, scan_limit: int = 2000) -> tuple[str, str] | None:
+    """Return projected coordinate axis order, e.g. ("northing", "easting")."""
+    axes_by_crs: dict[str, dict[int, str]] = {}
+    try:
+        with path.open("r", encoding="utf-8", errors="replace") as handle:
+            for i, line in enumerate(handle):
+                if i >= scan_limit:
+                    break
+                stripped = line.strip()
+                if stripped.startswith(("S1,", "P1,", "R1,")):
+                    break
+                if not stripped.startswith("HC,1,6,1,"):
+                    continue
+                fields = [field.strip() for field in stripped.split(",")]
+                if len(fields) < 9:
+                    continue
+                label = _field(fields, 4).lower()
+                if "coordinate system axis" not in label:
+                    continue
+                crs_number = _field(fields, 5)
+                try:
+                    axis_number = int(_field(fields, 6))
+                except ValueError:
+                    continue
+                axis_name = _field(fields, 8).lower()
+                if "easting" in axis_name:
+                    axis = "easting"
+                elif "northing" in axis_name:
+                    axis = "northing"
+                else:
+                    continue
+                axes_by_crs.setdefault(crs_number, {})[axis_number] = axis
+    except OSError:
+        return None
+
+    for axes in axes_by_crs.values():
+        ordered = tuple(axes[index] for index in sorted(axes))
+        if set(ordered) == {"easting", "northing"} and len(ordered) >= 2:
+            return ordered[:2]
+    return None
+
+
+def _projected_xy_from_fields(
+    fields: list[str],
+    first_coord_index: int,
+    second_coord_index: int,
+    axis_order: tuple[str, str] | None,
+) -> tuple[float, float]:
+    first = _parse_float(_field(fields, first_coord_index))
+    second = _parse_float(_field(fields, second_coord_index))
+    if axis_order == ("northing", "easting"):
+        return second, first
+    return first, second
+
+
 def _parse_legacy_line(
     line: str,
     file_name: str,
@@ -183,6 +238,7 @@ def parse_p111_file(path: Path, vessel_id: str | None = None) -> list[PositionRe
     if vessel_id is None:
         vessel_id = scan_vessel_id(path)
     gun_codes = scan_gun_array_codes(path)
+    axis_order = scan_projected_axis_order(path)
 
     current_sequence = "N/A"
     current_line_name = "N/A"
@@ -265,8 +321,12 @@ def parse_p111_file(path: Path, vessel_id: str | None = None) -> list[PositionRe
                 if not firing_code or point_num <= 0:
                     continue
 
-                x = _parse_float(_field(fields, S1_REC_EASTING_IDX))
-                y = _parse_float(_field(fields, S1_REC_NORTHING_IDX))
+                x, y = _projected_xy_from_fields(
+                    fields,
+                    S1_REC_EASTING_IDX,
+                    S1_REC_NORTHING_IDX,
+                    axis_order,
+                )
                 if not (x == x and y == y):
                     continue
 
@@ -296,8 +356,12 @@ def parse_p111_file(path: Path, vessel_id: str | None = None) -> list[PositionRe
                     and point_num == pending_firing.point_num
                     and device_id == pending_firing.firing_code
                 ):
-                    x = _parse_float(_field(fields, P_REC_EASTING_IDX))
-                    y = _parse_float(_field(fields, P_REC_NORTHING_IDX))
+                    x, y = _projected_xy_from_fields(
+                        fields,
+                        P_REC_EASTING_IDX,
+                        P_REC_NORTHING_IDX,
+                        axis_order,
+                    )
                     if x == x and y == y:
                         pending_firing.x = x
                         pending_firing.y = y
@@ -311,8 +375,12 @@ def parse_p111_file(path: Path, vessel_id: str | None = None) -> list[PositionRe
                 if not vessel_id or device_id != vessel_id:
                     continue
 
-                x = _parse_float(_field(fields, P_REC_EASTING_IDX))
-                y = _parse_float(_field(fields, P_REC_NORTHING_IDX))
+                x, y = _projected_xy_from_fields(
+                    fields,
+                    P_REC_EASTING_IDX,
+                    P_REC_NORTHING_IDX,
+                    axis_order,
+                )
                 if not (x == x and y == y):
                     continue
                 records.append(

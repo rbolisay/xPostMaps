@@ -472,12 +472,12 @@ class MainWindow(QMainWindow):
         abs_value = abs(float(value))
         normalized = text.replace("–", "-").replace("—", "-")
         try:
-            if normalized.startswith("<="):
+            if normalized.startswith("<=") or normalized.startswith("=<"):
                 return abs_value <= float(normalized[2:])
+            if normalized.startswith(">=") or normalized.startswith("=>"):
+                return abs_value >= float(normalized[2:])
             if normalized.startswith("<"):
                 return abs_value < float(normalized[1:])
-            if normalized.startswith(">="):
-                return abs_value >= float(normalized[2:])
             if normalized.startswith(">"):
                 return abs_value > float(normalized[1:])
             if "-" in normalized:

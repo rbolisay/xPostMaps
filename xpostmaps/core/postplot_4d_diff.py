@@ -27,7 +27,8 @@ from xpostmaps.parsers.p190_parser import parse_p190_header
 from xpostmaps.parsers.preplot_parser import parse_navplan_source_file, parse_preplot_file
 from xpostmaps.core.crs_utils import WGS84_EPSG, normalize_epsg, transform_coordinates
 
-_AZIMUTH_RE = re.compile(r"-?\d+(?:\.\d+)?")
+_NUMBER_RE = re.compile(r"[-+]?(?:\d+(?:\.\d*)?|\.\d+)(?:[Ee][-+]?\d+)?")
+_AZIMUTH_RE = _NUMBER_RE
 _SHOTPOINT_INTERVAL_RE = re.compile(
     r"(?:(?:SHOT\s*POINT|SHOTPOINT|SHOT)\s*(?:INTERVAL|INT|SPACING)|SP\s*(?:INTERVAL|INT))"
     r"[^0-9+\-]*(?P<value>[-+]?\d+(?:\.\d+)?)",
@@ -41,6 +42,11 @@ _SOURCE_SEPARATION_RE = re.compile(
     r"SOURCE\s+SEPARATION[^0-9+\-]*(?P<value>[-+]?\d+(?:\.\d+)?)",
     re.IGNORECASE,
 )
+_P190_SOURCE_OFFSET_RE = re.compile(
+    r"OFFSET\s+REF\.?\s+TO\s+SOURCE\s*(?P<source>[A-Za-z0-9_-]+)?(?P<rest>.*)",
+    re.IGNORECASE,
+)
+_P111_GUN_ARRAY_RE = re.compile(r"\bGUN\s+ARRAY\s+(?P<source>[A-Za-z0-9_-]+)\b", re.IGNORECASE)
 _PREPLOT_DIRECTION_RE = re.compile(
     r"(?:LINE[-\s_]*DIRECTION|LINE\s*HEADING|HEADING|AZIMUTH|BEARING|ROTATION)",
     re.IGNORECASE,
@@ -67,6 +73,7 @@ class PreplotHeaderInfo:
     line_direction: str = ""
     number_of_sources: int = 1
     source_separation_m: float | None = None
+    source_offsets_m: tuple[float, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -98,9 +105,24 @@ def _parse_azimuth_degrees(line_direction: str) -> float | None:
         return None
 
 
+def _parse_hc_parameter_value(text: str) -> float | None:
+    fields = [field.strip() for field in (text or "").split(",")]
+    if len(fields) <= 7 or fields[0] != "HC":
+        return None
+    try:
+        return float(fields[7])
+    except ValueError:
+        return None
+
+
 def parse_shotpoint_interval_m(text: str) -> float | None:
     """Parse P111/P190 shotpoint interval headers such as CC/H2600 variants."""
-    match = _SHOTPOINT_INTERVAL_RE.search((text or "").replace(",", " "))
+    normalized = (text or "").replace(",", " ").replace("_", " ")
+    if "shot point interval" in normalized.lower():
+        hc_value = _parse_hc_parameter_value(text)
+        if hc_value is not None:
+            return hc_value if hc_value > 0 else None
+    match = _SHOTPOINT_INTERVAL_RE.search(normalized)
     if not match:
         return None
     try:
@@ -132,11 +154,70 @@ def parse_source_separation_m(text: str) -> float | None:
     return value if value >= 0 else None
 
 
+def _source_offsets_tuple(offsets_by_index: dict[int, float]) -> tuple[float, ...]:
+    if not offsets_by_index:
+        return ()
+    max_index = max(offsets_by_index)
+    if max_index <= 0:
+        return ()
+    if any(index not in offsets_by_index for index in range(1, max_index + 1)):
+        return ()
+    return tuple(offsets_by_index[index] for index in range(1, max_index + 1))
+
+
+def parse_p190_source_offset_m(text: str) -> tuple[int, float] | None:
+    """Parse P190 ``H0900 OFFSET REF. TO SOURCE`` crossline offset rows."""
+    match = _P190_SOURCE_OFFSET_RE.search(text or "")
+    if not match:
+        return None
+    source_index = _source_index_from_id(match.group("source") or "")
+    if source_index is None:
+        return None
+    values = [float(value) for value in _NUMBER_RE.findall(match.group("rest"))]
+    # The final two numeric values are crossline/inline offsets; e.g.
+    # ``... SOURCE 1  1  1  37.5  0`` -> crossline +37.5 m.
+    if len(values) < 2:
+        return None
+    return source_index, values[-2]
+
+
+def parse_p111_gun_array_offset_m(text: str) -> tuple[int, float] | None:
+    """Parse P111 ``HC,2,3,0,Gun Array`` crossline offset rows."""
+    if not (text or "").lstrip().upper().startswith("HC,2,3,0,"):
+        return None
+    fields = [field.strip() for field in text.split(",")]
+    object_type = fields[8].lower().replace("-", " ") if len(fields) > 8 else ""
+    if len(fields) < 9 or "air gun array" not in object_type:
+        return None
+    label_match = _P111_GUN_ARRAY_RE.search(fields[4])
+    if label_match:
+        source_index = _source_index_from_id(label_match.group("source"))
+    else:
+        source_index = None
+    source_index = source_index or _source_index_from_id(fields[6])
+    numeric_values: list[float] = []
+    for field in fields[9:]:
+        try:
+            numeric_values.append(float(field))
+        except ValueError:
+            # The numeric block is contiguous; labels such as ``COS`` or
+            # ``Centre of Source`` mark the end of the coordinate offsets.
+            if numeric_values:
+                break
+            continue
+    # After the object type, P111 gun arrays list scale then crossline/inline
+    # offsets: ``...,100,37.5,0,0,...``.
+    if source_index is None or source_index <= 0 or len(numeric_values) < 2:
+        return None
+    return source_index, numeric_values[1]
+
+
 def _read_preplot_generation_info(path: Path) -> PreplotHeaderInfo:
     interval: float | None = None
     line_direction = ""
     number_of_sources = 1
     source_separation_m: float | None = None
+    source_offsets_by_index: dict[int, float] = {}
     try:
         handle = path.open("r", encoding="utf-8", errors="replace")
     except OSError:
@@ -155,27 +236,25 @@ def _read_preplot_generation_info(path: Path) -> PreplotHeaderInfo:
                 number_of_sources = parsed_sources
             if source_separation_m is None:
                 source_separation_m = parse_source_separation_m(line)
-            if line.startswith("HC,"):
-                if interval is not None or source_separation_m is not None:
-                    continue
-                continue
+            source_offset = parse_p190_source_offset_m(line) or parse_p111_gun_array_offset_m(line)
+            if source_offset is not None:
+                source_index, offset_m = source_offset
+                source_offsets_by_index[source_index] = offset_m
+                number_of_sources = max(number_of_sources, source_index)
             direction_match = _PREPLOT_DIRECTION_RE.search(line)
             if not line_direction and direction_match:
-                parsed = _parse_azimuth_degrees(line[direction_match.end() :])
+                parsed = _parse_hc_parameter_value(line)
+                if parsed is None:
+                    parsed = _parse_azimuth_degrees(line[direction_match.end() :])
                 if parsed is not None:
                     line_direction = f"{parsed:.2f}°"
-            if (
-                interval is not None
-                and line_direction
-                and number_of_sources > 0
-                and (number_of_sources == 1 or source_separation_m is not None)
-            ):
-                break
+    source_offsets_m = _source_offsets_tuple(source_offsets_by_index)
     return PreplotHeaderInfo(
         shotpoint_interval_m=interval,
         line_direction=line_direction,
         number_of_sources=number_of_sources,
         source_separation_m=source_separation_m,
+        source_offsets_m=source_offsets_m,
     )
 
 
@@ -302,9 +381,86 @@ def _baseline_key(point: BaselineShotpoint) -> BaselineKey:
     return point.shotpoint
 
 
+def _source_key_index(key: BaselineKey) -> int | None:
+    if not isinstance(key, tuple) or len(key) != 2:
+        return None
+    return _source_index_from_id(str(key[1]))
+
+
+def _baseline_source_count(baseline: dict[BaselineKey, BaselineShotpoint]) -> int:
+    indices = [
+        index
+        for key in baseline
+        if (index := _source_key_index(key)) is not None
+    ]
+    return max(indices, default=0)
+
+
+def _source_lookup_reversed(
+    baseline: dict[BaselineKey, BaselineShotpoint],
+    azimuth_deg: float,
+) -> bool:
+    """Return True when cached preplot source sides oppose the firing direction."""
+    source_count = _baseline_source_count(baseline)
+    if source_count <= 1:
+        return False
+
+    grouped: dict[int, list[tuple[int, BaselineShotpoint]]] = defaultdict(list)
+    for key, point in baseline.items():
+        index = _source_key_index(key)
+        if index is not None:
+            grouped[point.shotpoint].append((index, point))
+
+    for points in grouped.values():
+        if len(points) < source_count:
+            continue
+        by_index = {index: point for index, point in points}
+        first = by_index.get(1)
+        if first is None:
+            continue
+        center_x = sum(point.x for point in by_index.values()) / len(by_index)
+        center_y = sum(point.y for point in by_index.values()) / len(by_index)
+        _inline, crossline, _radial = _offset_components(
+            first.x - center_x,
+            first.y - center_y,
+            azimuth_deg,
+        )
+        if abs(crossline) > 1e-6:
+            return crossline < 0.0
+    return False
+
+
+def _remap_source_key_for_direction(
+    source_key: str,
+    source_count: int,
+    reverse_sources: bool,
+) -> str:
+    if not reverse_sources or source_count <= 1:
+        return source_key
+    source_index = _source_index_from_id(source_key)
+    if source_index is None or source_index < 1 or source_index > source_count:
+        return source_key
+    return str(source_count + 1 - source_index)
+
+
 def _source_crossline_offset_m(source_index: int, source_count: int, separation_m: float) -> float:
     center_index = (source_count + 1) / 2.0
     return (center_index - source_index) * separation_m
+
+
+def _source_offsets_match_spacing(
+    source_offsets_m: tuple[float, ...],
+    source_separation_m: float | None,
+) -> bool:
+    if not source_offsets_m:
+        return True
+    if source_separation_m is None:
+        return False
+    return all(
+        abs(offset - _source_crossline_offset_m(index, len(source_offsets_m), source_separation_m))
+        < 1e-6
+        for index, offset in enumerate(source_offsets_m, start=1)
+    )
 
 
 def _apply_crossline_offset(
@@ -498,6 +654,7 @@ def _generate_preplot_shotpoints(
     source_count: int = 1,
     source_separation_m: float | None = None,
     line_azimuth_deg: float | None = None,
+    source_offsets_m: tuple[float, ...] = (),
 ) -> dict[BaselineKey, BaselineShotpoint]:
     ordered = sorted(
         [record for record in controls if record.point_num > 0],
@@ -506,7 +663,8 @@ def _generate_preplot_shotpoints(
     generated: dict[BaselineKey, BaselineShotpoint] = {}
     if len(ordered) < 2:
         return generated
-    source_count = max(1, int(source_count or 1))
+    source_offsets_m = tuple(float(offset) for offset in source_offsets_m)
+    source_count = max(1, len(source_offsets_m) or int(source_count or 1))
     source_separation_m = float(source_separation_m or 0.0)
     for start, end in zip(ordered, ordered[1:]):
         sp0 = int(start.point_num)
@@ -533,11 +691,14 @@ def _generate_preplot_shotpoints(
                 )
                 continue
             for source_index in range(1, source_count + 1):
-                offset = _source_crossline_offset_m(
-                    source_index,
-                    source_count,
-                    source_separation_m,
-                )
+                if source_offsets_m:
+                    offset = source_offsets_m[source_index - 1]
+                else:
+                    offset = _source_crossline_offset_m(
+                        source_index,
+                        source_count,
+                        source_separation_m,
+                    )
                 x, y = _apply_crossline_offset(center_x, center_y, offset, azimuth)
                 source_id = _source_id_for_index(source_index)
                 point = BaselineShotpoint(
@@ -563,18 +724,26 @@ def _generated_preplot_baseline(
 ) -> dict[BaselineKey, BaselineShotpoint]:
     file_path, file_mtime, file_size = _file_fingerprint(path)
     line_name = controls[0].line_name or baseline_name
-    if database is not None and project_name.strip():
-        cached = database.load_postplot_4d_preplot_shotpoints(
-            project_name.strip(),
-            file_path,
-            line_name,
-            file_mtime,
-            file_size,
-        )
-        if cached:
-            return {_baseline_key(point): point for point in cached}
-
     header_info = _read_preplot_generation_info(path)
+    if database is not None and project_name.strip():
+        # Existing cache rows only record source_count/source_separation, not
+        # the explicit per-source offsets from H0900/HC Gun Array rows. Reuse
+        # cache when the explicit offsets match the spacing formula; otherwise
+        # regenerate so non-uniform future preplots are not silently wrong.
+        if _source_offsets_match_spacing(
+            header_info.source_offsets_m,
+            header_info.source_separation_m,
+        ):
+            cached = database.load_postplot_4d_preplot_shotpoints(
+                project_name.strip(),
+                file_path,
+                line_name,
+                file_mtime,
+                file_size,
+            )
+            if cached:
+                return {_baseline_key(point): point for point in cached}
+
     if header_info.shotpoint_interval_m is None:
         return {}
     header_azimuth = _parse_azimuth_degrees(header_info.line_direction)
@@ -584,6 +753,7 @@ def _generated_preplot_baseline(
         source_count=header_info.number_of_sources,
         source_separation_m=header_info.source_separation_m,
         line_azimuth_deg=header_azimuth,
+        source_offsets_m=header_info.source_offsets_m,
     )
     if not generated:
         return {}
@@ -815,12 +985,17 @@ def compute_postplot_4d_diff_rows(
         return []
 
     azimuth = resolve_line_azimuth_degrees(line_direction, baseline, baseline_path)
+    source_count = _baseline_source_count(baseline)
+    reverse_sources = _source_lookup_reversed(baseline, azimuth)
 
     rows: list[Postplot4DDiffRow] = []
     for shotpoint in sorted(sources):
         source = sources[shotpoint]
         source_key = _source_key(source.source_id)
-        base = baseline.get((shotpoint, source_key))
+        lookup_key = _remap_source_key_for_direction(source_key, source_count, reverse_sources)
+        base = baseline.get((shotpoint, lookup_key))
+        if base is None and lookup_key != source_key:
+            base = baseline.get((shotpoint, source_key))
         if base is None:
             base = baseline.get(shotpoint)
         if base is None:

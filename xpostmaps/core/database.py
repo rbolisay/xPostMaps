@@ -1186,6 +1186,25 @@ class Database:
         ).fetchone()
         return row is not None
 
+    def postplot_4d_diffs_updated_at(
+        self,
+        project_name: str,
+        baseline_kind: str,
+        sequence_id: str,
+    ) -> str:
+        project_id = self.get_project_id(project_name)
+        if project_id is None:
+            return ""
+        row = self._conn.execute(
+            """
+            SELECT MAX(updated_at) AS updated_at
+            FROM postplot_4d_diffs
+            WHERE project_id=? AND baseline_kind=? AND sequence_id=?
+            """,
+            (project_id, baseline_kind, sequence_id),
+        ).fetchone()
+        return str(row["updated_at"] or "") if row else ""
+
     def delete_postplot_4d_diffs_for_files(
         self,
         project_name: str,

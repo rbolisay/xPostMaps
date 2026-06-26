@@ -114,6 +114,54 @@ def _widget_content_width(widget) -> int:
     )
 
 
+_DIFF_STAT_LABELS = ("Crossline", "Inline", "Radial")
+_DIFF_STAT_COMBO_VIEW_STYLE = """
+QListView {
+    background: #172235;
+    color: #e6edf3;
+    border: 1px solid #3b4a5f;
+    selection-background-color: #3b82f6;
+    selection-color: #ffffff;
+    outline: 0;
+}
+QListView::item {
+    min-height: 24px;
+    padding: 4px 8px;
+    color: #e6edf3;
+}
+QListView::item:selected {
+    background: #3b82f6;
+    color: #ffffff;
+}
+"""
+
+
+class _DiffStatComboBox(QComboBox):
+    """Combo whose popup is tall enough to show every diff-stat option."""
+
+    def __init__(self, parent=None) -> None:
+        super().__init__(parent)
+        self.addItems(list(_DIFF_STAT_LABELS))
+        self.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToContents)
+        self.setMaxVisibleItems(self.count())
+        view = self.view()
+        view.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        view.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        view.setMinimumWidth(
+            max(self.fontMetrics().horizontalAdvance(label) + 40 for label in _DIFF_STAT_LABELS)
+        )
+        view.setStyleSheet(_DIFF_STAT_COMBO_VIEW_STYLE)
+
+    def showPopup(self) -> None:
+        view = self.view()
+        count = self.count()
+        if count > 0:
+            self.setMaxVisibleItems(count)
+            row_h = max(max(view.sizeHintForRow(i), 28) for i in range(count))
+            view.setFixedHeight(count * row_h + 2 * view.frameWidth())
+        super().showPopup()
+
+
 def _table_name_edit(text: str = "") -> QLineEdit:
     edit = QLineEdit(text)
     edit.setSizePolicy(QSizePolicy.Policy.Minimum, QSizePolicy.Policy.Fixed)
@@ -1204,43 +1252,7 @@ class LegendDialog:
                         rule_row = cond_table.rowCount()
                         cond_table.insertRow(rule_row)
 
-                        stat_combo = QComboBox()
-                        stat_combo.addItems(["Crossline", "Inline", "Radial"])
-                        stat_combo.setSizeAdjustPolicy(
-                            QComboBox.SizeAdjustPolicy.AdjustToContents
-                        )
-                        stat_combo.setMaxVisibleItems(stat_combo.count())
-                        stat_view = stat_combo.view()
-                        stat_view.setMinimumWidth(
-                            max(
-                                stat_combo.fontMetrics().horizontalAdvance(label) + 40
-                                for label in ("Crossline", "Inline", "Radial")
-                            )
-                        )
-                        stat_view.setMinimumHeight(
-                            stat_combo.fontMetrics().height() * stat_combo.count() + 18
-                        )
-                        stat_view.setStyleSheet(
-                            """
-                            QListView {
-                                background: #172235;
-                                color: #e6edf3;
-                                border: 1px solid #3b4a5f;
-                                selection-background-color: #3b82f6;
-                                selection-color: #ffffff;
-                                outline: 0;
-                            }
-                            QListView::item {
-                                min-height: 24px;
-                                padding: 4px 8px;
-                                color: #e6edf3;
-                            }
-                            QListView::item:selected {
-                                background: #3b82f6;
-                                color: #ffffff;
-                            }
-                            """
-                        )
+                        stat_combo = _DiffStatComboBox()
                         current = (rule.diff_stat if rule else "radial").lower()
                         stat_combo.setCurrentIndex(
                             {"crossline": 0, "inline": 1, "radial": 2}.get(current, 2)
@@ -1248,7 +1260,7 @@ class LegendDialog:
                         cond_table.setCellWidget(rule_row, 0, stat_combo)
 
                         range_edit = QLineEdit(rule.range_value if rule else "")
-                        range_edit.setPlaceholderText("e.g. <3, 0-3, >3")
+                        range_edit.setPlaceholderText("e.g. <3, 0-3, =>3")
                         cond_table.setCellWidget(rule_row, 1, range_edit)
 
                         color_btn = ColorButton(

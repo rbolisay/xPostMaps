@@ -5,6 +5,7 @@ from __future__ import annotations
 import re
 import time
 from datetime import datetime
+from pathlib import Path
 from typing import Callable, Literal
 
 from PySide6.QtCore import Qt, QTimer
@@ -14,6 +15,7 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QHeaderView,
     QLabel,
+    QMessageBox,
     QPushButton,
     QStackedWidget,
     QTableWidget,
@@ -23,6 +25,7 @@ from PySide6.QtWidgets import (
 )
 
 from xpostmaps.core.coord_format import GeoDisplayFormatter, format_geo_display
+from xpostmaps.core.crs_utils import normalize_epsg
 from xpostmaps.core.database import Database
 from xpostmaps.core.models import MapData, PositionRecord, ProjectSettings
 from xpostmaps.core.postplot_4d_diff import (
@@ -35,6 +38,7 @@ from xpostmaps.core.postplot_4d_matching import (
     Postplot4DMatchRow,
     build_postplot_4d_rows,
 )
+from xpostmaps.parsers.metadata_parser import parse_file_metadata
 from xpostmaps.ui.dialogs.base_dialog import SingleInstanceDialog
 
 CoordMode = Literal["en", "lat"]
@@ -239,8 +243,11 @@ class Postplot4DDialog:
             "sort_order": Qt.SortOrder.AscendingOrder,
         }
         row_cache: dict[BaselineKind, list[Postplot4DMatchRow]] = {}
+        crs_cache: dict[str, str] = {}
         diff_rows: list[Postplot4DDiffRow] = []
         host_dialog: SingleInstanceDialog | None = None
+        crs_note: QLabel | None = None
+        diff_crs_note: QLabel | None = None
 
         def current_map_data() -> MapData | None:
             if map_data_provider is not None:
@@ -261,6 +268,123 @@ class Postplot4DDialog:
             if positions_provider is None:
                 return list(active_map_data.positions) if active_map_data else []
             return list(positions_provider())
+
+        def _parse_saved_at(value: str) -> datetime | None:
+            if not value:
+                return None
+            try:
+                return datetime.fromisoformat(value)
+            except ValueError:
+                return None
+
+        def _dependency_candidates(file_ref: str) -> list[Path]:
+            if not file_ref:
+                return []
+            active_map_data = current_map_data()
+            raw = Path(file_ref)
+            refs: list[str] = [
+                file_ref,
+                *(active_map_data.source_files if active_map_data else []),
+                *settings.nav_files,
+                *settings.preplot_files,
+                *settings.navplan_files,
+                *(entry.file_path for entry in settings.preplot_catalog),
+                *(entry.file_path for entry in settings.navplan_catalog),
+            ]
+            folders = [
+                settings.p111_p190_dir,
+                settings.preplots_dir,
+                settings.navplans_dir,
+            ]
+            candidates: list[Path] = [raw]
+            candidates.extend(Path(folder) / raw.name for folder in folders if folder)
+            target_name = raw.name
+            for ref in refs:
+                path = Path(ref)
+                if path.name == target_name:
+                    candidates.append(path)
+            seen: set[str] = set()
+            unique: list[Path] = []
+            for path in candidates:
+                key = str(path)
+                if key in seen:
+                    continue
+                seen.add(key)
+                unique.append(path)
+            return unique
+
+        def _resolve_existing_file(file_ref: str) -> Path | None:
+            for path in _dependency_candidates(file_ref):
+                if path.is_file():
+                    return path
+            return None
+
+        def _file_crs(path: Path | None) -> str:
+            if path is None:
+                return ""
+            key = str(path.resolve())
+            if key not in crs_cache:
+                try:
+                    metadata = parse_file_metadata(path)
+                except OSError:
+                    crs_cache[key] = ""
+                else:
+                    crs_cache[key] = normalize_epsg(metadata.get("epsg code", ""))
+            return crs_cache[key]
+
+        def _crs_display(path: Path | None) -> str:
+            if path is None:
+                return "unknown file"
+            code = _file_crs(path)
+            return f"{path.name}: EPSG {code}" if code else f"{path.name}: CRS unknown"
+
+        def _source_file_for_match(match_row: Postplot4DMatchRow) -> Path | None:
+            source_file = match_row.sequence_id.split("|", 1)[0] if match_row.sequence_id else ""
+            return _resolve_existing_file(source_file)
+
+        def _baseline_file_for_match(match_row: Postplot4DMatchRow) -> Path | None:
+            return _resolve_existing_file(match_row.baseline_file_name)
+
+        def _crs_note_for_match(match_row: Postplot4DMatchRow | None) -> str:
+            diff_crs = str(state.get("map_epsg", "") or "")
+            diff_label = f"EPSG {diff_crs}" if diff_crs else "unknown CRS"
+            if match_row is None:
+                baseline_label = "select a Diff Stat row to see exact baseline file CRS"
+                source_label = "select a Diff Stat row to see exact P111/P190 CRS"
+            else:
+                baseline_name = "Preplot" if match_row.baseline_kind == "preplot" else "Navplan"
+                baseline_label = f"{baseline_name} {_crs_display(_baseline_file_for_match(match_row))}"
+                source_label = f"P111/P190 {_crs_display(_source_file_for_match(match_row))}"
+            return (
+                f"CRS in use: Diff/map {diff_label}  |  "
+                f"{baseline_label}  |  {source_label}"
+            )
+
+        def _file_newer_than_saved(path: Path | None, saved_at: datetime | None) -> bool:
+            if path is None or saved_at is None:
+                return False
+            try:
+                modified_at = datetime.fromtimestamp(path.stat().st_mtime, tz=saved_at.tzinfo)
+            except OSError:
+                return False
+            return modified_at > saved_at
+
+        def diff_needs_recalculate(match_row: Postplot4DMatchRow) -> bool:
+            if database is None or not project_name.strip():
+                return True
+            saved_at = _parse_saved_at(
+                database.postplot_4d_diffs_updated_at(
+                    project_name.strip(),
+                    match_row.baseline_kind,
+                    match_row.sequence_id,
+                )
+            )
+            if saved_at is None:
+                return True
+            return (
+                _file_newer_than_saved(_source_file_for_match(match_row), saved_at)
+                or _file_newer_than_saved(_baseline_file_for_match(match_row), saved_at)
+            )
 
         def persist_diff_rows(
             match_row: Postplot4DMatchRow,
@@ -304,15 +428,6 @@ class Postplot4DDialog:
             )
             persist_diff_rows(match_row, rows)
             return rows, "calculated"
-
-        def has_saved_diffs(match_row: Postplot4DMatchRow) -> bool:
-            if database is None or not project_name.strip():
-                return False
-            return database.has_postplot_4d_diffs(
-                project_name.strip(),
-                match_row.baseline_kind,
-                match_row.sequence_id,
-            )
 
         def refresh_diff_table() -> None:
             match_row = state["active_match"]
@@ -405,6 +520,8 @@ class Postplot4DDialog:
             state["active_match"] = match_row
             diff_rows, source = load_or_calculate_diffs(match_row)
             diff_title.setText(_diff_title(match_row))
+            if diff_crs_note is not None:
+                diff_crs_note.setText(_crs_note_for_match(match_row))
             refresh_diff_table()
             if source == "loaded":
                 summary = (
@@ -493,7 +610,7 @@ class Postplot4DDialog:
                 recalc_btn.setText("Recalculate Diffs")
                 QApplication.restoreOverrideCursor()
 
-        def recalculate_missing_diffs() -> None:
+        def recalculate_stale_diffs() -> None:
             nonlocal diff_rows
             active_baseline = state["baseline"]
             assert active_baseline in ("navplan", "preplot")
@@ -505,8 +622,8 @@ class Postplot4DDialog:
                 return
 
             bulk_recalc_btn.setEnabled(False)
-            _set_diff_summary(diff_summary, "Recalculating missing Diff Stat rows…", tone="busy")
-            summary.setText("Checking saved Diff Stat rows…")
+            _set_diff_summary(diff_summary, "Checking Diff Stat dependencies…", tone="busy")
+            summary.setText("Checking source and baseline file changes…")
             QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
             QApplication.processEvents()
 
@@ -517,7 +634,7 @@ class Postplot4DDialog:
             active_match = state["active_match"]
             try:
                 for index, match_row in enumerate(matched_rows, start=1):
-                    if has_saved_diffs(match_row):
+                    if not diff_needs_recalculate(match_row):
                         skipped += 1
                         continue
                     summary.setText(
@@ -546,8 +663,8 @@ class Postplot4DDialog:
                         failed += 1
                 elapsed = time.perf_counter() - started
                 message = (
-                    f"Diff Stat check complete: {recalculated} recalculated, "
-                    f"{skipped} already saved"
+                    f"Diff Stat update complete: {recalculated} recalculated, "
+                    f"{skipped} unchanged"
                     + (f", {failed} failed" if failed else "")
                     + f" ({elapsed:.1f} s)"
                 )
@@ -563,6 +680,40 @@ class Postplot4DDialog:
             finally:
                 bulk_recalc_btn.setEnabled(True)
                 QApplication.restoreOverrideCursor()
+
+        def clear_saved_diffs() -> None:
+            nonlocal diff_rows
+            active_baseline = state["baseline"]
+            assert active_baseline in ("navplan", "preplot")
+            if database is None or not project_name.strip():
+                summary.setText("No project database available to clear Diff Stat rows.")
+                return
+            reply = QMessageBox.warning(
+                host_dialog or parent,
+                "Clear Diff Stat",
+                (
+                    f"This will permanently delete all saved Diff Stat rows for the "
+                    f"{active_baseline} baseline.\n\n"
+                    "They will be recalculated when opened again or when Recalculate "
+                    "Diff Stat finds changed files.\n\nContinue?"
+                ),
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No,
+            )
+            if reply != QMessageBox.StandardButton.Yes:
+                return
+            database.delete_postplot_4d_diffs_for_baseline(project_name.strip(), active_baseline)
+            if isinstance(state["active_match"], Postplot4DMatchRow):
+                diff_rows = []
+                if stack.currentIndex() == 1:
+                    refresh_diff_table()
+                    _set_diff_summary(diff_summary, "Saved Diff Stat rows cleared.", tone="done")
+            summary.setText(f"Cleared saved Diff Stat rows for {active_baseline} baseline.")
+            if on_diffs_saved is not None:
+                on_diffs_saved()
+            if parent is not None:
+                _show_host_status(parent, "Saved Diff Stat rows cleared")
+            QTimer.singleShot(6000, refresh_table)
 
         def toggle_coord_mode() -> None:
             state["coord_mode"] = "lat" if state["coord_mode"] == "en" else "en"
@@ -639,6 +790,8 @@ class Postplot4DDialog:
                 f"{sum(1 for row in rows if row.has_match)} matched imported line(s)"
             )
             _fit_table(table)
+            if crs_note is not None:
+                crs_note.setText(_crs_note_for_match(None))
 
         def on_main_header_clicked(section: int) -> None:
             if section not in (0, 3):
@@ -670,7 +823,7 @@ class Postplot4DDialog:
             refresh_table()
 
         def build(dialog: SingleInstanceDialog) -> None:
-            nonlocal summary, table, stack, diff_title, diff_table, diff_summary, coord_toggle, recalc_btn, bulk_recalc_btn, host_dialog
+            nonlocal summary, table, stack, diff_title, diff_table, diff_summary, coord_toggle, recalc_btn, bulk_recalc_btn, host_dialog, crs_note, diff_crs_note
             host_dialog = dialog
             layout = dialog.content_layout
             _clear_layout(layout)
@@ -710,8 +863,13 @@ class Postplot4DDialog:
             bulk_recalc_btn = QPushButton("Recalculate Diff Stat")
             bulk_recalc_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
             bulk_recalc_btn.setMinimumSize(170, 32)
-            bulk_recalc_btn.clicked.connect(recalculate_missing_diffs)
+            bulk_recalc_btn.clicked.connect(recalculate_stale_diffs)
             baseline_row.addWidget(bulk_recalc_btn)
+            clear_diff_btn = QPushButton("Clear Diff Stat")
+            clear_diff_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+            clear_diff_btn.setMinimumSize(130, 32)
+            clear_diff_btn.clicked.connect(clear_saved_diffs)
+            baseline_row.addWidget(clear_diff_btn)
             main_layout.addLayout(baseline_row)
 
             summary = QLabel("")
@@ -722,6 +880,10 @@ class Postplot4DDialog:
             _configure_table(table)
             table.horizontalHeader().sectionClicked.connect(on_main_header_clicked)
             main_layout.addWidget(table, stretch=1)
+            crs_note = QLabel("")
+            crs_note.setStyleSheet(_DIFF_SUMMARY_STYLE)
+            crs_note.setWordWrap(True)
+            main_layout.addWidget(crs_note)
 
             close_row = QHBoxLayout()
             close_btn = QPushButton("Close")
@@ -766,6 +928,10 @@ class Postplot4DDialog:
             diff_table = QTableWidget(0, 8)
             _configure_table(diff_table)
             diff_layout.addWidget(diff_table, stretch=1)
+            diff_crs_note = QLabel("")
+            diff_crs_note.setStyleSheet(_DIFF_SUMMARY_STYLE)
+            diff_crs_note.setWordWrap(True)
+            diff_layout.addWidget(diff_crs_note)
 
             stack.addWidget(main_page)
             stack.addWidget(diff_page)

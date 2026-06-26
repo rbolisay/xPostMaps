@@ -21,15 +21,20 @@ from xpostmaps.core.postplot_4d_diff import (
     BaselineShotpoint,
     Postplot4DDiffRow,
     _generate_preplot_shotpoints,
+    _read_preplot_generation_info,
     _read_preplot_header_info,
     compute_postplot_4d_diff_rows,
     parse_number_of_sources,
+    parse_p111_gun_array_offset_m,
+    parse_p190_source_offset_m,
     parse_shotpoint_interval_m,
     parse_source_separation_m,
     resolve_line_azimuth_degrees,
     source_shotpoints_for_match,
 )
 from xpostmaps.core.postplot_4d_matching import Postplot4DMatchRow
+from xpostmaps.parsers.p111_parser import parse_p111_file, scan_projected_axis_order
+from xpostmaps.parsers.p190_parser import parse_p190_file
 from xpostmaps.parsers.preplot_parser import parse_preplot_file
 from xpostmaps.ui.main_window import MainWindow
 
@@ -69,6 +74,51 @@ def test_preplot_source_header_parsers_handle_sample_styles() -> None:
     assert parse_number_of_sources("CC,1,0,0,NUMBER OF SOURCES      2") == 2
     assert parse_source_separation_m("H2600SOURCE SEPARATION       50.00 m") == 50.0
     assert parse_source_separation_m("CC,1,0,0,SOURCE SEPARATION      37.50 m") == 37.5
+    assert parse_p190_source_offset_m(
+        "H0900 OFFSET REF. TO SOURCE 1      1   1    37.5       0"
+    ) == (1, 37.5)
+    assert parse_p190_source_offset_m(
+        "H0900 OFFSET REF. TO SOURCE 3      1   3   -37.5       0"
+    ) == (3, -37.5)
+    assert parse_p190_source_offset_m(
+        "H0900 OFFSET REF TO SOURCE G03      1   3   -3.75E+01       +0.0"
+    ) == (3, -37.5)
+    assert parse_p190_source_offset_m(
+        "H0900 OFFSET REF. TO STREAMER 1      1   1   618.75       0"
+    ) is None
+    assert parse_p111_gun_array_offset_m(
+        "HC,2,3,0,Gun Array 1,101,G1,4,Air Gun Array,,,100,37.5,0,0,COS,0,0,0"
+    ) == (1, 37.5)
+    assert parse_p111_gun_array_offset_m(
+        "HC,2,3,0,Gun Array 3,103,G3,4,Air Gun Array,,,100,-37.5,0,0,COS,0,0,0"
+    ) == (3, -37.5)
+    assert parse_p111_gun_array_offset_m(
+        "HC,2,3,0,Gun Array G1,11,G01,4,Air-Gun Array,,,1,0,-519,-7,Centre of Source,3,,"
+    ) == (1, 0.0)
+    assert parse_p111_gun_array_offset_m(
+        "HC,2,3,0,Streamer 1,104,S1,2,Streamer,,,100,618.75,0,0,CNG,0,0,0"
+    ) is None
+
+
+def test_3190_sample_p190_header_reads_explicit_source_offsets() -> None:
+    info = _read_preplot_generation_info(
+        Path("Sample Preplots/3190_TTUD1_Main_v2.WGS84.p190")
+    )
+
+    assert info.number_of_sources == 3
+    assert info.source_separation_m == 37.5
+    assert info.source_offsets_m == (37.5, 0.0, -37.5)
+
+
+def test_3190_sample_p111_header_reads_explicit_source_offsets_and_azimuth() -> None:
+    info = _read_preplot_generation_info(
+        Path("Sample Preplots/3190_TTUD1_Main_v2.WGS84.p111")
+    )
+
+    assert info.shotpoint_interval_m == 16.67
+    assert info.line_direction == "67.33°"
+    assert info.number_of_sources == 3
+    assert info.source_offsets_m == (37.5, 0.0, -37.5)
 
 
 def test_sample_preplot_headers_parse_interval_and_heading() -> None:
@@ -156,6 +206,43 @@ def test_generated_preplot_shotpoints_offsets_multiple_sources_crossline() -> No
     assert abs(source_2.y - 0.0) < 1e-6
 
 
+def test_generated_preplot_shotpoints_uses_explicit_source_offsets() -> None:
+    controls = [
+        PositionRecord(
+            file_name="preplot.p190",
+            record_type=RecordType.PREPLOT,
+            line_name="LINE01",
+            vessel_id="",
+            source_id="",
+            point_num=100,
+            x=0.0,
+            y=0.0,
+        ),
+        PositionRecord(
+            file_name="preplot.p190",
+            record_type=RecordType.PREPLOT,
+            line_name="LINE01",
+            vessel_id="",
+            source_id="",
+            point_num=101,
+            x=0.0,
+            y=25.0,
+        ),
+    ]
+    generated = _generate_preplot_shotpoints(
+        controls,
+        "",
+        source_count=3,
+        source_separation_m=37.5,
+        line_azimuth_deg=0.0,
+        source_offsets_m=(40.0, 5.0, -20.0),
+    )
+
+    assert abs(generated[(100, "1")].x - 40.0) < 1e-6
+    assert abs(generated[(100, "2")].x - 5.0) < 1e-6
+    assert abs(generated[(100, "3")].x + 20.0) < 1e-6
+
+
 def test_diff_rows_compare_firing_source_to_matching_preplot_source_position() -> None:
     baseline = {
         (100, "1"): BaselineShotpoint(
@@ -191,6 +278,124 @@ def test_diff_rows_compare_firing_source_to_matching_preplot_source_position() -
     assert abs(rows[0].crossline_m - 5.0) < 1e-6
 
 
+def test_diff_rows_remap_preplot_source_side_for_reverse_acquisition() -> None:
+    controls = [
+        PositionRecord(
+            file_name="3190_preplot.p111",
+            record_type=RecordType.PREPLOT,
+            line_name="1018",
+            vessel_id="",
+            source_id="",
+            point_num=100,
+            x=0.0,
+            y=0.0,
+        ),
+        PositionRecord(
+            file_name="3190_preplot.p111",
+            record_type=RecordType.PREPLOT,
+            line_name="1018",
+            vessel_id="",
+            source_id="",
+            point_num=101,
+            x=25.0 * math.sin(math.radians(67.3)),
+            y=25.0 * math.cos(math.radians(67.3)),
+        ),
+    ]
+    baseline = _generate_preplot_shotpoints(
+        controls,
+        "",
+        source_count=3,
+        source_separation_m=37.5,
+        line_azimuth_deg=67.3,
+    )
+    # The preplot file geometry is 67.3 degrees, but this acquired line was
+    # shot in the reciprocal direction. For the firing direction, source 1 is
+    # on the side cached as preplot source 3.
+    physical_source_1 = baseline[(100, "3")]
+    physical_source_3 = baseline[(100, "1")]
+    sources = {
+        100: PositionRecord(
+            file_name="line.p111",
+            record_type=RecordType.SOURCE,
+            line_name="1018A003",
+            vessel_id="",
+            source_id="G01",
+            point_num=100,
+            x=physical_source_1.x,
+            y=physical_source_1.y,
+        ),
+        101: PositionRecord(
+            file_name="line.p111",
+            record_type=RecordType.SOURCE,
+            line_name="1018A003",
+            vessel_id="",
+            source_id="G03",
+            point_num=101,
+            x=physical_source_3.x + 25.0 * math.sin(math.radians(67.3)),
+            y=physical_source_3.y + 25.0 * math.cos(math.radians(67.3)),
+        ),
+    }
+
+    rows = compute_postplot_4d_diff_rows(baseline, sources, "247.3")
+
+    assert len(rows) == 2
+    assert rows[0].baseline_x == physical_source_1.x
+    assert rows[1].baseline_x == physical_source_3.x + 25.0 * math.sin(math.radians(67.3))
+    assert abs(rows[0].crossline_m) < 1e-6
+    assert abs(rows[1].crossline_m) < 1e-6
+
+
+def test_diff_rows_keep_preplot_source_side_for_same_direction_acquisition() -> None:
+    controls = [
+        PositionRecord(
+            file_name="3190_preplot.p111",
+            record_type=RecordType.PREPLOT,
+            line_name="1702",
+            vessel_id="",
+            source_id="",
+            point_num=100,
+            x=0.0,
+            y=0.0,
+        ),
+        PositionRecord(
+            file_name="3190_preplot.p111",
+            record_type=RecordType.PREPLOT,
+            line_name="1702",
+            vessel_id="",
+            source_id="",
+            point_num=101,
+            x=25.0 * math.sin(math.radians(67.3)),
+            y=25.0 * math.cos(math.radians(67.3)),
+        ),
+    ]
+    baseline = _generate_preplot_shotpoints(
+        controls,
+        "",
+        source_count=3,
+        source_separation_m=37.5,
+        line_azimuth_deg=67.3,
+    )
+    physical_source_1 = baseline[(100, "1")]
+    sources = {
+        100: PositionRecord(
+            file_name="line.p111",
+            record_type=RecordType.SOURCE,
+            line_name="1702A002",
+            vessel_id="",
+            source_id="G01",
+            point_num=100,
+            x=physical_source_1.x,
+            y=physical_source_1.y,
+        )
+    }
+
+    rows = compute_postplot_4d_diff_rows(baseline, sources, "67.3")
+
+    assert len(rows) == 1
+    assert rows[0].baseline_x == physical_source_1.x
+    assert abs(rows[0].crossline_m) < 1e-6
+
+
 def test_p111_preplot_parser_uses_actual_control_shotpoints() -> None:
     result = parse_preplot_file(Path("Sample Preplots/TTUD-13D.DL2_3.WGS84.p111"))
     controls = [
@@ -202,6 +407,34 @@ def test_p111_preplot_parser_uses_actual_control_shotpoints() -> None:
     first, middle = controls[0], controls[1]
     distance = math.hypot(middle.x - first.x, middle.y - first.y)
     assert abs(distance / (middle.point_num - first.point_num) - 16.667) < 1e-3
+
+
+def test_10221_p111_firing_source_axis_order_matches_p190_sample() -> None:
+    p111 = Path("Sample P111-P190/10221/002.1815M1A-002.nrt.p111")
+    p190 = Path("Sample P111-P190/10221/002.1815M1A-002.nrt.p190")
+    if not p111.is_file() or not p190.is_file():
+        return
+
+    assert scan_projected_axis_order(p111) == ("northing", "easting")
+    p111_sources = {
+        record.point_num: record
+        for record in parse_p111_file(p111)
+        if record.record_type == RecordType.SOURCE
+    }
+    p190_sources = {
+        record.point_num: record
+        for record in parse_p190_file(p190)
+        if record.record_type == RecordType.SOURCE
+    }
+    common = sorted(set(p111_sources).intersection(p190_sources))[:20]
+
+    assert common
+    for shotpoint in common:
+        p111_source = p111_sources[shotpoint]
+        p190_source = p190_sources[shotpoint]
+        assert abs(p111_source.x - p190_source.x) < 0.1
+        assert abs(p111_source.y - p190_source.y) < 0.1
+        assert p111_source.source_id[-1] == p190_source.source_id
 
 
 def test_4030_generated_preplot_position_matches_interval_and_rotation() -> None:
@@ -393,6 +626,12 @@ def test_conditional_color_range_matching_uses_absolute_values() -> None:
     assert MainWindow._conditional_range_matches(3.0, "0-3")
     assert not MainWindow._conditional_range_matches(-3.01, "<=3")
     assert MainWindow._conditional_range_matches(-3.01, ">3")
+    assert MainWindow._conditional_range_matches(3.0, ">=3")
+    assert MainWindow._conditional_range_matches(3.0, "=>3")
+    assert not MainWindow._conditional_range_matches(2.99, ">=3")
+    assert MainWindow._conditional_range_matches(5.0, "<=5")
+    assert MainWindow._conditional_range_matches(5.0, "=<5")
+    assert not MainWindow._conditional_range_matches(5.01, "<=5")
 
 
 def test_postplot_conditional_colors_round_trip_in_legend_config() -> None:
@@ -489,4 +728,5 @@ def test_conditional_diff_cache_reads_saved_database_rows(tmp_path) -> None:
     rows = MainWindow._cached_match_diff_rows(window, match_row, [])
 
     assert rows == saved
+    assert db.postplot_4d_diffs_updated_at("proj", "navplan", "file.p190|1")
     db.close()
