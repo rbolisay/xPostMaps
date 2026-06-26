@@ -56,7 +56,7 @@ from xpostmaps.core.preplot_catalog_utils import (
 from xpostmaps.core.sequence_utils import sequence_id_matches
 from xpostmaps.ui.dialogs.import_polygons_dialog import ImportPolygonsDialog
 from xpostmaps.ui.dialogs.import_navplan_dialog import ImportNavplanDialog
-from xpostmaps.ui.dialogs.legend_dialog import LegendDialog
+from xpostmaps.ui.dialogs.legend_dialog import LayerStylesDialog
 from xpostmaps.parsers.directory_parser import NAV_EXTENSIONS, resolve_nav_files
 from xpostmaps.parsers.preplot_parser import resolve_preplot_files
 from xpostmaps.core.polygon_import_service import imported_polygon_entries
@@ -156,7 +156,7 @@ class MainWindow(QMainWindow):
         self._left.open_import_polygons.connect(self._open_import_polygons)
         self._left.select_logo.connect(self._select_logo)
         self._left.open_postmap_info.connect(self._open_postmap_info)
-        self._left.open_legend.connect(self._open_legend)
+        self._left.open_layer_styles.connect(self._open_layer_styles)
         self._left.open_pdf_export.connect(self._open_pdf_export)
         self._left.open_postplot_4d.connect(self._open_postplot_4d)
         self._right.minimap_view_changed.connect(self._on_minimap_view_changed)
@@ -411,9 +411,9 @@ class MainWindow(QMainWindow):
         self._refresh_conditional_postplot_points()
         self._map.render(self._map_data, force=True)
 
-    def _open_legend(self) -> None:
+    def _open_layer_styles(self) -> None:
         perimeters = self._map_data.survey_perimeters if self._map_data else []
-        dialog = LegendDialog.open(
+        dialog = LayerStylesDialog.open(
             self,
             self._settings.legend_config,
             on_apply=self._on_legend_apply,
@@ -425,7 +425,7 @@ class MainWindow(QMainWindow):
             map_epsg=self._current_map_epsg(),
             on_map_epsg_changed=self._on_import_map_epsg_changed,
         )
-        self._track_left_dialog("legend", dialog)
+        self._track_left_dialog("layer_styles", dialog)
 
     def _open_import_polygons(self) -> None:
         dialog = ImportPolygonsDialog.open(

@@ -28,7 +28,7 @@ class LeftPanel(GlassPanel):
     open_import_polygons = Signal()
     select_logo = Signal()
     open_postmap_info = Signal()
-    open_legend = Signal()
+    open_layer_styles = Signal()
     open_pdf_export = Signal()
     open_postplot_4d = Signal()
 
@@ -125,17 +125,17 @@ class LeftPanel(GlassPanel):
         layout.addWidget(self._logo_btn)
         self._logo_btn.clicked.connect(self.select_logo.emit)
 
-        self._legend_btn = QPushButton("Legend")
-        self._legend_btn.setObjectName("dirBtn")
+        self._layer_styles_btn = QPushButton("Layer Styles")
+        self._layer_styles_btn.setObjectName("dirBtn")
         self._pdf_btn = QPushButton("Export Map")
         self._pdf_btn.setObjectName("dirBtn")
         self._info_btn = QPushButton("Project Information")
         self._info_btn.setObjectName("dirBtn")
 
-        for btn in (self._info_btn, self._legend_btn, self._pdf_btn):
+        for btn in (self._info_btn, self._layer_styles_btn, self._pdf_btn):
             layout.addWidget(btn)
 
-        self._legend_btn.clicked.connect(self.open_legend.emit)
+        self._layer_styles_btn.clicked.connect(self.open_layer_styles.emit)
         self._pdf_btn.clicked.connect(self.open_pdf_export.emit)
         self._info_btn.clicked.connect(self.open_postmap_info.emit)
 
@@ -157,7 +157,7 @@ class LeftPanel(GlassPanel):
             "p111": self._p111_btn,
             "import_polygons": self._import_polygons_btn,
             "logo": self._logo_btn,
-            "legend": self._legend_btn,
+            "layer_styles": self._layer_styles_btn,
             "pdf": self._pdf_btn,
             "info": self._info_btn,
             "postplot_4d": self._postplot_4d_btn,
@@ -223,7 +223,7 @@ class LeftPanel(GlassPanel):
             self._p111_btn,
             self._import_polygons_btn,
             self._logo_btn,
-            self._legend_btn,
+            self._layer_styles_btn,
             self._pdf_btn,
             self._info_btn,
             self._postplot_4d_btn,

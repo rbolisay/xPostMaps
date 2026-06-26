@@ -13,6 +13,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from xpostmaps.core.legend_utils import legend_section_title
 from xpostmaps.core.models import LegendConfig, LineStyle, PostmapInfo, SurveyBounds
 from xpostmaps.core.postmap_info_layout import column_display_lines, ensure_layout
 from xpostmaps.core.polygon_import_service import non_imported_polygon_entries
@@ -340,16 +341,23 @@ class PostmapInfoCard(QWidget):
         visible_preplot = [
             entry for entry in legend.preplot_lines if entry.name and not entry.hidden
         ]
+        visible_navplan = [
+            entry for entry in legend.navplan_lines if entry.name and not entry.hidden
+        ]
         visible_postplot = [
             entry for entry in legend.postplot_lines if entry.name and not entry.hidden
         ]
 
-        if visible_areas or visible_preplot or visible_postplot:
+        if visible_areas or visible_preplot or visible_navplan or visible_postplot:
             self._legend_content.addSpacing(_LEGEND_TITLE_GAP)
 
         first_section = True
         if visible_areas:
-            self._legend_content.addWidget(self._legend_section_header("Area"))
+            self._legend_content.addWidget(
+                self._legend_section_header(
+                    legend_section_title(legend.area_section_title, "Area")
+                )
+            )
             self._add_legend_grid(
                 self._legend_content,
                 [
@@ -362,7 +370,11 @@ class PostmapInfoCard(QWidget):
         if visible_preplot:
             if not first_section:
                 self._legend_content.addSpacing(_LEGEND_SECTION_GAP)
-            self._legend_content.addWidget(self._legend_section_header("Preplot"))
+            self._legend_content.addWidget(
+                self._legend_section_header(
+                    legend_section_title(legend.preplot_section_title, "Preplot")
+                )
+            )
             self._add_legend_grid(
                 self._legend_content,
                 [
@@ -381,10 +393,40 @@ class PostmapInfoCard(QWidget):
             )
             first_section = False
 
+        if visible_navplan:
+            if not first_section:
+                self._legend_content.addSpacing(_LEGEND_SECTION_GAP)
+            self._legend_content.addWidget(
+                self._legend_section_header(
+                    legend_section_title(legend.navplan_section_title, "Navplan")
+                )
+            )
+            self._add_legend_grid(
+                self._legend_content,
+                [
+                    (
+                        _LineSwatch(
+                            entry.color,
+                            line_style=entry.line_style,
+                            scale=self._text_scale,
+                            line_width_mm=entry.line_width,
+                            dot_radius_mm=entry.dot_radius,
+                        ),
+                        entry.name,
+                    )
+                    for entry in visible_navplan
+                ],
+            )
+            first_section = False
+
         if visible_postplot:
             if not first_section:
                 self._legend_content.addSpacing(_LEGEND_SECTION_GAP)
-            self._legend_content.addWidget(self._legend_section_header("PostPlot"))
+            self._legend_content.addWidget(
+                self._legend_section_header(
+                    legend_section_title(legend.postplot_section_title, "PostPlot")
+                )
+            )
             self._add_legend_grid(
                 self._legend_content,
                 [

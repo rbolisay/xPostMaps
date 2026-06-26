@@ -162,6 +162,24 @@ class _DiffStatComboBox(QComboBox):
         super().showPopup()
 
 
+def _layer_styles_heading(text: str = "Layer Styles") -> QLabel:
+    title = QLabel(text)
+    title.setObjectName("sectionTitle")
+    title.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop)
+    title.setContentsMargins(0, 0, 0, 0)
+    title.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed)
+    title.setFixedHeight(title.fontMetrics().height())
+    return title
+
+
+def _section_title_edit(text: str, *, default: str) -> QLineEdit:
+    edit = QLineEdit(text or default)
+    edit.setPlaceholderText(default)
+    edit.setStyleSheet("font-weight: 600; margin-top: 8px;")
+    edit.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+    return edit
+
+
 def _table_name_edit(text: str = "") -> QLineEdit:
     edit = QLineEdit(text)
     edit.setSizePolicy(QSizePolicy.Policy.Minimum, QSizePolicy.Policy.Fixed)
@@ -389,6 +407,7 @@ def _autosize_legend_dialog(
     dialog.setMinimumSize(_LEGEND_MIN_DIALOG_WIDTH, _LEGEND_MIN_DIALOG_HEIGHT)
     dialog.setMaximumSize(max_w, max_h)
     dialog.resize(target_w, target_h)
+    layout.setAlignment(Qt.AlignmentFlag.AlignTop)
     layout.activate()
     QApplication.processEvents()
 
@@ -482,8 +501,8 @@ def _autosize_conditional_colors_dialog(
     QApplication.processEvents()
 
 
-class LegendDialog:
-    KEY = "legend"
+class LayerStylesDialog:
+    KEY = "layer_styles"
 
     _STYLE_LABELS = ("Solid", "Dotted", "Dash")
     _AREA_STYLE_LABELS = ("Solid", "Dash")
@@ -582,6 +601,9 @@ class LegendDialog:
             live["on"] = False
             layout = dialog.content_layout
             _clear_layout(layout)
+            layout.setContentsMargins(16, 8, 16, 16)
+            layout.setSpacing(6)
+            layout.setAlignment(Qt.AlignmentFlag.AlignTop)
             row_custom_points.clear()
             row_sequence_ids.clear()
             row_sequence_filter_active.clear()
@@ -605,13 +627,13 @@ class LegendDialog:
             live_apply_timer.setSingleShot(True)
             live_apply_timer.setInterval(120)
 
-            title = QLabel("Legend")
-            title.setObjectName("sectionTitle")
+            title = _layer_styles_heading()
             layout.addWidget(title)
 
-            area_lbl = QLabel("Area")
-            area_lbl.setStyleSheet("font-weight: 600;")
-            layout.addWidget(area_lbl)
+            area_title_edit = _section_title_edit(
+                legend.area_section_title, default="Area"
+            )
+            area_title_edit.setStyleSheet("font-weight: 600; margin: 0; padding: 6px 12px;")
 
             area_table = QTableWidget(0, 6)
             area_table.setHorizontalHeaderLabels(
@@ -626,8 +648,10 @@ class LegendDialog:
             )
             _configure_legend_table(area_table)
 
-            post_lbl = QLabel("PostPlot")
-            post_lbl.setStyleSheet("font-weight: 600; margin-top: 8px;")
+            post_title_edit = _section_title_edit(
+                legend.postplot_section_title, default="PostPlot"
+            )
+            post_title_edit.setStyleSheet("font-weight: 600; margin-top: 8px;")
 
             post_table = QTableWidget(0, 7)
             post_table.setHorizontalHeaderLabels(
@@ -702,6 +726,10 @@ class LegendDialog:
                     preplot_lines=_collect_preplot_lines(),
                     navplan_lines=_collect_navplan_lines(),
                     postplot_lines=_collect_postplot_lines(),
+                    area_section_title=area_title_edit.text().strip() or "Area",
+                    preplot_section_title=preplot_title_edit.text().strip() or "Preplot",
+                    navplan_section_title=navplan_title_edit.text().strip() or "Navplan",
+                    postplot_section_title=post_title_edit.text().strip() or "PostPlot",
                 )
 
             def _ensure_symbology_row(
@@ -1540,12 +1568,14 @@ class LegendDialog:
             area_btns.addWidget(rem_area_btn)
             area_btns.addStretch()
 
+            layout.addWidget(area_title_edit)
             layout.addLayout(area_btns)
             layout.addWidget(area_table)
 
-            preplot_lbl = QLabel("Preplot")
-            preplot_lbl.setStyleSheet("font-weight: 600; margin-top: 8px;")
-            layout.addWidget(preplot_lbl)
+            preplot_title_edit = _section_title_edit(
+                legend.preplot_section_title, default="Preplot"
+            )
+            layout.addWidget(preplot_title_edit)
 
             preplot_table = QTableWidget(0, 5)
             preplot_table.setHorizontalHeaderLabels(
@@ -1657,8 +1687,9 @@ class LegendDialog:
                         del row_preplot_dash_lengths[row]
                     schedule_refit()
 
-            navplan_lbl = QLabel("Navplan")
-            navplan_lbl.setStyleSheet("font-weight: 600; margin-top: 8px;")
+            navplan_title_edit = _section_title_edit(
+                legend.navplan_section_title, default="Navplan"
+            )
 
             navplan_table = QTableWidget(0, 5)
             navplan_table.setHorizontalHeaderLabels(
@@ -1869,7 +1900,7 @@ class LegendDialog:
                 preplot_note.setStyleSheet("color: #94a3b8; font-size: 11px;")
                 layout.addWidget(preplot_note)
 
-            layout.addWidget(navplan_lbl)
+            layout.addWidget(navplan_title_edit)
 
             for entry in legend.navplan_lines:
                 add_navplan_row(entry)
@@ -1892,7 +1923,7 @@ class LegendDialog:
                 navplan_note.setStyleSheet("color: #94a3b8; font-size: 11px;")
                 layout.addWidget(navplan_note)
 
-            layout.addWidget(post_lbl)
+            layout.addWidget(post_title_edit)
 
             for entry in legend.postplot_lines:
                 add_post_row(entry)
@@ -1951,9 +1982,13 @@ class LegendDialog:
 
         return SingleInstanceDialog.show_dialog(
             cls.KEY,
-            "Legend",
+            "Layer Styles",
             build,
             parent,
             width=_LEGEND_MIN_DIALOG_WIDTH,
             height=_LEGEND_MIN_DIALOG_HEIGHT,
         )
+
+
+# Backward-compatible alias for existing imports.
+LegendDialog = LayerStylesDialog

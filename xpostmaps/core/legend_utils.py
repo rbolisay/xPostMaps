@@ -21,6 +21,11 @@ from xpostmaps.utils.symbology_units import (
 )
 
 
+def legend_section_title(value: str, default: str) -> str:
+    text = str(value or "").strip()
+    return text if text else default
+
+
 def _polygon_point_to_dict(point: PolygonPoint) -> dict:
     return {
         "x": point.x,
@@ -127,6 +132,10 @@ def legend_to_dict(config: LegendConfig) -> dict:
             }
             for p in config.postplot_lines
         ],
+        "area_section_title": config.area_section_title,
+        "preplot_section_title": config.preplot_section_title,
+        "navplan_section_title": config.navplan_section_title,
+        "postplot_section_title": config.postplot_section_title,
     }
 
 
@@ -140,9 +149,27 @@ def _parse_border_style(raw: str) -> LineStyle:
     return style
 
 
+def _section_titles_from_dict(data: dict) -> dict[str, str]:
+    return {
+        "area_section_title": legend_section_title(
+            str(data.get("area_section_title", "Area")), "Area"
+        ),
+        "preplot_section_title": legend_section_title(
+            str(data.get("preplot_section_title", "Preplot")), "Preplot"
+        ),
+        "navplan_section_title": legend_section_title(
+            str(data.get("navplan_section_title", "Navplan")), "Navplan"
+        ),
+        "postplot_section_title": legend_section_title(
+            str(data.get("postplot_section_title", "PostPlot")), "PostPlot"
+        ),
+    }
+
+
 def legend_from_dict(data: dict | None) -> LegendConfig:
     if not data:
         return LegendConfig.default()
+    section_titles = _section_titles_from_dict(data)
     areas = []
     for item in data.get("areas", []):
         raw_mode = item.get("coordinate_mode", "survey_perimeter")
@@ -267,10 +294,18 @@ def legend_from_dict(data: dict | None) -> LegendConfig:
             )
         )
     if not areas and not preplot_lines and not navplan_lines and not lines:
-        return LegendConfig.default()
+        base = LegendConfig.default()
+        return LegendConfig(
+            areas=base.areas,
+            preplot_lines=base.preplot_lines,
+            navplan_lines=base.navplan_lines,
+            postplot_lines=base.postplot_lines,
+            **section_titles,
+        )
     return LegendConfig(
         areas=areas,
         preplot_lines=preplot_lines,
         navplan_lines=navplan_lines,
         postplot_lines=lines or LegendConfig.default().postplot_lines,
+        **section_titles,
     )

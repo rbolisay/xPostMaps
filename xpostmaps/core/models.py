@@ -142,6 +142,10 @@ class LegendConfig:
     preplot_lines: list[PreplotLegendEntry] = field(default_factory=list)
     navplan_lines: list[NavplanLegendEntry] = field(default_factory=list)
     postplot_lines: list[PostplotLegendEntry] = field(default_factory=list)
+    area_section_title: str = "Area"
+    preplot_section_title: str = "Preplot"
+    navplan_section_title: str = "Navplan"
+    postplot_section_title: str = "PostPlot"
 
     @staticmethod
     def default() -> LegendConfig:
