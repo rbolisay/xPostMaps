@@ -40,6 +40,9 @@ class RightPane(PrintPanel):
         self.setFixedWidth(self._BASE_WIDTH)
         self._logo_path = ""
         self.setStyleSheet(f"background: {BG_PRINT}; color: {TEXT_PRINT};")
+        self._harm_interval_m = 0.0
+        self._harm_total_km = 4.0
+        self._harm_bar_width_px = 0.0
         self._build_ui()
         self._card.set_text_scale(self._TEXT_SCALE)
 
@@ -223,6 +226,53 @@ class RightPane(PrintPanel):
     def current_minimap_view(self) -> dict[str, float]:
         return self._minimap.current_view()
 
+    def sync_map_scale_from_map(self, map_widget) -> None:
+        """Update scale bar and map grid to the same true-scale interval."""
+        if map_widget is None:
+            return
+        compute = getattr(map_widget, "compute_view_harmonization", None)
+        set_grid = getattr(map_widget, "set_grid_interval_m", None)
+        if not callable(compute) or not callable(set_grid):
+            return
+        harm = compute(self._card.scale_bar_max_width_px())
+        self._harm_interval_m = harm.interval_m
+        self._harm_total_km = harm.total_km
+        self._harm_bar_width_px = harm.bar_width_px
+        self._card.set_map_scale_bar(harm.total_km, harm.bar_width_px)
+        set_grid(harm.interval_m)
+
+    def current_grid_interval_m(self) -> float:
+        return self._harm_interval_m
+
+    def apply_export_scale_bar(self) -> None:
+        """Keep live km labels; widen bar for the export pane at true map scale."""
+        if self._harm_bar_width_px <= 0:
+            return
+        self._card.set_map_scale_bar(
+            self._harm_total_km,
+            self._harm_bar_width_px * self._EXPORT_WIDTH_SCALE,
+        )
+
+    def restore_live_scale_bar(self) -> None:
+        if self._harm_bar_width_px <= 0:
+            return
+        self._card.set_map_scale_bar(self._harm_total_km, self._harm_bar_width_px)
+
+    def resizeEvent(self, event) -> None:  # noqa: N802
+        super().resizeEvent(event)
+        window = self.window()
+        map_widget = getattr(window, "_map", None) if window is not None else None
+        if map_widget is not None:
+            self.sync_map_scale_from_map(map_widget)
+
+    def apply_export_grid_harmonization(self, scale_km: float) -> None:
+        """Legacy hook — prefer ``sync_map_scale_from_map``."""
+        _ = scale_km
+
+    def clear_export_grid_harmonization(self) -> None:
+        """Legacy hook — scale bar stays tied to the live map view."""
+        return
+
     def render_for_export(self, target_height: int) -> QImage:
         """Render the pane with sharp text and a correctly painted minimap."""
         from xpostmaps.core.pdf_export import render_widget_to_height
@@ -303,7 +353,6 @@ class RightPane(PrintPanel):
     def prepare_export_snapshot(self, map_height: int | None = None) -> None:
         """Prepare right pane for PDF capture at true aspect (same height as map)."""
         self._minimap.set_export_mode(True)
-        # Widen the panel for the PDF so content reflows wider (no text squeeze).
         self.setFixedWidth(int(round(self._BASE_WIDTH * self._EXPORT_WIDTH_SCALE)))
         # Match GUI minimap proportions: height scales with export width (432×215 ratio).
         self._minimap.setFixedHeight(

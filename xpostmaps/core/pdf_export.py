@@ -48,6 +48,28 @@ SCALE_MODES: tuple[str, ...] = ("Default", "Actual size", "Custom")
 PANE_PDF_SCALE = 1.0
 
 
+def apply_export_grid_harmonization(map_widget: QWidget, right_pane: QWidget) -> None:
+    """Apply live scale bar + grid interval for PDF export (no recompute on widen)."""
+    apply_export_bar = getattr(right_pane, "apply_export_scale_bar", None)
+    if callable(apply_export_bar):
+        apply_export_bar()
+    set_grid = getattr(map_widget, "set_grid_interval_m", None)
+    interval_fn = getattr(right_pane, "current_grid_interval_m", None)
+    if callable(set_grid) and callable(interval_fn):
+        interval_m = interval_fn()
+        if interval_m > 0:
+            set_grid(interval_m)
+    app = QApplication.instance()
+    if app is not None:
+        app.processEvents()
+
+
+def clear_export_grid_harmonization(map_widget: QWidget, right_pane: QWidget) -> None:
+    restore = getattr(right_pane, "restore_live_scale_bar", None)
+    if callable(restore):
+        restore()
+
+
 @dataclass
 class PdfExportOptions:
     output_dir: Path
@@ -230,6 +252,7 @@ def capture_export_images(
     if callable(prepare):
         prepare(wysiwyg=True)
     right_pane.prepare_export_snapshot(map_height=map_height)
+    apply_export_grid_harmonization(map_widget, right_pane)
     try:
         map_image = render_map_wysiwyg(
             map_widget,
@@ -239,6 +262,7 @@ def capture_export_images(
         pane_image = render_pane_for_export(right_pane, target_h)
         return map_image, pane_image
     finally:
+        clear_export_grid_harmonization(map_widget, right_pane)
         right_pane.reset_export_snapshot()
         if callable(end_export):
             end_export(wysiwyg=True)
@@ -558,6 +582,7 @@ def capture_hybrid_export_images(
     prepare = getattr(map_widget, "prepare_for_export", None)
     end_export = getattr(map_widget, "end_export", None)
     right_pane.prepare_export_snapshot(map_height=map_h)
+    apply_export_grid_harmonization(map_widget, right_pane)
     try:
         if callable(prepare):
             prepare(
@@ -569,6 +594,7 @@ def capture_hybrid_export_images(
         pane_image = render_pane_for_export(right_pane, target_h)
         return map_image, pane_image
     finally:
+        clear_export_grid_harmonization(map_widget, right_pane)
         right_pane.reset_export_snapshot()
         if callable(end_export):
             end_export(wysiwyg=False)
@@ -780,6 +806,7 @@ def compose_pdf_hybrid(
     prepare = getattr(map_widget, "prepare_for_export", None)
     end_export = getattr(map_widget, "end_export", None)
     right_pane.prepare_export_snapshot(map_height=map_h)
+    apply_export_grid_harmonization(map_widget, right_pane)
     try:
         pane_w = max(right_pane.width(), 1)
         pane_h = max(right_pane.height(), 1)
@@ -837,6 +864,7 @@ def compose_pdf_hybrid(
                 painter.drawImage(pane_rect, pane_image)
         painter.end()
     finally:
+        clear_export_grid_harmonization(map_widget, right_pane)
         right_pane.reset_export_snapshot()
         if callable(end_export):
             end_export(wysiwyg=False)

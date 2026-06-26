@@ -130,6 +130,19 @@ class PostmapInfoCard(QWidget):
         if self._last_args is not None:
             self.update_content(*self._last_args)
 
+    def scale_bar_km(self) -> float:
+        return self._scale.km()
+
+    def scale_bar_max_width_px(self) -> float:
+        return self._scale.max_bar_width_px()
+
+    def set_scale_bar_km(self, km: float) -> None:
+        self._scale.set_km(km)
+
+    def set_map_scale_bar(self, total_km: float, bar_width_px: float) -> None:
+        self._scale.set_map_scale(total_km, bar_width_px)
+        self.update()
+
     def _build_ui(self) -> None:
         layout = QVBoxLayout(self)
         layout.setContentsMargins(4, 2, 4, 4)
@@ -295,12 +308,6 @@ class PostmapInfoCard(QWidget):
         self._area.setText(f"Area: {info.area or '—'}")
         self._project.setText(f"Project Name: {info.project or '—'}")
 
-        if bounds.is_valid:
-            width_km = (bounds.xmax - bounds.xmin) / 1000
-            self._scale.set_km(max(round(width_km / 4) * 4, 4))
-        else:
-            self._scale.set_km(40)
-
         ensure_layout(info)
         left_rows = column_display_lines(info, 0)
         right_rows = column_display_lines(info, 1)
@@ -319,12 +326,6 @@ class PostmapInfoCard(QWidget):
         self._client.setText(f"Client Name: {info.client or '—'}")
         self._area.setText(f"Area: {info.area or '—'}")
         self._project.setText(f"Project Name: {info.project or '—'}")
-
-        if bounds.is_valid:
-            width_km = (bounds.xmax - bounds.xmin) / 1000
-            self._scale.set_km(max(round(width_km / 4) * 4, 4))
-        else:
-            self._scale.set_km(40)
 
         ensure_layout(info)
         left_rows = column_display_lines(info, 0)

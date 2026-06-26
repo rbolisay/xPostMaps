@@ -80,6 +80,12 @@ from xpostmaps.utils.symbology_units import (
     mm_to_pixels,
     widget_screen_dpi,
 )
+from xpostmaps.core.map_grid_interval import (
+    SCALE_BAR_SEGMENTS,
+    MapScaleHarmonization,
+    compute_map_scale_harmonization,
+    ticks_for_interval,
+)
 from xpostmaps.utils.vector_export import (
     VectorExportContext,
     merge_line_parts,
@@ -276,6 +282,7 @@ class MapFrameOverlay(QWidget):
         self._plot_item = plot_item
         self._origin_x = 0.0
         self._origin_y = 0.0
+        self._fixed_tick_interval_m: float | None = None
         self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
 
@@ -283,8 +290,16 @@ class MapFrameOverlay(QWidget):
         self._origin_x = origin_x
         self._origin_y = origin_y
 
-    @staticmethod
-    def _major_ticks(axis, lo: float, hi: float, size: float) -> list[float]:
+    def set_fixed_tick_interval(self, interval_m: float | None) -> None:
+        """Lock major ticks to a ground interval (PDF export harmonization)."""
+        self._fixed_tick_interval_m = (
+            float(interval_m) if interval_m is not None and interval_m > 0 else None
+        )
+
+    def _major_ticks(self, axis, lo: float, hi: float, size: float) -> list[float]:
+        fixed = getattr(self, "_fixed_tick_interval_m", None)
+        if fixed is not None and fixed > 0:
+            return ticks_for_interval(lo, hi, fixed)
         try:
             levels = axis.tickValues(lo, hi, size)
         except Exception:  # noqa: BLE001
@@ -447,6 +462,7 @@ class PostplotMapWidget(QWidget):
     """High-performance map canvas — survey plot area only."""
 
     view_changed = Signal(dict)
+    scale_sync_requested = Signal()
 
     _NAV_TYPES = frozenset({RecordType.SOURCE, RecordType.VESSEL})
 
@@ -559,6 +575,7 @@ class PostplotMapWidget(QWidget):
         self._frame_timer.setSingleShot(True)
         self._frame_timer.setInterval(48)
         self._frame_timer.timeout.connect(self._frame.update)
+        self._frame_timer.timeout.connect(self.scale_sync_requested.emit)
         vb.sigRangeChanged.connect(self._schedule_frame_update)
 
         self._north = NorthArrow(self._plot)
@@ -1190,6 +1207,42 @@ class PostplotMapWidget(QWidget):
             return None
         (x_range, y_range) = vb.viewRange()
         return (float(x_range[0]), float(x_range[1]), float(y_range[0]), float(y_range[1]))
+
+    def map_data_width_px(self) -> float:
+        """Width of the plotted data area in device pixels (view box scene width)."""
+        vb = self._plot.getViewBox()
+        if vb is None:
+            return float(max(self._plot.width(), 1))
+        return max(float(vb.sceneBoundingRect().width()), 1.0)
+
+    def compute_view_harmonization(self, max_bar_width_px: float) -> MapScaleHarmonization:
+        bbox = self.export_view_bbox()
+        if bbox is None:
+            return compute_map_scale_harmonization(4000.0, 800.0, max_bar_width_px)
+        x0, x1, _y0, _y1 = bbox
+        span_m = max(x1 - x0, 1.0)
+        return compute_map_scale_harmonization(
+            span_m,
+            self.map_data_width_px(),
+            max_bar_width_px,
+            segments=SCALE_BAR_SEGMENTS,
+        )
+
+    def compute_export_grid_harmonization(self) -> tuple[float, float]:
+        """Return ``(grid_interval_m, scale_bar_total_km)`` for the current map view."""
+        harm = self.compute_view_harmonization(max_bar_width_px=400.0)
+        return harm.interval_m, harm.total_km
+
+    def set_grid_interval_m(self, interval_m: float | None) -> None:
+        self._frame.set_fixed_tick_interval(interval_m)
+        self._frame.update()
+
+    def apply_export_grid_harmonization(self, interval_m: float) -> None:
+        self.set_grid_interval_m(interval_m)
+
+    def clear_export_grid_harmonization(self) -> None:
+        """Legacy export hook — grid stays harmonized to the live view."""
+        return
 
     def export_clip_bbox(self) -> tuple[float, float, float, float] | None:
         return self._view_clip_bbox()

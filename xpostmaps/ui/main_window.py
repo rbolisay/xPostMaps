@@ -168,6 +168,7 @@ class MainWindow(QMainWindow):
         self._left.open_postplot_4d.connect(self._open_postplot_4d)
         self._right.minimap_view_changed.connect(self._on_minimap_view_changed)
         self._map.view_changed.connect(self._on_map_view_changed)
+        self._map.scale_sync_requested.connect(self._sync_map_scale_bar)
 
         self._mediator.map_data_updated.connect(self._on_map_data_updated)
         self._mediator.status_message.connect(self.statusBar().showMessage)
@@ -285,6 +286,7 @@ class MainWindow(QMainWindow):
         self._refresh_conditional_postplot_points()
         self._map.render(self._map_data)
         self._right.update_from_project(self._settings, self._map_data)
+        self._sync_map_scale_bar()
         self._refresh_import_polygons_summary()
         self._refresh_preplot_summary()
 
@@ -331,6 +333,12 @@ class MainWindow(QMainWindow):
             return
         self._settings.map_view = dict(view)
         self._schedule_metadata_autosave()
+        self._sync_map_scale_bar()
+
+    def _sync_map_scale_bar(self) -> None:
+        if self._loading_project:
+            return
+        self._right.sync_map_scale_from_map(self._map)
 
     def _set_left_button_active(self, key: str, active: bool) -> None:
         self._left.set_button_active(key, active)
@@ -1236,6 +1244,7 @@ class MainWindow(QMainWindow):
             )
         finally:
             self._loading_project = False
+            self._sync_map_scale_bar()
 
     def _autosave_project(self) -> bool:
         return self._save_project(silent=True)
