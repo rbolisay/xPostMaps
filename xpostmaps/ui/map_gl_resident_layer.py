@@ -58,6 +58,8 @@ class ResidentGlLineLayer:
         pen: QPen,
         export_pen: QPen,
         line_style: LineStyle = LineStyle.SOLID,
+        dash_on_world: float = 0.0,
+        dash_gap_world: float = 0.0,
         map_layer: str = "postplot",
         plot_item: pg.PlotItem,
         gl_overlay: MapGlLineOverlay,
@@ -75,6 +77,9 @@ class ResidentGlLineLayer:
         self._pen = pen
         self._export_pen = export_pen
         self._line_style = normalize_line_style(line_style)
+        self._dash_on_world = max(0.0, float(dash_on_world))
+        self._dash_gap_world = max(0.0, float(dash_gap_world))
+        self._dash_period = self._dash_on_world + self._dash_gap_world
         self._plot_item = plot_item
         self._gl_overlay = gl_overlay
         self._line_items = line_items
@@ -97,6 +102,60 @@ class ResidentGlLineLayer:
             if np.asarray(px).size >= 2
         ]
         self._uploaded_runs: set[int] = set()
+
+    @property
+    def _baked_dash(self) -> bool:
+        """Dash drawn as GPU-resident geometry (gaps baked into the vertices)."""
+        return self._line_style == LineStyle.DASH and self._dash_period > 0.0
+
+    def _dash_segments(
+        self,
+        px: np.ndarray,
+        py: np.ndarray,
+        colors: np.ndarray | None,
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray | None] | None:
+        """Bake a world-space dash pattern into independent GL line segments.
+
+        The "on" portions of the pattern become drawn segments; the gaps are
+        simply omitted. Because the result is plain GPU geometry, pan/zoom stay
+        transform-only (identical cost to a solid line) and the dash never
+        collapses back to a solid stroke when the view settles.
+        """
+        n = px.size
+        if n < 2:
+            return None
+        on_world = self._dash_on_world
+        period = self._dash_period
+        seg = np.hypot(np.diff(px), np.diff(py))
+        s_start = np.empty(n - 1, dtype=np.float64)
+        s_start[0] = 0.0
+        if n > 2:
+            np.cumsum(seg[:-1], out=s_start[1:])
+        on_edge = np.mod(s_start, period) < on_world
+        finite = (
+            np.isfinite(px[:-1])
+            & np.isfinite(py[:-1])
+            & np.isfinite(px[1:])
+            & np.isfinite(py[1:])
+        )
+        draw = on_edge & finite
+        if not np.any(draw):
+            return None
+        x0 = px[:-1][draw]
+        x1 = px[1:][draw]
+        y0 = py[:-1][draw]
+        y1 = py[1:][draw]
+        xp = np.empty(x0.size * 2, dtype=np.float64)
+        xp[0::2] = x0
+        xp[1::2] = x1
+        yp = np.empty(y0.size * 2, dtype=np.float64)
+        yp[0::2] = y0
+        yp[1::2] = y1
+        color_pairs: np.ndarray | None = None
+        if colors is not None and colors.shape[0] == n:
+            edge_colors = colors[:-1][draw].astype(np.float32, copy=False)
+            color_pairs = np.repeat(edge_colors, 2, axis=0)
+        return xp, yp, color_pairs
 
     @staticmethod
     def _segment_gl_geometry(
@@ -197,12 +256,21 @@ class ResidentGlLineLayer:
                 continue
             color_arg: tuple[float, float, float, float] | np.ndarray = self._gl_color
             mode = "line_strip"
+            colors = None
             if self._color_parts is not None and run_index < len(self._color_parts):
-                rx, ry, color_array = self._segment_gl_geometry(
-                    px,
-                    py,
-                    np.asarray(self._color_parts[run_index], dtype=np.float32),
-                )
+                colors = np.asarray(self._color_parts[run_index], dtype=np.float32)
+            if self._baked_dash:
+                dashed = self._dash_segments(px, py, colors)
+                if dashed is None:
+                    # Pattern leaves nothing visible for this run — mark done.
+                    self._uploaded_runs.add(run_index)
+                    continue
+                dx, dy, dash_colors = dashed
+                px, py = dx, dy
+                color_arg = dash_colors if dash_colors is not None else self._gl_color
+                mode = "lines"
+            elif colors is not None:
+                rx, ry, color_array = self._segment_gl_geometry(px, py, colors)
                 if rx.size < 2:
                     continue
                 px, py = rx, ry
@@ -232,8 +300,15 @@ class ResidentGlLineLayer:
         *,
         zoomed_in: bool,
     ) -> None:
-        """Dash lines use full-resolution CPU curves when zoomed in (GL cannot stipple)."""
+        """Dash lines use full-resolution CPU curves when zoomed in (GL cannot stipple).
+
+        When the dash pattern is baked into the GL geometry there is nothing to
+        do on settle: the resident layer already shows true gaps at GPU speed, so
+        we keep it visible and skip the costly CPU curve rebuild entirely.
+        """
         self.clear_settled_detail()
+        if self._baked_dash:
+            return
         if self._export_mode or self._line_style != LineStyle.DASH or not zoomed_in:
             return
         bx0, bx1, by0, by1 = bbox

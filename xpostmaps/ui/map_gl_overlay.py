@@ -80,6 +80,17 @@ class MapGlLineOverlay:
     def __init__(self, plot: pg.PlotWidget, parent) -> None:
         self._plot = plot
         self._available = gl_lines_available()
+        if self._available:
+            # The GL line shader is cached on the class. If a previous map GL
+            # context was destroyed (widget recreated), that cached program id is
+            # stale and glUseProgram raises "invalid value". Drop it so the new
+            # context compiles a fresh, valid program.
+            try:
+                from pyqtgraph.opengl import GLLinePlotItem
+
+                GLLinePlotItem._shaderProgram = None
+            except Exception:  # noqa: BLE001
+                pass
         self._view = _create_ortho_gl_view(parent) if self._available else None
         self._items: dict[tuple[int, int], object] = {}
         self._run_bboxes: dict[tuple[int, int], tuple[float, float, float, float]] = {}

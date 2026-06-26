@@ -14,7 +14,11 @@ from xpostmaps.core.models import (
     PostplotLegendEntry,
     PreplotLegendEntry,
 )
-from xpostmaps.utils.symbology_units import migrate_dot_radius_mm, migrate_line_width_mm
+from xpostmaps.utils.symbology_units import (
+    migrate_dash_length_mm,
+    migrate_dot_radius_mm,
+    migrate_line_width_mm,
+)
 
 
 def _polygon_point_to_dict(point: PolygonPoint) -> dict:
@@ -187,7 +191,7 @@ def legend_from_dict(data: dict | None) -> LegendConfig:
                 opacity=float(item.get("opacity", 1.0)),
                 line_width=migrate_line_width_mm(float(item.get("line_width", 0.9))),
                 dot_radius=migrate_dot_radius_mm(float(item.get("dot_radius", 3.0))),
-                dash_length_mm=migrate_dot_radius_mm(
+                dash_length_mm=migrate_dash_length_mm(
                     float(item.get("dash_length_mm", item.get("dot_radius", 3.0)))
                 ),
                 hidden=bool(item.get("hidden", False)),
@@ -208,7 +212,7 @@ def legend_from_dict(data: dict | None) -> LegendConfig:
                 opacity=float(item.get("opacity", 1.0)),
                 line_width=migrate_line_width_mm(float(item.get("line_width", 0.9))),
                 dot_radius=migrate_dot_radius_mm(float(item.get("dot_radius", 3.0))),
-                dash_length_mm=migrate_dot_radius_mm(
+                dash_length_mm=migrate_dash_length_mm(
                     float(item.get("dash_length_mm", item.get("dot_radius", 3.0)))
                 ),
                 hidden=bool(item.get("hidden", False)),
@@ -243,7 +247,7 @@ def legend_from_dict(data: dict | None) -> LegendConfig:
                 opacity=float(item.get("opacity", 1.0)),
                 line_width=migrate_line_width_mm(float(item.get("line_width", 1.2))),
                 dot_radius=migrate_dot_radius_mm(float(item.get("dot_radius", 3.0))),
-                dash_length_mm=migrate_dot_radius_mm(
+                dash_length_mm=migrate_dash_length_mm(
                     float(item.get("dash_length_mm", item.get("dot_radius", 3.0)))
                 ),
                 hidden=bool(item.get("hidden", False)),

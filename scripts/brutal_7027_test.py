@@ -88,7 +88,7 @@ class DetailSnapshot:
         )
         overview_visible = sum(1 for item in widget._overview_cpu_items if item.isVisible())
         reference_visible = sum(
-            1 for item in widget._preplot_navplan_items if item.isVisible()
+            1 for item in widget._preplot_motion_items if item.isVisible()
         )
         return cls(
             gl_line_layers=len(widget._gl_line_layers),
@@ -146,12 +146,16 @@ def _detail_parity_ok(
             issues.append("no_visible_gl_scatter_after_settle")
 
     elif style == LineStyle.DASH:
+        # Dash is now baked into GPU geometry (gaps in the vertices), so it
+        # behaves exactly like SOLID: resident GL runs, no CPU settle curves.
         if settled.postplot_gl_line_layers == 0:
             issues.append("no_postplot_gl_line_layers")
         if settled.gl_line_runs == 0:
             issues.append("no_gl_line_runs")
-        if zoomed_in and settled.postplot_dash_settle_curves == 0:
-            issues.append("no_dash_cpu_curves_when_zoomed")
+        if zoomed_in and settled.gl_line_visible == 0:
+            issues.append("no_visible_gl_lines_when_zoomed")
+        if settled.postplot_dash_settle_curves > 0:
+            issues.append("unexpected_dash_cpu_curves")
 
     return not issues, issues
 
@@ -387,7 +391,13 @@ def main() -> None:
         default="all",
         help="Postplot line style to test (default: all)",
     )
+    parser.add_argument(
+        "--db",
+        default="data/7027.db",
+        help="Path to the project database (default: data/7027.db)",
+    )
     args = parser.parse_args()
+    db_path = Path(args.db)
 
     styles = (
         [LineStyle.SOLID, LineStyle.DOTTED, LineStyle.DASH]
@@ -405,7 +415,9 @@ def main() -> None:
     all_pass = True
     for style in styles:
         try:
-            r, baseline, settled, issues = run_7027_brutal_test(app, line_style=style)
+            r, baseline, settled, issues = run_7027_brutal_test(
+                app, line_style=style, db_path=db_path
+            )
             ok = _print_style_report(style, r, baseline, settled, issues)
             all_pass = all_pass and ok
         except Exception as exc:

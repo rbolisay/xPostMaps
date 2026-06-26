@@ -49,6 +49,18 @@ def migrate_dot_radius_mm(value: float) -> float:
     return value
 
 
+def migrate_dash_length_mm(value: float) -> float:
+    """Dash length is stored directly in millimeters (slider tenths-of-mm).
+
+    Unlike scatter radius it must NOT pass through the legacy dot-radius diameter
+    math, which would shrink the pattern until the dashes collapse into a solid
+    stroke. Only clamp non-positive values to a sensible default.
+    """
+    if value <= 0.0:
+        return 3.0
+    return float(value)
+
+
 def widget_screen_dpi(widget) -> float:
     """Best-effort logical DPI for the widget's screen."""
     try:

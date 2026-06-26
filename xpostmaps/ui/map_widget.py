@@ -73,6 +73,7 @@ from xpostmaps.utils.spatial_clip import (
 )
 from xpostmaps.utils.symbology_units import (
     PDF_EXPORT_DPI,
+    migrate_dash_length_mm,
     migrate_dot_radius_mm,
     migrate_line_width_mm,
     scatter_size_px,
@@ -591,6 +592,50 @@ class PostplotMapWidget(QWidget):
 
     def _screen_dpi(self) -> float:
         return widget_screen_dpi(self._plot)
+
+    def _overview_world_per_px(self) -> float:
+        """World units per device pixel when the survey is fully fit to the view."""
+        if self._extent_x is None or self._extent_y is None:
+            return 0.0
+        ex = self._extent_x[1] - self._extent_x[0]
+        ey = self._extent_y[1] - self._extent_y[0]
+        w = max(1, int(self._plot.width()))
+        h = max(1, int(self._plot.height()))
+        if ex <= 0.0 or ey <= 0.0:
+            return 0.0
+        return max(ex / float(w), ey / float(h))
+
+    def _dash_world_lengths(
+        self,
+        local_parts: list[tuple[np.ndarray, np.ndarray]],
+        dash_length_mm: float,
+    ) -> tuple[float, float]:
+        """On/gap dash lengths in world units, baked at the overview scale.
+
+        The mm setting is honored at the fit-to-survey view; zooming in makes the
+        dashes proportionally longer (they never vanish into a solid line). A
+        floor of a few shotpoint spacings guarantees the gaps are always visible.
+        """
+        dpi = self._screen_dpi()
+        dash_px = max(3.0, dash_length_mm * dpi / 25.4)
+        gap_px = max(2.0, dash_px * 0.8)
+        wpp = self._overview_world_per_px()
+        if wpp <= 0.0:
+            wpp = 1.0
+        on_world = dash_px * wpp
+        gap_world = gap_px * wpp
+        spacings: list[float] = []
+        for px, py in local_parts[:24]:
+            if px.size >= 2:
+                seg = np.hypot(np.diff(px), np.diff(py))
+                seg = seg[np.isfinite(seg) & (seg > 0.0)]
+                if seg.size:
+                    spacings.append(float(np.median(seg)))
+        if spacings:
+            med = float(np.median(spacings))
+            on_world = max(on_world, 2.0 * med)
+            gap_world = max(gap_world, 1.5 * med)
+        return on_world, gap_world
 
     @staticmethod
     def _screen_line_width_px(pen: QPen) -> float:
@@ -1724,7 +1769,7 @@ class PostplotMapWidget(QWidget):
             return
 
         width_mm = migrate_line_width_mm(key.width)
-        dash_length_mm = migrate_dot_radius_mm(key.dash_length_mm)
+        dash_length_mm = migrate_dash_length_mm(key.dash_length_mm)
         pen = _make_nav_pen(
             rgba,
             width_mm,
@@ -1778,12 +1823,21 @@ class PostplotMapWidget(QWidget):
                 self._register_plot_item(overview_curve, layer=layer)
                 self._overview_cpu_items.append(overview_curve)
             self._overview_strokes.append((lx, ly, rgba))
+            dash_on_world = 0.0
+            dash_gap_world = 0.0
+            if line_style == LineStyle.DASH:
+                dash_on_world, dash_gap_world = self._dash_world_lengths(
+                    local_parts,
+                    dash_length_mm,
+                )
             gl_layer = ResidentGlLineLayer(
                 parts=local_parts,
                 color_parts=local_color_parts,
                 pen=pen,
                 export_pen=export_pen,
                 line_style=line_style,
+                dash_on_world=dash_on_world,
+                dash_gap_world=dash_gap_world,
                 map_layer=layer,
                 plot_item=self._plot_item,
                 gl_overlay=self._gl_overlay,
