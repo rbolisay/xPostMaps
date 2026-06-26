@@ -577,6 +577,165 @@ def test_p111_compound_crs_row_does_not_clobber_projected_epsg() -> None:
     assert metadata.get("epsg code") == "23031"
 
 
+def test_navplan_header_infers_epsg_from_datum_projection_zone() -> None:
+    from xpostmaps.parsers.metadata_parser import parse_file_metadata
+
+    path = Path("4D/4030/Navplans/Priority1/0111421A.navplan")
+    metadata = parse_file_metadata(path)
+    assert metadata.get("geographic datum", "").startswith("ED50")
+    assert metadata.get("projection") == "001 U.T.M. NORTHERN HEMISPHERE"
+    assert metadata.get("projection zone") == "31N"
+    assert metadata.get("epsg code") == "23031"
+
+
+def test_infer_epsg_from_header_known_utm_families_without_pyproj() -> None:
+    """Header-only inference must resolve common UTM datum families even when
+    pyproj is unavailable. These EPSG codes are authoritative and fixed."""
+    from xpostmaps.core.crs_utils import infer_epsg_from_header
+
+    # ED50 / UTM North (zones 28-38 == EPSG 23028-23038).
+    assert infer_epsg_from_header("ED50", "U.T.M. NORTHERN HEMISPHERE", "31N") == "23031"
+    assert infer_epsg_from_header("ED-50", "UTM", "28N") == "23028"
+    assert infer_epsg_from_header("ED50", "UTM", "38N") == "23038"
+    # WGS 84 / UTM, both hemispheres (326xx north, 327xx south).
+    assert infer_epsg_from_header("WGS84", "UTM zone 21N", "21N") == "32621"
+    assert infer_epsg_from_header("WGS 84", "UTM SOUTHERN HEMISPHERE", "55S") == "32755"
+    # ETRS89 and NAD families.
+    assert infer_epsg_from_header("ETRS89", "UTM", "32N") == "25832"
+    assert infer_epsg_from_header("NAD83", "UTM", "15N") == "26915"
+    assert infer_epsg_from_header("NAD27", "UTM", "15N") == "26715"
+    # Out-of-family zone numbers must NOT produce a false EPSG.
+    assert infer_epsg_from_header("ED50", "UTM", "60N") == ""
+    # Missing zone must not borrow digits from the projection code (e.g. "001").
+    assert infer_epsg_from_header("ED50", "001 U.T.M. NORTHERN HEMISPHERE", "") == ""
+
+
+def _build_4030_navplan_match_row(p111: Path):
+    """Construct a navplan match row wired to the real 4030 P111 source records."""
+    from xpostmaps.core.models import make_sequence_group_id
+    from xpostmaps.parsers.p111_parser import parse_p111_file
+
+    src = [
+        r
+        for r in parse_p111_file(p111)
+        if r.record_type == RecordType.SOURCE and r.point_num > 0
+    ]
+    rec = src[0]
+    seq_id = make_sequence_group_id(rec.file_name, rec.sequence_no, rec.line_name) + "|source"
+    match_row = Postplot4DMatchRow(
+        baseline_name="0103643A",
+        baseline_kind="navplan",
+        line_name=rec.line_name,
+        subline=rec.subline,
+        sequence_no=rec.sequence_no,
+        first_sp=min(r.point_num for r in src),
+        last_sp=max(r.point_num for r in src),
+        line_direction="123.1",
+        sequence_id=seq_id,
+        baseline_file_name="0103643A.navplan",
+    )
+    return src, match_row
+
+
+def test_diff_crs_gate_passes_on_real_4030_navplan_vs_p111() -> None:
+    from xpostmaps.core.postplot_4d_diff import (
+        assess_diff_crs_consistency,
+        calculate_match_diff_rows,
+    )
+
+    navplan = Path("4D/4030/Navplans/Priority1/0103643A.navplan")
+    p111 = Path("4D/4030/P111V/069.0103643A-069.nrt.GFUNREG.p111")
+    if not navplan.is_file() or not p111.is_file():
+        return  # dataset not present in this checkout
+
+    src, match_row = _build_4030_navplan_match_row(p111)
+    map_data = MapData()
+    map_data.postmap_info.epsg_code = "23031"
+    settings = ProjectSettings(
+        nav_files=[str(p111.resolve())],
+        navplan_files=[str(navplan.resolve())],
+        postplot_4d_baseline="navplan",
+    )
+
+    assessment = assess_diff_crs_consistency(map_data, settings, src, match_row)
+    assert assessment.ok, assessment.reason
+    assert assessment.baseline_epsg == "23031"
+    assert set(assessment.source_epsgs) == {"23031"}
+
+    diff_rows = calculate_match_diff_rows(map_data, settings, src, match_row)
+    assert diff_rows  # FSP/LSP positions populated only when CRS is verified
+
+
+def test_diff_crs_gate_blocks_when_source_crs_unknown() -> None:
+    from xpostmaps.core.postplot_4d_diff import (
+        CrsMismatchError,
+        assess_diff_crs_consistency,
+        calculate_match_diff_rows,
+    )
+
+    navplan = Path("4D/4030/Navplans/Priority1/0103643A.navplan")
+    p111 = Path("4D/4030/P111V/069.0103643A-069.nrt.GFUNREG.p111")
+    if not navplan.is_file() or not p111.is_file():
+        return
+
+    src, match_row = _build_4030_navplan_match_row(p111)
+    map_data = MapData()
+    map_data.postmap_info.epsg_code = "23031"
+    # No nav_files / p111 dir -> the firing-source CRS cannot be resolved.
+    settings = ProjectSettings(
+        navplan_files=[str(navplan.resolve())],
+        postplot_4d_baseline="navplan",
+    )
+
+    assessment = assess_diff_crs_consistency(map_data, settings, src, match_row)
+    assert not assessment.ok
+    assert "source" in assessment.reason.lower()
+
+    import pytest
+
+    with pytest.raises(CrsMismatchError):
+        calculate_match_diff_rows(map_data, settings, src, match_row)
+
+
+def test_diff_crs_gate_blocks_when_no_sources() -> None:
+    from xpostmaps.core.postplot_4d_diff import (
+        CrsMismatchError,
+        assess_diff_crs_consistency,
+        calculate_match_diff_rows,
+    )
+
+    navplan = Path("4D/4030/Navplans/Priority1/0103643A.navplan")
+    if not navplan.is_file():
+        return
+
+    match_row = Postplot4DMatchRow(
+        baseline_name="0103643A",
+        baseline_kind="navplan",
+        line_name="0103643A",
+        subline="",
+        sequence_no="1",
+        first_sp=0,
+        last_sp=0,
+        line_direction="123.1",
+        sequence_id="missing.p111|1|0103643A|source",
+        baseline_file_name="0103643A.navplan",
+    )
+    map_data = MapData()
+    map_data.postmap_info.epsg_code = "23031"
+    settings = ProjectSettings(
+        navplan_files=[str(navplan.resolve())],
+        postplot_4d_baseline="navplan",
+    )
+
+    assessment = assess_diff_crs_consistency(map_data, settings, [], match_row)
+    assert not assessment.ok
+
+    import pytest
+
+    with pytest.raises(CrsMismatchError):
+        calculate_match_diff_rows(map_data, settings, [], match_row)
+
+
 def test_source_shotpoints_filter_by_sequence_group() -> None:
     match_row = Postplot4DMatchRow(
         baseline_name="0103643A",

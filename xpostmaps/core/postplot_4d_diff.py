@@ -25,7 +25,12 @@ from xpostmaps.core.postplot_4d_matching import (
 from xpostmaps.parsers.metadata_parser import parse_file_metadata
 from xpostmaps.parsers.p190_parser import parse_p190_header
 from xpostmaps.parsers.preplot_parser import parse_navplan_source_file, parse_preplot_file
-from xpostmaps.core.crs_utils import WGS84_EPSG, normalize_epsg, transform_coordinates
+from xpostmaps.core.crs_utils import (
+    WGS84_EPSG,
+    normalize_epsg,
+    pyproj_available,
+    transform_coordinates,
+)
 
 _NUMBER_RE = re.compile(r"[-+]?(?:\d+(?:\.\d*)?|\.\d+)(?:[Ee][-+]?\d+)?")
 _AZIMUTH_RE = _NUMBER_RE
@@ -51,6 +56,27 @@ _PREPLOT_DIRECTION_RE = re.compile(
     r"(?:LINE[-\s_]*DIRECTION|LINE\s*HEADING|HEADING|AZIMUTH|BEARING|ROTATION)",
     re.IGNORECASE,
 )
+
+
+class CrsMismatchError(RuntimeError):
+    """Raised when a Diff Stat cannot be computed in a single, verified CRS.
+
+    A Diff Stat is only meaningful when the baseline (navplan/preplot) and the
+    firing-source (P111/P190) coordinates are differenced inside ONE projected
+    CRS (datum + grid). If a CRS is unknown, or two files disagree and cannot be
+    reprojected, we refuse rather than emit silently-wrong metres.
+    """
+
+
+@dataclass(frozen=True)
+class DiffCrsAssessment:
+    """Outcome of validating CRS consistency before a Diff Stat is computed."""
+
+    ok: bool
+    reason: str
+    map_epsg: str
+    baseline_epsg: str
+    source_epsgs: tuple[str, ...]
 
 
 @dataclass(frozen=True)
@@ -1022,6 +1048,118 @@ def compute_postplot_4d_diff_rows(
     return rows
 
 
+def assess_diff_crs_consistency(
+    map_data: MapData | None,
+    settings: ProjectSettings | None,
+    positions: list[PositionRecord],
+    match_row: Postplot4DMatchRow,
+) -> DiffCrsAssessment:
+    """Validate that baseline + firing-source coordinates resolve to ONE CRS.
+
+    Returns an assessment describing whether the Diff Stat can be safely
+    computed. The contract is intentionally strict (zero tolerance): every
+    participating file must declare a resolvable EPSG, and any differences must
+    be reconcilable to a single map CRS via an available transform.
+    """
+    map_epsg = normalize_epsg(resolve_diff_map_epsg(map_data, settings))
+    baseline_path = _resolve_baseline_path(
+        settings,
+        match_row.baseline_kind,
+        match_row.baseline_file_name,
+    )
+    baseline_kind = "Navplan" if match_row.baseline_kind == "navplan" else "Preplot"
+    if baseline_path is None:
+        return DiffCrsAssessment(
+            False,
+            f"{baseline_kind} baseline file not found for "
+            f"{match_row.baseline_file_name or match_row.baseline_name}",
+            map_epsg,
+            "",
+            (),
+        )
+    baseline_epsg = _file_epsg(baseline_path)
+
+    sources = source_shotpoints_for_match(positions, match_row)
+    source_files = sorted({record.file_name for record in sources.values() if record.file_name})
+    source_epsgs = tuple(
+        normalize_epsg(_source_file_epsg(settings, file_name)) for file_name in source_files
+    )
+
+    if not baseline_epsg:
+        return DiffCrsAssessment(
+            False,
+            f"{baseline_kind} CRS could not be determined from {baseline_path.name} "
+            "(missing/unrecognised datum + projection header)",
+            map_epsg,
+            baseline_epsg,
+            source_epsgs,
+        )
+    if not source_files:
+        return DiffCrsAssessment(
+            False,
+            "No firing-source (P111/P190) shotpoints found for this line",
+            map_epsg,
+            baseline_epsg,
+            source_epsgs,
+        )
+    unknown_sources = [
+        Path(file_name).name
+        for file_name, epsg in zip(source_files, source_epsgs)
+        if not epsg
+    ]
+    if unknown_sources:
+        return DiffCrsAssessment(
+            False,
+            "Firing-source CRS could not be determined from "
+            + ", ".join(unknown_sources[:3])
+            + (" …" if len(unknown_sources) > 3 else ""),
+            map_epsg,
+            baseline_epsg,
+            source_epsgs,
+        )
+
+    distinct = {baseline_epsg, *source_epsgs}
+    if map_epsg:
+        distinct.add(map_epsg)
+    if len(distinct) <= 1:
+        return DiffCrsAssessment(
+            True,
+            f"All inputs share EPSG:{baseline_epsg}",
+            map_epsg or baseline_epsg,
+            baseline_epsg,
+            source_epsgs,
+        )
+    # Differing CRS: a single map target plus an available transform is required
+    # so baseline and sources can be projected into one grid before differencing.
+    if not map_epsg:
+        return DiffCrsAssessment(
+            False,
+            "Baseline and firing-source CRS differ ("
+            + ", ".join(sorted(distinct))
+            + ") and no map CRS is set to reconcile them",
+            map_epsg,
+            baseline_epsg,
+            source_epsgs,
+        )
+    if not pyproj_available():
+        return DiffCrsAssessment(
+            False,
+            "Inputs use different CRS ("
+            + ", ".join(sorted(distinct))
+            + ") and pyproj is unavailable to reproject them",
+            map_epsg,
+            baseline_epsg,
+            source_epsgs,
+        )
+    return DiffCrsAssessment(
+        True,
+        "Inputs reprojected to EPSG:" + map_epsg,
+        map_epsg,
+        baseline_epsg,
+        source_epsgs,
+    )
+
+
 def calculate_match_diff_rows(
     map_data: MapData | None,
     settings: ProjectSettings | None,
@@ -1031,6 +1169,9 @@ def calculate_match_diff_rows(
     database=None,
     project_name: str = "",
 ) -> list[Postplot4DDiffRow]:
+    assessment = assess_diff_crs_consistency(map_data, settings, positions, match_row)
+    if not assessment.ok:
+        raise CrsMismatchError(assessment.reason)
     map_epsg = resolve_diff_map_epsg(map_data, settings)
     baseline_path = _resolve_baseline_path(
         settings,

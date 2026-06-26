@@ -29,6 +29,7 @@ from xpostmaps.core.crs_utils import normalize_epsg
 from xpostmaps.core.database import Database
 from xpostmaps.core.models import MapData, PositionRecord, ProjectSettings
 from xpostmaps.core.postplot_4d_diff import (
+    CrsMismatchError,
     Postplot4DDiffRow,
     calculate_match_diff_rows,
     resolve_diff_map_epsg,
@@ -518,7 +519,23 @@ class Postplot4DDialog:
         def show_diff_stat(match_row: Postplot4DMatchRow) -> None:
             nonlocal diff_rows
             state["active_match"] = match_row
-            diff_rows, source = load_or_calculate_diffs(match_row)
+            try:
+                diff_rows, source = load_or_calculate_diffs(match_row)
+            except CrsMismatchError as exc:
+                diff_rows = []
+                diff_title.setText(_diff_title(match_row))
+                if diff_crs_note is not None:
+                    diff_crs_note.setText(_crs_note_for_match(match_row))
+                refresh_diff_table()
+                _set_diff_summary(
+                    diff_summary,
+                    f"Diff Stat blocked — CRS not verified: {exc}",
+                    tone="busy",
+                )
+                if host_dialog is not None:
+                    host_dialog.setWindowTitle(_diff_title(match_row))
+                stack.setCurrentIndex(1)
+                return
             diff_title.setText(_diff_title(match_row))
             if diff_crs_note is not None:
                 diff_crs_note.setText(_crs_note_for_match(match_row))

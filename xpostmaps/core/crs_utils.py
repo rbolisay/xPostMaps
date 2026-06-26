@@ -51,6 +51,12 @@ def infer_epsg_from_header(
         datum_name = "ED50"
     elif "WGS84" in datum_text or "WGS 84" in datum_text:
         datum_name = "WGS 84"
+    elif "ETRS89" in datum_text or "ETRS 89" in datum_text:
+        datum_name = "ETRS89"
+    elif "NAD83" in datum_text or "NAD 83" in datum_text:
+        datum_name = "NAD83"
+    elif "NAD27" in datum_text or "NAD 27" in datum_text:
+        datum_name = "NAD27"
     elif "NZGD2000" in datum_text or "NZTM2000" in datum_text:
         datum_name = "NZGD2000"
 
@@ -68,17 +74,39 @@ def infer_epsg_from_header(
             return ""
         return str(epsg) if epsg is not None else ""
 
+    def known_utm_epsg(zone_num: int, hemisphere: str) -> str:
+        if not 1 <= zone_num <= 60:
+            return ""
+        if datum_name == "WGS 84":
+            return str(32600 + zone_num if hemisphere == "N" else 32700 + zone_num)
+        if hemisphere != "N":
+            return ""
+        if datum_name == "ED50" and 28 <= zone_num <= 38:
+            return str(23000 + zone_num)
+        if datum_name == "ETRS89" and 28 <= zone_num <= 38:
+            return str(25800 + zone_num)
+        if datum_name == "NAD83" and 1 <= zone_num <= 23:
+            return str(26900 + zone_num)
+        if datum_name == "NAD27" and 3 <= zone_num <= 22:
+            return str(26700 + zone_num)
+        return ""
+
     if "UTM" in projection_text or "U.T.M" in projection_text:
         match = re.search(r"(\d{1,2})\s*([NS])?", zone_text)
+        if match is None:
+            match = re.search(r"ZONE\s*(\d{1,2})\s*([NS])?", projection_text)
         if match:
             zone_num = int(match.group(1))
             hemisphere = match.group(2) or (
                 "S" if "SOUTH" in projection_text else "N"
             )
-            if datum_name == "WGS 84":
-                return str(32600 + zone_num if hemisphere == "N" else 32700 + zone_num)
+            fallback_epsg = known_utm_epsg(zone_num, hemisphere)
             if datum_name:
-                return from_user_input(f"{datum_name} / UTM zone {zone_num}{hemisphere}")
+                return (
+                    from_user_input(f"{datum_name} / UTM zone {zone_num}{hemisphere}")
+                    or fallback_epsg
+                )
+            return fallback_epsg
 
     if (
         "TRANSVERSE MERCATOR" in projection_text
@@ -93,6 +121,15 @@ def crs_match(source: str | int | None, target: str | int | None) -> bool:
     src = normalize_epsg(source)
     dst = normalize_epsg(target)
     return bool(src and dst and src == dst)
+
+
+def pyproj_available() -> bool:
+    """Return True when pyproj/PROJ is importable for coordinate transforms."""
+    try:
+        import pyproj  # noqa: F401
+    except Exception:  # noqa: BLE001
+        return False
+    return True
 
 
 def epsg_from_prj_path(prj_path: Path) -> str:
