@@ -6,7 +6,9 @@ from xpostmaps.core.coord_format import (
     dms_compact_to_decimal,
     format_dd_mm,
     format_geo_display,
+    GeoDisplayFormatter,
 )
+from xpostmaps.core.crs_utils import geographic_epsg_from_map, transform_coordinates
 from xpostmaps.core.legend_utils import legend_from_dict, legend_to_dict
 from xpostmaps.core.database import Database
 from xpostmaps.core.models import (
@@ -62,6 +64,29 @@ def test_dms_compact_parses_navplan_style_values() -> None:
 def test_format_geo_display_uses_decimal_strings() -> None:
     assert format_geo_display("59.60086832", 0.0, is_latitude=True) == "59 36.05 N"
     assert format_geo_display("1.1701019", 0.0, is_latitude=False) == "1 10.21 E"
+
+
+def test_format_geo_from_projected_round_trips_projected() -> None:
+    from xpostmaps.core.coord_format import format_geo_from_projected
+
+    fmt = GeoDisplayFormatter("2193")
+    assert fmt.geographic_epsg == "4167"
+    x, y = 1623841.7, 5606835.5
+    lat = format_geo_from_projected(x, y, is_latitude=True, formatter=fmt)
+    lon = format_geo_from_projected(x, y, is_latitude=False, formatter=fmt)
+    assert lat == "39 41.28 S"
+    assert lon == "173 16.68 E"
+    geo_epsg = geographic_epsg_from_map("2193")
+    lons, lats = transform_coordinates([x], [y], "2193", geo_epsg)
+    xs, ys = transform_coordinates(lons, lats, geo_epsg, "2193")
+    assert abs(xs[0] - x) < 0.001
+    assert abs(ys[0] - y) < 0.001
+
+
+def test_geographic_epsg_from_map_pairs_projected_crs() -> None:
+    assert geographic_epsg_from_map("2193") == "4167"
+    assert geographic_epsg_from_map("23031") == "4230"
+    assert geographic_epsg_from_map("4326") == "4326"
 
 
 def test_shotpoint_interval_parser_handles_sample_header_styles() -> None:

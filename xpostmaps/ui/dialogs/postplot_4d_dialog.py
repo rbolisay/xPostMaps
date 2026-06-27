@@ -24,7 +24,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from xpostmaps.core.coord_format import GeoDisplayFormatter, format_geo_display
+from xpostmaps.core.coord_format import GeoDisplayFormatter, format_geo_from_projected
 from xpostmaps.core.crs_utils import normalize_epsg
 from xpostmaps.core.database import Database
 from xpostmaps.core.models import MapData, PositionRecord, ProjectSettings
@@ -565,33 +565,31 @@ class Postplot4DDialog:
                 for row_idx, diff_row in enumerate(diff_rows):
                     diff_table.setRowHeight(row_idx, 34)
                     if coord_mode == "lat":
-                        baseline_a = format_geo_display(
-                            diff_row.baseline_latitude,
+                        # EN x/y are the diff source of truth; derive lat/long from them so
+                        # toggling Easting/Northing <-> Lat/Long shows the same point.
+                        baseline_a = format_geo_from_projected(
                             diff_row.baseline_x,
+                            diff_row.baseline_y,
                             is_latitude=True,
                             formatter=geo_formatter,
-                            other_projected=diff_row.baseline_y,
                         )
-                        baseline_b = format_geo_display(
-                            diff_row.baseline_longitude,
+                        baseline_b = format_geo_from_projected(
+                            diff_row.baseline_x,
                             diff_row.baseline_y,
                             is_latitude=False,
                             formatter=geo_formatter,
-                            other_projected=diff_row.baseline_x,
                         )
-                        source_a = format_geo_display(
-                            diff_row.source_latitude,
+                        source_a = format_geo_from_projected(
                             diff_row.source_x,
+                            diff_row.source_y,
                             is_latitude=True,
                             formatter=geo_formatter,
-                            other_projected=diff_row.source_y,
                         )
-                        source_b = format_geo_display(
-                            diff_row.source_longitude,
+                        source_b = format_geo_from_projected(
+                            diff_row.source_x,
                             diff_row.source_y,
                             is_latitude=False,
                             formatter=geo_formatter,
-                            other_projected=diff_row.source_x,
                         )
                     else:
                         baseline_a = _format_coord(diff_row.baseline_x)

@@ -31,6 +31,31 @@ def epsg_label(code: str | int | None) -> str:
     return f"EPSG:{normalized}" if normalized else "unknown CRS"
 
 
+def geographic_epsg_from_map(map_epsg: str | int | None) -> str:
+    """Return the geographic EPSG paired with the map/projected CRS.
+
+    Diff Stat lat/long uses this so geographic coordinates stay on the same
+    datum as easting/northing (e.g. EPSG:2193 → EPSG:4167, EPSG:23031 → EPSG:4230).
+    """
+    code = normalize_epsg(map_epsg)
+    if not code:
+        return WGS84_EPSG
+    try:
+        from pyproj import CRS
+
+        crs = CRS.from_epsg(int(code))
+        if crs.is_geographic:
+            return code
+        geodetic = crs.geodetic_crs
+        if geodetic is not None:
+            authority = geodetic.to_authority()
+            if authority:
+                return normalize_epsg(str(authority[1]))
+    except Exception:  # noqa: BLE001
+        pass
+    return WGS84_EPSG
+
+
 def _approx_equal(left: float, right: float, tolerance: float = 1e-3) -> bool:
     return abs(left - right) <= tolerance
 

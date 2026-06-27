@@ -33,7 +33,7 @@ from xpostmaps.parsers.p111_parser import (
 )
 from xpostmaps.parsers.preplot_parser import parse_navplan_source_file, parse_preplot_file
 from xpostmaps.core.crs_utils import (
-    WGS84_EPSG,
+    geographic_epsg_from_map,
     normalize_epsg,
     pyproj_available,
     transform_coordinates,
@@ -735,11 +735,12 @@ def _populate_generated_lat_lon(
     ordered_items = list(generated.items())
     ordered = [point for _, point in ordered_items]
     try:
+        geo_epsg = geographic_epsg_from_map(code)
         lons, lats = transform_coordinates(
             [point.x for point in ordered],
             [point.y for point in ordered],
             code,
-            WGS84_EPSG,
+            geo_epsg,
         )
     except Exception:  # noqa: BLE001
         return
@@ -1400,9 +1401,10 @@ def _receiver_feathers_for_path(
     return average_receiver_feathers_by_shotpoint(records)
 
 
-def _wgs84_lat_lon(xs: list[float], ys: list[float], map_epsg: str) -> tuple[list[str], list[str]]:
+def _map_geographic_lat_lon(xs: list[float], ys: list[float], map_epsg: str) -> tuple[list[str], list[str]]:
     try:
-        lons, lats = transform_coordinates(xs, ys, map_epsg, WGS84_EPSG)
+        geo_epsg = geographic_epsg_from_map(map_epsg)
+        lons, lats = transform_coordinates(xs, ys, map_epsg, geo_epsg)
     except Exception:  # noqa: BLE001
         return [], []
     if len(lons) != len(xs) or len(lats) != len(ys):
@@ -1432,7 +1434,7 @@ def _reproject_baseline(
     )
     if len(new_x) != len(keys) or len(new_y) != len(keys):
         return baseline  # refuse to corrupt on a partial transform
-    lats, lons = _wgs84_lat_lon(new_x, new_y, dst)
+    lats, lons = _map_geographic_lat_lon(new_x, new_y, dst)
     result: dict[BaselineKey, BaselineShotpoint] = {}
     for index, key in enumerate(keys):
         point = baseline[key]
@@ -1490,7 +1492,7 @@ def _reproject_sources(
             for shotpoint in shotpoints:
                 result[shotpoint] = sources[shotpoint]
             continue
-        lats, lons = _wgs84_lat_lon(new_x, new_y, dst)
+        lats, lons = _map_geographic_lat_lon(new_x, new_y, dst)
         for index, shotpoint in enumerate(shotpoints):
             record = sources[shotpoint]
             result[shotpoint] = replace(

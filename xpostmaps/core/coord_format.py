@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import re
 
-from xpostmaps.core.crs_utils import WGS84_EPSG, transform_coordinates
+from xpostmaps.core.crs_utils import geographic_epsg_from_map, transform_coordinates
 
 _DECIMAL_RE = re.compile(r"^[-+]?\d+(?:\.\d+)?$")
 
@@ -83,6 +83,25 @@ def format_dd_mm(value: float, *, is_latitude: bool) -> str:
     return f"{degrees} {minutes:.2f} {hem}"
 
 
+def format_geo_from_projected(
+    easting: float,
+    northing: float,
+    *,
+    is_latitude: bool,
+    map_epsg: str = "",
+    formatter: "GeoDisplayFormatter | None" = None,
+) -> str:
+    """Format map-CRS lat/long from projected easting/northing (Diff Stat EN toggle)."""
+    return format_geo_display(
+        "",
+        northing if is_latitude else easting,
+        is_latitude=is_latitude,
+        map_epsg=map_epsg,
+        other_projected=easting if is_latitude else northing,
+        formatter=formatter,
+    )
+
+
 def format_geo_display(
     raw: str,
     projected: float,
@@ -107,9 +126,10 @@ def format_geo_display(
     if map_epsg and projected == projected:
         if other_projected is None or other_projected != other_projected:
             return ""
+        geo_epsg = geographic_epsg_from_map(map_epsg)
         xs = [projected if not is_latitude else other_projected]
         ys = [other_projected if not is_latitude else projected]
-        lons, lats = transform_coordinates(xs, ys, map_epsg, WGS84_EPSG)
+        lons, lats = transform_coordinates(xs, ys, map_epsg, geo_epsg)
         if not lats or not lons:
             return ""
         value = lats[0] if is_latitude else lons[0]
@@ -118,24 +138,61 @@ def format_geo_display(
 
 
 class GeoDisplayFormatter:
-    """Batch-friendly lat/long formatter with a reused CRS transformer."""
+    """Batch-friendly lat/long formatter using the map CRS geodetic datum."""
 
     def __init__(self, map_epsg: str = "") -> None:
         from xpostmaps.core.crs_utils import normalize_epsg
 
         self._map_epsg = normalize_epsg(map_epsg)
+        self._geo_epsg = geographic_epsg_from_map(self._map_epsg)
         self._transformer = None
-        if self._map_epsg and self._map_epsg != WGS84_EPSG:
+        self._inverse_transformer = None
+        if self._map_epsg:
             try:
                 from pyproj import Transformer
 
                 self._transformer = Transformer.from_crs(
                     f"EPSG:{self._map_epsg}",
-                    f"EPSG:{WGS84_EPSG}",
+                    f"EPSG:{self._geo_epsg}",
+                    always_xy=True,
+                )
+                self._inverse_transformer = Transformer.from_crs(
+                    f"EPSG:{self._geo_epsg}",
+                    f"EPSG:{self._map_epsg}",
                     always_xy=True,
                 )
             except Exception:  # noqa: BLE001
                 self._transformer = None
+                self._inverse_transformer = None
+
+    @property
+    def geographic_epsg(self) -> str:
+        return self._geo_epsg
+
+    def geographic_from_projected(
+        self,
+        easting: float,
+        northing: float,
+    ) -> tuple[float, float]:
+        """Return ``(longitude, latitude)`` on the map CRS geodetic datum."""
+        if self._transformer is None or easting != easting or northing != northing:
+            return float("nan"), float("nan")
+        lon, lat = self._transformer.transform(easting, northing)
+        return float(lon), float(lat)
+
+    def projected_from_geographic(self, lon: float, lat: float) -> tuple[float, float]:
+        """Return ``(easting, northing)`` in the map CRS."""
+        if self._inverse_transformer is None or lon != lon or lat != lat:
+            return float("nan"), float("nan")
+        easting, northing = self._inverse_transformer.transform(lon, lat)
+        return float(easting), float(northing)
+
+    # Backward-compatible aliases
+    def wgs84_from_projected(self, easting: float, northing: float) -> tuple[float, float]:
+        return self.geographic_from_projected(easting, northing)
+
+    def projected_from_wgs84(self, lon: float, lat: float) -> tuple[float, float]:
+        return self.projected_from_geographic(lon, lat)
 
     def format(
         self,
