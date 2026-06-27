@@ -1,5 +1,6 @@
 from pathlib import Path
 import math
+from unittest.mock import patch
 
 from xpostmaps.core.coord_format import (
     dms_compact_to_decimal,
@@ -1274,10 +1275,106 @@ def test_conditional_points_signature_uses_diff_stat_field() -> None:
         )
     )
 
-    signature = MainWindow._conditional_points_signature(settings, 7)
+    signature = MainWindow._conditional_points_signature(settings, 7, (42, "2026-01-01T00:00:00Z"))
 
     assert signature[0] == 7
-    assert signature[1][0][3][0][0] == "radial"
+    assert signature[1] == (42, "2026-01-01T00:00:00Z")
+    assert signature[2][0][3][0][0] == "radial"
+
+
+def test_conditional_refresh_reruns_when_saved_diff_rows_appear(tmp_path) -> None:
+    db = Database(tmp_path / "project.db")
+    settings = ProjectSettings(
+        name="4030",
+        postplot_4d_baseline="navplan",
+        legend_config=LegendConfig(
+            postplot_lines=[
+                PostplotLegendEntry(
+                    name="Acceptance",
+                    sequence_ids=["file.p190|1"],
+                    sequence_filter_active=True,
+                    conditional_colors=[
+                        ConditionalColorRule(
+                            diff_stat="radial",
+                            range_value="0-3",
+                            color="#22c55e",
+                            opacity=0.75,
+                        )
+                    ],
+                )
+            ]
+        ),
+    )
+    db.save_project(settings, MapData())
+    window = MainWindow.__new__(MainWindow)
+    window._settings = settings
+    window._map_data = MapData()
+    window._db = db
+    window._match_diff_cache = {}
+    window._match_diff_cache_version = -1
+    window._conditional_data_version = 0
+    window._conditional_points_signature_cache = None
+    window._map = type(
+        "MapStub",
+        (),
+        {
+            "set_conditional_postplot_points": lambda self, points: setattr(
+                self, "points", list(points)
+            ),
+        },
+    )()
+    window._map.points = []
+    match_row = Postplot4DMatchRow(
+        baseline_name="baseline",
+        baseline_kind="navplan",
+        line_name="0103643A",
+        subline="",
+        sequence_no="1",
+        first_sp=101,
+        last_sp=101,
+        line_direction="",
+        sequence_id="file.p190|1",
+        baseline_file_name="baseline.navplan",
+    )
+
+    with patch(
+        "xpostmaps.ui.main_window.build_postplot_4d_rows",
+        return_value=[match_row],
+    ):
+        MainWindow._refresh_conditional_postplot_points(window)
+
+    assert window._map.points == []
+    cached_after_empty = window._conditional_points_signature_cache
+    assert cached_after_empty is not None
+
+    saved = [
+        Postplot4DDiffRow(
+            shotpoint=101,
+            baseline_x=1.0,
+            baseline_y=2.0,
+            baseline_latitude="",
+            baseline_longitude="",
+            source_x=4.0,
+            source_y=6.0,
+            source_latitude="",
+            source_longitude="",
+            crossline_m=1.5,
+            inline_m=2.5,
+            radial_m=2.0,
+        )
+    ]
+    db.save_postplot_4d_diffs("4030", "navplan", "baseline", "file.p190|1", saved)
+
+    with patch(
+        "xpostmaps.ui.main_window.build_postplot_4d_rows",
+        return_value=[match_row],
+    ):
+        MainWindow._refresh_conditional_postplot_points(window)
+
+    assert len(window._map.points) == 1
+    assert window._map.points[0][2] == "#22c55e"
+    assert window._conditional_points_signature_cache != cached_after_empty
+    db.close()
 
 
 def test_conditional_diff_cache_reads_saved_database_rows(tmp_path) -> None:

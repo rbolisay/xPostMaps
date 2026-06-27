@@ -770,7 +770,7 @@ class Postplot4DDialog:
                 )
                 if parent is not None:
                     _show_host_status(parent, status)
-                if recalculated and on_diffs_saved is not None:
+                if not cancelled and on_diffs_saved is not None:
                     on_diffs_saved()
                 QTimer.singleShot(
                     5000,
@@ -880,7 +880,7 @@ class Postplot4DDialog:
                     diff_rows = stored
                 refresh_diff_table()
                 _set_diff_summary(diff_summary, message, tone="done")
-            if recalculated and on_diffs_saved is not None:
+            if not cancelled and on_diffs_saved is not None:
                 on_diffs_saved()
             if parent is not None:
                 _show_host_status(parent, message)

@@ -427,8 +427,7 @@ class MainWindow(QMainWindow):
 
     def _on_postplot_4d_diffs_saved(self) -> None:
         self._invalidate_conditional_diff_cache()
-        self._refresh_conditional_postplot_points()
-        self._map.render(self._map_data, force=True)
+        QTimer.singleShot(0, self._deferred_refresh_conditional_postplot_points)
 
     def _open_layer_styles(self) -> None:
         perimeters = self._map_data.survey_perimeters if self._map_data else []
@@ -533,11 +532,25 @@ class MainWindow(QMainWindow):
                 match = rule
         return match
 
+    def _postplot_diff_fingerprint(self) -> tuple[int, str]:
+        project_name = self._settings.name.strip()
+        if not project_name:
+            return (0, "")
+        return self._db.postplot_4d_diff_fingerprint(
+            project_name,
+            self._settings.postplot_4d_baseline,
+        )
+
     @staticmethod
-    def _conditional_points_signature(settings: ProjectSettings, data_version: int) -> tuple:
+    def _conditional_points_signature(
+        settings: ProjectSettings,
+        data_version: int,
+        diff_fingerprint: tuple[int, str],
+    ) -> tuple:
         """Inputs that affect conditional point selection and color."""
         return (
             data_version,
+            diff_fingerprint,
             tuple(
                 (
                     tuple(entry.sequence_ids),
@@ -574,12 +587,15 @@ class MainWindow(QMainWindow):
                 for rule in entry.conditional_colors
             )
         ]
+        diff_fingerprint = self._postplot_diff_fingerprint()
         signature = self._conditional_points_signature(
             self._settings,
             self._conditional_data_version,
+            diff_fingerprint,
         )
         if signature == self._conditional_points_signature_cache:
             return
+        self._match_diff_cache = {}
         if not active_entries:
             self._map.set_conditional_postplot_points([])
             self._conditional_points_signature_cache = signature
@@ -676,7 +692,7 @@ class MainWindow(QMainWindow):
                 self._match_diff_cache[key] = cached
                 return cached
             if not calculate_if_missing:
-                self._match_diff_cache[key] = []
+                # Do not cache empty DB misses; Diff Stat may be saved later.
                 return []
             if positions is None:
                 positions = self._current_positions()

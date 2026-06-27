@@ -1394,6 +1394,27 @@ class Database:
         ).fetchone()
         return row is not None
 
+    def postplot_4d_diff_fingerprint(
+        self,
+        project_name: str,
+        baseline_kind: str,
+    ) -> tuple[int, str]:
+        """Cheap summary of saved Diff Stat rows for cache invalidation."""
+        project_id = self.get_project_id(project_name)
+        if project_id is None:
+            return (0, "")
+        row = self._conn.execute(
+            """
+            SELECT COUNT(*) AS row_count, MAX(updated_at) AS updated_at
+            FROM postplot_4d_diffs
+            WHERE project_id=? AND baseline_kind=?
+            """,
+            (project_id, baseline_kind),
+        ).fetchone()
+        if row is None:
+            return (0, "")
+        return (int(row["row_count"] or 0), str(row["updated_at"] or ""))
+
     def postplot_4d_diffs_updated_at(
         self,
         project_name: str,
