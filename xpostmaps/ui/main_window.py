@@ -38,6 +38,7 @@ from xpostmaps.core.models import (
     ProjectSettings,
 )
 from xpostmaps.core.parse_worker import ParseWorker
+from xpostmaps.core.postplot_4d_cache_worker import Postplot4DCacheWarmWorker
 from xpostmaps.core.postplot_4d_diff import calculate_match_diff_rows
 from xpostmaps.core.postplot_4d_matching import build_postplot_4d_rows
 from xpostmaps.core.crs_utils import normalize_epsg
@@ -90,6 +91,7 @@ class MainWindow(QMainWindow):
         self._preplot_file_signature: tuple | None = None
         self._navplan_file_signature: tuple | None = None
         self._worker: ParseWorker | None = None
+        self._postplot_cache_worker: Postplot4DCacheWarmWorker | None = None
         self._loading_project = False
         self._parsing = False
         self._closing_after_parse = False
@@ -924,17 +926,18 @@ class MainWindow(QMainWindow):
                 initial_dir=self._settings.p111_p190_dir or "",
                 initial_files=self._settings.nav_files or None,
                 file_summaries=self._nav_file_summaries(),
+                on_apply=self._apply_nav_file_selection,
             )
             if result is None:
                 return
-            files, folder = result
-            QTimer.singleShot(0, lambda: self._apply_nav_file_selection(files, folder))
         finally:
             self._set_left_button_active("p111", False)
 
     def _start_parse(self) -> None:
         if self._worker and self._worker.isRunning():
             return
+        if self._postplot_cache_worker is not None and self._postplot_cache_worker.isRunning():
+            self._postplot_cache_worker.cancel()
         has_nav = bool(resolve_nav_files(self._settings))
         has_preplot = bool(resolve_preplot_files(self._settings))
         has_navplan = bool(resolve_navplan_files(self._settings))
@@ -1082,6 +1085,130 @@ class MainWindow(QMainWindow):
     def _on_map_data_updated(self, map_data: MapData) -> None:
         self._map_data = map_data
 
+    def _start_postplot_4d_cache_warm(self) -> None:
+        if self._postplot_cache_worker is not None and self._postplot_cache_worker.isRunning():
+            return
+        if self._parsing or self._map_data is None:
+            return
+        project_name = self._settings.name.strip()
+        if not project_name:
+            return
+        if not (
+            self._map_data.preplot_segments
+            or self._settings.nav_files
+            or self._settings.navplan_files
+            or self._settings.navplan_catalog
+        ):
+            return
+        if not self._postplot_4d_cache_needs_warm():
+            return
+        self._postplot_cache_worker = Postplot4DCacheWarmWorker(
+            self._db.db_path,
+            project_name,
+            self._settings,
+            self._map_data,
+            include_receiver_feathers=True,
+            parent=self,
+        )
+        self._left.set_progress(0, True)
+        self._left.set_status("Preparing Diff Stat feather/index cache…")
+        self._postplot_cache_worker.progress.connect(self._on_postplot_4d_cache_warm_progress)
+        self._postplot_cache_worker.finished_ok.connect(
+            self._on_postplot_4d_cache_warm_finished
+        )
+        self._postplot_cache_worker.failed.connect(self._on_postplot_4d_cache_warm_failed)
+        self._postplot_cache_worker.start()
+
+    def _on_postplot_4d_cache_warm_progress(
+        self,
+        done: int,
+        total: int,
+        detail: str,
+    ) -> None:
+        if self._parsing:
+            return
+        pct = int(100 * done / max(total, 1))
+        self._left.set_progress(pct, True)
+        self._left.set_status(f"Preparing Diff Stat cache {done}/{total}: {detail}")
+
+    def _postplot_4d_cache_needs_warm(self) -> bool:
+        project_name = self._settings.name.strip()
+        if not project_name or self._map_data is None:
+            return False
+        try:
+            project_id = self._db.get_project_id(project_name)
+            if project_id is None:
+                return False
+            expected_preplot_lines = len(
+                {segment.line_name for segment in self._map_data.preplot_segments if segment.line_name}
+            )
+            cached_preplot_lines = 0
+            if expected_preplot_lines:
+                row = self._db._conn.execute(
+                    """
+                    SELECT COUNT(DISTINCT line_name)
+                    FROM postplot_4d_preplot_shotpoints
+                    WHERE project_id=?
+                    """,
+                    (project_id,),
+                ).fetchone()
+                cached_preplot_lines = int(row[0] if row else 0)
+            if cached_preplot_lines < expected_preplot_lines:
+                return True
+            seen_paths: set[str] = set()
+            feather_inputs = [
+                *self._settings.nav_files,
+                *self._settings.navplan_files,
+                *(entry.file_path for entry in self._settings.navplan_catalog),
+            ]
+            for raw in feather_inputs:
+                if not raw:
+                    continue
+                name = Path(raw).name
+                if not name or name in seen_paths:
+                    continue
+                seen_paths.add(name)
+                # Network-free check: look up the cache marker by file name so a
+                # save never has to stat/resolve every nav file over the (slow)
+                # share. A re-import refreshes the marker, so by-name is safe.
+                marker = self._db.load_postplot_4d_file_cache_by_name(
+                    project_name,
+                    name,
+                )
+                if marker is None or not marker.get("receiver_feathers_cached"):
+                    return True
+        except Exception:  # noqa: BLE001
+            return True
+        return False
+
+    def _on_postplot_4d_cache_warm_failed(self, message: str) -> None:
+        self._postplot_cache_worker = None
+        if self._parsing:
+            return
+        self._left.set_progress(0, False)
+        self._left.set_status(f"Diff Stat cache preparation failed: {message}")
+        self.statusBar().showMessage(
+            f"Diff Stat cache preparation failed: {message}",
+            8000,
+        )
+
+    def _on_postplot_4d_cache_warm_finished(
+        self,
+        preplot_lines: int,
+        feather_files: int,
+        elapsed: float,
+    ) -> None:
+        self._postplot_cache_worker = None
+        if self._parsing:
+            return
+        message = (
+            f"Diff Stat cache ready: {preplot_lines} preplot line(s), "
+            f"{feather_files} feather file(s) ({elapsed:.1f} s)"
+        )
+        self._left.set_status(message)
+        self._left.set_progress(100, False)
+        self.statusBar().showMessage(message, 6000)
+
     def _open_project_browser(self) -> None:
         dialog = ProjectBrowserDialog.open(
             self,
@@ -1220,7 +1347,12 @@ class MainWindow(QMainWindow):
         try:
             self._settings = settings
             self._map_data = map_data
-            self._refresh_postplot_4d_input_signatures(invalidate=False)
+            # Project load must be DB-only. Do not stat imported preplot/navplan
+            # paths here; those files may live on slow/offline network shares.
+            # Signatures are refreshed after parse/import where file access is
+            # already expected.
+            self._preplot_file_signature = None
+            self._navplan_file_signature = None
             if settings.preplot_files and not settings.preplot_catalog:
                 settings.preplot_catalog = build_preplot_catalog_from_segments(
                     settings.preplot_files,
@@ -1346,6 +1478,7 @@ class MainWindow(QMainWindow):
                 self.statusBar().showMessage(f"Auto-save failed: {exc}")
             return False
 
+        self._start_postplot_4d_cache_warm()
         save_note = f"{name} → {target_db.name}"
         if silent:
             self.statusBar().showMessage(f"Auto-saved: {save_note}", 3000)
@@ -1382,6 +1515,8 @@ class MainWindow(QMainWindow):
     def closeEvent(self, event) -> None:  # noqa: N802
         self._autosave.set_enabled(False)
         self._metadata_autosave.set_enabled(False)
+        if self._postplot_cache_worker is not None and self._postplot_cache_worker.isRunning():
+            self._postplot_cache_worker.cancel()
         if self._worker and self._worker.isRunning():
             self._closing_after_parse = True
             self._save_close_metadata()

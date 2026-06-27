@@ -116,13 +116,19 @@ def _collect_from_folders(folders: list[str]) -> list[str]:
 
 
 def _themed_open_directories(parent: QWidget, title: str, initial_dir: str = "") -> list[str]:
-    """Show a dark-themed multi-folder picker."""
+    """Show a dark-themed folder picker with a working select/Choose button.
+
+    Uses Directory mode so the dialog's accept button selects the current
+    folder (the previous ExistingFiles+ShowDirsOnly combo left the Open button
+    permanently disabled because no *file* could be selected).
+    """
     picker = QFileDialog(parent, title)
     if initial_dir and Path(initial_dir).is_dir():
         picker.setDirectory(initial_dir)
-    picker.setFileMode(QFileDialog.FileMode.ExistingFiles)
+    picker.setFileMode(QFileDialog.FileMode.Directory)
     picker.setOption(QFileDialog.Option.ShowDirsOnly, True)
     picker.setOption(QFileDialog.Option.DontUseNativeDialog, True)
+    picker.setLabelText(QFileDialog.DialogLabel.Accept, "Choose")
     apply_file_dialog_theme(picker)
     if picker.exec() != QFileDialog.DialogCode.Accepted:
         return []
@@ -208,7 +214,6 @@ class ImportNavplanDialog:
             )
             rebuild_catalog()
             refresh_table(table)
-            apply_changes()
 
         def select_files() -> None:
             paths = themed_open_files(
@@ -229,7 +234,6 @@ class ImportNavplanDialog:
                     existing.add(resolved)
             rebuild_catalog()
             refresh_table(table)
-            apply_changes()
 
         def rescan() -> None:
             if state["folders"]:
@@ -240,7 +244,6 @@ class ImportNavplanDialog:
                 )
             rebuild_catalog()
             refresh_table(table)
-            apply_changes()
 
         def remove_selected() -> None:
             rows = sorted({index.row() for index in table.selectedIndexes()}, reverse=True)
@@ -260,7 +263,6 @@ class ImportNavplanDialog:
             ]
             rebuild_catalog()
             refresh_table(table)
-            apply_changes()
 
         def build(dialog: SingleInstanceDialog) -> None:
             state["files"] = list(settings.navplan_files)
@@ -282,8 +284,8 @@ class ImportNavplanDialog:
             layout.addWidget(hint)
 
             btn_row = QHBoxLayout()
-            browse_btn = QPushButton("Add Folder…")
-            files_btn = QPushButton("Select Files…")
+            browse_btn = QPushButton("Browse Folder…")
+            files_btn = QPushButton("Add Files…")
             remove_btn = QPushButton("Remove Selected")
             for btn in (browse_btn, files_btn, remove_btn):
                 btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
@@ -312,15 +314,27 @@ class ImportNavplanDialog:
 
             refresh_table(table)
 
+            def apply_and_close() -> None:
+                apply_changes()
+                dialog.close()
+
             close_row = QHBoxLayout()
             rescan_btn = QPushButton("Rescan")
             rescan_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
             rescan_btn.clicked.connect(rescan)
+            apply_btn = QPushButton("Apply")
+            apply_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+            apply_btn.clicked.connect(apply_changes)
+            ok_btn = QPushButton("OK")
+            ok_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+            ok_btn.clicked.connect(apply_and_close)
             close_btn = QPushButton("Close")
             close_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
             close_btn.clicked.connect(dialog.close)
             close_row.addWidget(rescan_btn)
             close_row.addStretch()
+            close_row.addWidget(apply_btn)
+            close_row.addWidget(ok_btn)
             close_row.addWidget(close_btn)
             layout.addLayout(close_row)
 

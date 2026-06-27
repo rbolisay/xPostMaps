@@ -218,6 +218,8 @@ def parse_p190_file(path: Path) -> list[PositionRecord]:
     records: list[PositionRecord] = []
     file_name = path.name
     firing_by_shot: dict[tuple[str, int], PositionRecord] = {}
+    depth_by_shot: dict[tuple[str, int], float] = {}
+    vessel_indices_by_shot: dict[tuple[str, int], list[int]] = {}
     fallback_line_name, fallback_subline = _parse_linename_subline_from_filename(path)
     header_state = {
         "line_name": fallback_line_name,
@@ -226,11 +228,28 @@ def parse_p190_file(path: Path) -> list[PositionRecord]:
         "sequence_no": "",
     }
 
+    def shot_key(line_name: str, shotpoint: int) -> tuple[str, int]:
+        return (line_name.strip() or "UNNAMED", shotpoint)
+
+    def apply_depth(key: tuple[str, int], depth: float) -> None:
+        depth_by_shot[key] = depth
+        if key in firing_by_shot:
+            firing_by_shot[key].depth = depth
+        for index in vessel_indices_by_shot.get(key, []):
+            records[index].depth = depth
+
     with path.open("r", encoding="utf-8", errors="replace") as handle:
         for line in handle:
             line = line.rstrip("\n\r")
             if line.startswith("H"):
                 _apply_p190_header(line, header_state)
+                continue
+            if line.startswith("E") and len(line) >= 70:
+                shotpoint = _parse_int(_slice_field(line, 20, 25))
+                depth = _parse_float(_slice_field(line, 65, 70))
+                line_name = header_state["line_name"] or _slice_field(line, 2, 13)
+                if shotpoint > 0 and depth == depth:
+                    apply_depth(shot_key(line_name, shotpoint), depth)
                 continue
             rec = parse_p190_line(
                 line,
@@ -242,10 +261,13 @@ def parse_p190_file(path: Path) -> list[PositionRecord]:
             )
             if rec is None:
                 continue
+            key = shot_key(rec.line_name, rec.point_num)
+            if key in depth_by_shot:
+                rec.depth = depth_by_shot[key]
             if rec.record_type == RecordType.SOURCE:
-                key = (rec.line_name.strip() or "UNNAMED", rec.point_num)
                 firing_by_shot[key] = rec
                 continue
+            vessel_indices_by_shot.setdefault(key, []).append(len(records))
             records.append(rec)
 
     records.extend(firing_by_shot.values())

@@ -446,6 +446,54 @@ def apply_file_dialog_theme(dialog) -> None:
     dialog.setStyleSheet(app_stylesheet() + file_dialog_stylesheet())
 
 
+def _enable_file_dialog_multi_select(picker) -> None:
+    """Ensure non-native QFileDialog list/tree views allow multi-select."""
+    from PySide6.QtWidgets import QAbstractItemView, QListView, QTreeView
+
+    for view in picker.findChildren(QTreeView):
+        view.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
+    for view in picker.findChildren(QListView):
+        view.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
+
+
+def _selected_files_from_picker(picker) -> list[str]:
+    """Return all chosen files from a themed multi-select picker."""
+    from pathlib import Path
+
+    from PySide6.QtWidgets import QListView, QTreeView
+
+    files = [path for path in picker.selectedFiles() if path]
+    if len(files) > 1:
+        return files
+
+    directory = picker.directory().absolutePath()
+    collected: list[str] = []
+    seen: set[str] = set()
+    for view in (*picker.findChildren(QTreeView), *picker.findChildren(QListView)):
+        if view.isHidden():
+            continue
+        model = view.model()
+        selection = view.selectionModel()
+        if model is None or selection is None:
+            continue
+        for index in selection.selectedIndexes():
+            if index.column() != 0:
+                continue
+            name = index.data()
+            if not name or name in (".", ".."):
+                continue
+            candidate = Path(directory) / str(name)
+            try:
+                resolved = str(candidate.resolve())
+            except OSError:
+                resolved = str(candidate)
+            if not candidate.is_file() or resolved in seen:
+                continue
+            seen.add(resolved)
+            collected.append(resolved)
+    return collected if collected else files
+
+
 def apply_menu_theme(menu) -> None:
     """Apply dark styling to a popup menu."""
     menu.setStyleSheet(app_stylesheet())
@@ -472,28 +520,35 @@ def themed_open_file(
     return selected[0] if selected else ""
 
 
-def themed_open_files(parent, title: str, file_filter: str) -> list[str]:
+def themed_open_files(
+    parent,
+    title: str,
+    file_filter: str,
+    start_dir: str = "",
+) -> list[str]:
     """Show a dark-themed multi-file picker."""
     from PySide6.QtWidgets import QFileDialog
 
-    picker = QFileDialog(parent, title)
+    picker = QFileDialog(parent, title, start_dir)
     picker.setFileMode(QFileDialog.FileMode.ExistingFiles)
     picker.setNameFilter(file_filter)
     picker.setOption(QFileDialog.Option.DontUseNativeDialog, True)
     apply_file_dialog_theme(picker)
+    _enable_file_dialog_multi_select(picker)
     if picker.exec() != QFileDialog.DialogCode.Accepted:
         return []
-    return picker.selectedFiles()
+    return _selected_files_from_picker(picker)
 
 
-def themed_open_directory(parent, title: str) -> str:
+def themed_open_directory(parent, title: str, start_dir: str = "") -> str:
     """Show a dark-themed folder picker."""
     from PySide6.QtWidgets import QFileDialog
 
-    picker = QFileDialog(parent, title)
+    picker = QFileDialog(parent, title, start_dir)
     picker.setFileMode(QFileDialog.FileMode.Directory)
     picker.setOption(QFileDialog.Option.ShowDirsOnly, True)
     picker.setOption(QFileDialog.Option.DontUseNativeDialog, True)
+    picker.setLabelText(QFileDialog.DialogLabel.Accept, "Choose")
     apply_file_dialog_theme(picker)
     if picker.exec() != QFileDialog.DialogCode.Accepted:
         return ""

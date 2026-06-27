@@ -21,7 +21,11 @@ from xpostmaps.core.models import (
     make_sequence_group_id,
     sequence_group_id,
 )
-from xpostmaps.core.postplot_4d_diff import Postplot4DDiffRow, calculate_match_diff_rows
+from xpostmaps.core.postplot_4d_diff import (
+    Postplot4DDiffRow,
+    calculate_match_diff_rows,
+    reset_postplot_4d_path_caches,
+)
 from xpostmaps.core.postplot_4d_matching import Postplot4DMatchRow
 
 _MAX_DIFF_STAT_WORKERS = 8
@@ -195,6 +199,9 @@ class DiffStatRecalcWorker(QThread):
         skipped = self._skipped_count
 
         try:
+            # Start from a clean slate so a fresh import/file change is picked
+            # up, then reuse memoised path lookups across all matches in this run.
+            reset_postplot_4d_path_caches()
             self._map_data = self._map_data_provider()
 
             if self._prepare_tasks is not None:

@@ -3,13 +3,13 @@
 from __future__ import annotations
 
 import time
+from collections.abc import Callable
 from pathlib import Path
 
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
     QApplication,
     QDialog,
-    QFileDialog,
     QHeaderView,
     QHBoxLayout,
     QLabel,
@@ -19,7 +19,7 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
 )
 
-from xpostmaps.ui.theme import app_stylesheet
+from xpostmaps.ui.theme import app_stylesheet, themed_open_directory, themed_open_files
 
 
 class NavFilePickerDialog(QDialog):
@@ -40,6 +40,7 @@ class NavFilePickerDialog(QDialog):
         initial_dir: str = "",
         initial_files: list[str] | None = None,
         file_summaries: dict[str, tuple[str, str, str, str, str]] | None = None,
+        on_apply: Callable[[list[str], str], None] | None = None,
     ) -> None:
         super().__init__(parent)
         self.setWindowTitle(title)
@@ -56,6 +57,7 @@ class NavFilePickerDialog(QDialog):
             Path(key).name.lower(): value
             for key, value in (file_summaries or {}).items()
         }
+        self._on_apply = on_apply
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(16, 16, 16, 16)
@@ -103,17 +105,21 @@ class NavFilePickerDialog(QDialog):
         rescan_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         rescan_btn.setAutoDefault(False)
         rescan_btn.clicked.connect(self._rescan)
+        apply_btn = QPushButton("Apply")
         ok_btn = QPushButton("OK")
         ok_btn.setObjectName("primaryBtn")
-        cancel_btn = QPushButton("Cancel")
-        ok_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-        cancel_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-        ok_btn.clicked.connect(self.accept)
-        cancel_btn.clicked.connect(self.reject)
+        close_btn = QPushButton("Close")
+        for btn in (apply_btn, ok_btn, close_btn):
+            btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+            btn.setAutoDefault(False)
+        apply_btn.clicked.connect(self._apply_selection)
+        ok_btn.clicked.connect(self._apply_and_accept)
+        close_btn.clicked.connect(self.reject)
         action_row.addWidget(rescan_btn)
         action_row.addStretch()
+        action_row.addWidget(apply_btn)
         action_row.addWidget(ok_btn)
-        action_row.addWidget(cancel_btn)
+        action_row.addWidget(close_btn)
         layout.addLayout(action_row)
 
         self._refresh_table()
@@ -126,6 +132,14 @@ class NavFilePickerDialog(QDialog):
     @property
     def selected_folder(self) -> str:
         return self._folder
+
+    def _apply_selection(self) -> None:
+        if self._on_apply is not None:
+            self._on_apply(self.selected_files, self.selected_folder)
+
+    def _apply_and_accept(self) -> None:
+        self._apply_selection()
+        self.accept()
 
     def _collect_from_folder(self, folder: str) -> list[str]:
         root = Path(folder)
@@ -188,7 +202,7 @@ class NavFilePickerDialog(QDialog):
         self.resize(desired_w, desired_h)
 
     def _browse_folder(self) -> None:
-        folder = QFileDialog.getExistingDirectory(
+        folder = themed_open_directory(
             self,
             "Select Folder",
             self._folder or self._initial_dir or "",
@@ -201,11 +215,11 @@ class NavFilePickerDialog(QDialog):
 
     def _add_files(self) -> None:
         start_dir = self._folder or self._initial_dir or ""
-        paths, _ = QFileDialog.getOpenFileNames(
+        paths = themed_open_files(
             self,
             "Select Files",
-            start_dir,
             self._file_filter,
+            start_dir,
         )
         if not paths:
             return
@@ -253,7 +267,6 @@ class NavFilePickerDialog(QDialog):
                 note += " (list unchanged)"
         self._summary.setText(f"Folder: {self._folder or '(none)'}  —  {note}")
         QApplication.processEvents()
-        self.accept()
 
     @classmethod
     def pick(
@@ -267,6 +280,7 @@ class NavFilePickerDialog(QDialog):
         initial_dir: str = "",
         initial_files: list[str] | None = None,
         file_summaries: dict[str, tuple[str, str, str, str, str]] | None = None,
+        on_apply: Callable[[list[str], str], None] | None = None,
     ) -> tuple[list[str], str] | None:
         started = time.perf_counter()
         dialog = cls(
@@ -278,6 +292,7 @@ class NavFilePickerDialog(QDialog):
             initial_dir=initial_dir,
             initial_files=initial_files,
             file_summaries=file_summaries,
+            on_apply=on_apply,
         )
         print(
             "[xPostMaps timing] File picker dialog construction: "

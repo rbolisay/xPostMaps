@@ -150,7 +150,6 @@ class PreplotNavplanDialog:
             state["files"] = _collect_from_folder(folder)
             rebuild_catalog()
             refresh_table(table)
-            apply_changes()
 
         def add_files() -> None:
             paths = themed_open_files(
@@ -169,7 +168,6 @@ class PreplotNavplanDialog:
                     existing.add(resolved)
             rebuild_catalog()
             refresh_table(table)
-            apply_changes()
 
         def remove_selected() -> None:
             rows = sorted({index.row() for index in table.selectedIndexes()}, reverse=True)
@@ -185,7 +183,16 @@ class PreplotNavplanDialog:
             ]
             rebuild_catalog()
             refresh_table(table)
-            apply_changes()
+
+        def rescan() -> None:
+            if state["folder"]:
+                state["files"] = _collect_from_folder(state["folder"])
+            else:
+                state["files"] = [
+                    path for path in state["files"] if Path(path).is_file()
+                ]
+            rebuild_catalog()
+            refresh_table(table)
 
         def build(dialog: SingleInstanceDialog) -> None:
             state["files"] = list(settings.preplot_files)
@@ -231,11 +238,27 @@ class PreplotNavplanDialog:
 
             refresh_table(table)
 
+            def apply_and_close() -> None:
+                apply_changes()
+                dialog.close()
+
             close_row = QHBoxLayout()
+            rescan_btn = QPushButton("Rescan")
+            rescan_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+            rescan_btn.clicked.connect(rescan)
+            apply_btn = QPushButton("Apply")
+            apply_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+            apply_btn.clicked.connect(apply_changes)
+            ok_btn = QPushButton("OK")
+            ok_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+            ok_btn.clicked.connect(apply_and_close)
             close_btn = QPushButton("Close")
             close_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
             close_btn.clicked.connect(dialog.close)
+            close_row.addWidget(rescan_btn)
             close_row.addStretch()
+            close_row.addWidget(apply_btn)
+            close_row.addWidget(ok_btn)
             close_row.addWidget(close_btn)
             layout.addLayout(close_row)
 

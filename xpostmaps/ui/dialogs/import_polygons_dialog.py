@@ -109,6 +109,8 @@ class ImportPolygonsDialog:
             legend.areas = non_imported_polygon_entries(legend.areas) + list(state["entries"])
             sync_legend_imported_references(legend.areas)
             on_apply(legend)
+            if on_map_epsg_changed:
+                on_map_epsg_changed(state["map_epsg"])
 
         def refresh_table(table: QTableWidget) -> None:
             renumber_imported_polygons(state["entries"])
@@ -139,11 +141,8 @@ class ImportPolygonsDialog:
                 return
             if updated_epsg and updated_epsg != state["map_epsg"]:
                 state["map_epsg"] = updated_epsg
-                if on_map_epsg_changed:
-                    on_map_epsg_changed(updated_epsg)
             state["entries"].extend(entries)
             refresh_table(table)
-            apply_changes()
 
         def browse_folder() -> None:
             folder = themed_open_directory(
@@ -174,9 +173,22 @@ class ImportPolygonsDialog:
                 if 0 <= row < len(state["entries"]):
                     del state["entries"][row]
             refresh_table(table)
-            apply_changes()
+
+        def rescan() -> None:
+            if state["folder"] and Path(state["folder"]).is_dir():
+                paths = collect_polygon_paths([Path(state["folder"])])
+                state["entries"] = []
+                import_paths(paths)
+            else:
+                state["entries"] = [
+                    entry
+                    for entry in state["entries"]
+                    if not entry.source_file or Path(entry.source_file).is_file()
+                ]
+                refresh_table(table)
 
         def build(dialog: SingleInstanceDialog) -> None:
+            state["map_epsg"] = map_epsg
             state["entries"] = list(imported_polygon_entries(legend.areas))
             layout = dialog.content_layout
             _clear_layout(layout)
@@ -219,11 +231,27 @@ class ImportPolygonsDialog:
 
             refresh_table(table)
 
+            def apply_and_close() -> None:
+                apply_changes()
+                dialog.close()
+
             close_row = QHBoxLayout()
+            rescan_btn = QPushButton("Rescan")
+            rescan_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+            rescan_btn.clicked.connect(rescan)
+            apply_btn = QPushButton("Apply")
+            apply_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+            apply_btn.clicked.connect(apply_changes)
+            ok_btn = QPushButton("OK")
+            ok_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+            ok_btn.clicked.connect(apply_and_close)
             close_btn = QPushButton("Close")
             close_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
             close_btn.clicked.connect(dialog.close)
+            close_row.addWidget(rescan_btn)
             close_row.addStretch()
+            close_row.addWidget(apply_btn)
+            close_row.addWidget(ok_btn)
             close_row.addWidget(close_btn)
             layout.addLayout(close_row)
 

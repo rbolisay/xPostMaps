@@ -679,6 +679,29 @@ def test_10221_p190_receiver_feathers_parse_all_streamers() -> None:
     assert 1300 in navplan_avg
 
 
+def test_receiver_endpoint_targets_from_real_headers() -> None:
+    from xpostmaps.parsers.p111_parser import (
+        scan_p111_receiver_endpoint_targets,
+        scan_p190_receiver_endpoint_targets,
+    )
+
+    p111 = Path("4D/0085.T26A.6054B085.a0085.SSFILTREG.p111")
+    if p111.is_file():
+        targets = scan_p111_receiver_endpoint_targets(p111)
+        assert targets.get("S01") == (1, 3203)
+        assert targets.get("S12") == (1, 3203)
+
+    p111v = Path("4D/4030/P111V/069.0103643A-069.nrt.GFUNREG.p111")
+    if p111v.is_file():
+        assert scan_p111_receiver_endpoint_targets(p111v) == {}
+
+    p190 = Path("4D/10221/P1/70.1065P1A-070.a070.p190")
+    if p190.is_file():
+        targets = scan_p190_receiver_endpoint_targets(p190)
+        assert targets.get("1") == (1, 240)
+        assert targets.get("P") == (1, 240)
+
+
 def test_p111_multirow_streamer_feather_is_head_to_tail() -> None:
     """Shearwater P111 splits one streamer across several R1 rows.
 
@@ -806,6 +829,78 @@ def test_p190_feather_matches_independent_calculation() -> None:
         for r in parse_p190_receiver_feathers(source)
     }
     assert abs(parsed[(sp, target_streamer)] - expected) < 1e-9
+
+
+def test_p190_orient_track_to_streamers_resolves_reciprocal() -> None:
+    """P190 shotpoints can number opposite to travel, so the raw track bearing
+    is direction-ambiguous. Streamer trailing geometry must flip it to a true
+    heading (the bearing pointing *into* the heading, away from the streamers)."""
+    from xpostmaps.parsers.p111_parser import _orient_track_to_streamers
+
+    # Vessel heads ~180 deg (south); streamers trail north (~355 deg head->tail).
+    # A shotpoint-ordered bearing of 359.66 (reciprocal) must flip to ~179.66.
+    assert abs(_orient_track_to_streamers(359.66, 355.4) - 179.66) < 1e-6
+    # A bearing already aligned with the heading is kept unchanged.
+    assert abs(_orient_track_to_streamers(179.66, 355.4) - 179.66) < 1e-6
+    # Missing inputs degrade gracefully.
+    assert _orient_track_to_streamers(None, 355.4) is None
+    assert _orient_track_to_streamers(179.66, None) == 179.66
+
+
+def test_p190_feather_uses_header_when_track_agrees_on_real_file() -> None:
+    """On a correctly-headed real P190 the oriented track must agree with the
+    header (within tolerance) so the exact header feather is preserved."""
+    from xpostmaps.parsers.p111_parser import (
+        _orient_track_to_streamers,
+        _track_bearing_from_source_positions,
+        parse_p190_receiver_feathers,
+        scan_p190_source_track_deg,
+    )
+
+    source = Path("4D/10221/P1/70.1065P1A-070.a070.p190")
+    if not source.is_file():
+        return
+    feathers = {
+        (r.shotpoint, r.streamer_id): r.feather_deg
+        for r in parse_p190_receiver_feathers(source)
+    }
+    # Header 179.9740 is kept -> the independently verified +4.599 deg stands.
+    assert abs(feathers[(1600, "1")] - 4.599) < 0.01
+
+
+def test_p190_feather_falls_back_to_oriented_track_without_header(monkeypatch) -> None:
+    """A missing P190 LINE-DIRECTION must not drop the feather: the oriented,
+    data-derived track stands in and yields the same plausible feather."""
+    import xpostmaps.parsers.p190_parser as p190
+    from xpostmaps.parsers.p111_parser import parse_p190_receiver_feathers
+
+    source = Path("4D/10221/P1/70.1065P1A-070.a070.p190")
+    if not source.is_file():
+        return
+
+    with_header = {
+        (r.shotpoint, r.streamer_id): r.feather_deg
+        for r in parse_p190_receiver_feathers(source)
+    }
+
+    real_header = p190.parse_p190_header
+
+    def _strip_direction(path):
+        info = dict(real_header(path))
+        info.pop("line direction value", None)
+        info.pop("line direction", None)
+        return info
+
+    # parse_p190_receiver_feathers imports parse_p190_header from p190_parser at
+    # call time, so patch it at the source module.
+    monkeypatch.setattr(p190, "parse_p190_header", _strip_direction)
+    without_header = {
+        (r.shotpoint, r.streamer_id): r.feather_deg
+        for r in parse_p190_receiver_feathers(source)
+    }
+    assert without_header, "missing header must not drop the feather"
+    # Oriented track (~179.66) vs header (179.974) differ by ~0.3 deg only.
+    assert abs(without_header[(1600, "1")] - with_header[(1600, "1")]) < 1.0
 
 
 def test_p190_feather_dispatch_returns_values_with_sequence_fallback() -> None:
@@ -1233,3 +1328,95 @@ def test_conditional_diff_cache_reads_saved_database_rows(tmp_path) -> None:
     grouped = db.load_all_postplot_4d_diffs("proj", "navplan")
     assert grouped == {"file.p190|1": saved}
     db.close()
+
+
+def test_source_has_streamers_probe_distinguishes_real_files() -> None:
+    """Streamer detection must be robust on real P111/P190 sources.
+
+    Streamer surveys (0085 12-streamer P111, 10221 8-streamer P190) carry
+    receiver records; firing-source-only exports (4030 P111V) do not. The probe
+    must also see past the very large (~15k line) 10221 P190 header block.
+    """
+    from xpostmaps.core.postplot_4d_diff import source_has_streamers
+
+    cases = [
+        (Path("4D/0085.T26A.6054B085.a0085.SSFILTREG.p111"), True),
+        (Path("4D/10221/P1/70.1065P1A-070.a070.p190"), True),
+        (Path("4D/4030/P111V/069.0103643A-069.nrt.GFUNREG.p111"), False),
+    ]
+    for path, expected in cases:
+        if not path.is_file():
+            continue
+        assert source_has_streamers(path) is expected, path
+
+
+def test_preplot_baseline_carries_line_feather_when_streamers_present() -> None:
+    """Line Feather must populate for a PREPLOT baseline when the firing-source
+    P111/P190 carries streamers (real 10221 8-streamer survey)."""
+    from xpostmaps.core.models import MapData, ProjectSettings, RecordType
+    from xpostmaps.core.postplot_4d_diff import calculate_match_diff_rows
+    from xpostmaps.core.postplot_4d_matching import build_postplot_4d_rows
+    from xpostmaps.parsers.p190_parser import parse_p190_file
+    from xpostmaps.parsers.preplot_parser import parse_preplot_files
+    from xpostmaps.parsers.sequence_builder import build_display_sequences
+
+    preplot = Path("4D/10221/Preplot/10221_AWA_Maui4D_v2.190")
+    source = Path("4D/10221/P1/70.1065P1A-070.a070.p190")
+    if not preplot.is_file() or not source.is_file():
+        return  # dataset not present in this checkout
+
+    segments, _meta, _stats = parse_preplot_files([preplot])
+    src = [r for r in parse_p190_file(source) if r.record_type == RecordType.SOURCE]
+    map_data = MapData()
+    map_data.preplot_segments = segments
+    map_data.positions = src
+    map_data.sequences = build_display_sequences(src)
+    map_data.postmap_info.epsg_code = "2193"
+    settings = ProjectSettings(
+        preplot_files=[str(preplot.resolve())],
+        nav_files=[str(source.resolve())],
+        postplot_4d_baseline="preplot",
+    )
+    rows = build_postplot_4d_rows(map_data, settings, "preplot")
+    match_row = next(r for r in rows if r.has_match)
+
+    diff_rows = calculate_match_diff_rows(map_data, settings, src, match_row)
+    feathers = [r.line_feather_deg for r in diff_rows if r.line_feather_deg is not None]
+    assert feathers, "preplot baseline must expose Line Feather when streamers exist"
+    # 8-streamer averaged feather stays physically plausible.
+    assert all(abs(v) < 45.0 for v in feathers)
+
+
+def test_preplot_baseline_has_no_line_feather_for_firing_source_only() -> None:
+    """Firing-source-only P111 (no receiver records) must leave Line Feather
+    empty so the column stays hidden for a PREPLOT baseline (real 4030)."""
+    from xpostmaps.core.models import MapData, ProjectSettings, RecordType
+    from xpostmaps.core.postplot_4d_diff import calculate_match_diff_rows
+    from xpostmaps.core.postplot_4d_matching import build_postplot_4d_rows
+    from xpostmaps.parsers.p111_parser import parse_p111_file
+    from xpostmaps.parsers.preplot_parser import parse_preplot_files
+    from xpostmaps.parsers.sequence_builder import build_display_sequences
+
+    preplot = Path("4D/4030/Preplot/4030_Mariner4D_Preplots_v2.190")
+    source = Path("4D/4030/P111V/069.0103643A-069.nrt.GFUNREG.p111")
+    if not preplot.is_file() or not source.is_file():
+        return  # dataset not present in this checkout
+
+    segments, _meta, _stats = parse_preplot_files([preplot])
+    src = [r for r in parse_p111_file(source) if r.record_type == RecordType.SOURCE]
+    map_data = MapData()
+    map_data.preplot_segments = segments
+    map_data.positions = src
+    map_data.sequences = build_display_sequences(src)
+    map_data.postmap_info.epsg_code = "23031"
+    settings = ProjectSettings(
+        preplot_files=[str(preplot.resolve())],
+        nav_files=[str(source.resolve())],
+        postplot_4d_baseline="preplot",
+    )
+    rows = build_postplot_4d_rows(map_data, settings, "preplot")
+    match_row = next(r for r in rows if r.has_match)
+
+    diff_rows = calculate_match_diff_rows(map_data, settings, src, match_row)
+    assert diff_rows
+    assert all(r.line_feather_deg is None for r in diff_rows)

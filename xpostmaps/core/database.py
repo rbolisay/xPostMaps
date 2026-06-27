@@ -325,6 +325,57 @@ class Database:
                 ON postplot_4d_preplot_shotpoints(project_id, file_path, line_name)
             """
         )
+        self._conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS postplot_4d_file_cache (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                project_id INTEGER NOT NULL,
+                file_path TEXT NOT NULL,
+                file_name TEXT NOT NULL,
+                file_mtime REAL NOT NULL,
+                file_size INTEGER NOT NULL,
+                epsg_code TEXT DEFAULT '',
+                receiver_feathers_cached INTEGER DEFAULT 0,
+                has_streamers INTEGER DEFAULT 0,
+                updated_at TEXT NOT NULL,
+                FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE,
+                UNIQUE(project_id, file_path)
+            )
+            """
+        )
+        self._conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_postplot_4d_file_cache_lookup
+                ON postplot_4d_file_cache(project_id, file_name)
+            """
+        )
+        self._conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS postplot_4d_receiver_feathers (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                project_id INTEGER NOT NULL,
+                file_path TEXT NOT NULL,
+                file_name TEXT NOT NULL,
+                file_mtime REAL NOT NULL,
+                file_size INTEGER NOT NULL,
+                sequence_no TEXT DEFAULT '',
+                line_name TEXT DEFAULT '',
+                subline TEXT DEFAULT '',
+                preplot_no TEXT DEFAULT '',
+                shotpoint INTEGER NOT NULL,
+                feather_deg REAL NOT NULL,
+                updated_at TEXT NOT NULL,
+                FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE,
+                UNIQUE(project_id, file_path, sequence_no, line_name, subline, preplot_no, shotpoint)
+            )
+            """
+        )
+        self._conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_postplot_4d_receiver_feathers_lookup
+                ON postplot_4d_receiver_feathers(project_id, file_path, sequence_no, line_name)
+            """
+        )
         preplot_shotpoint_cols = {
             row[1]
             for row in self._conn.execute(
@@ -572,6 +623,7 @@ class Database:
         if not skip_positions:
             self._save_positions(project_id, positions)
         self._save_survey_perimeters(project_id, map_data.survey_perimeters)
+        self._save_baseline_file_cache(settings)
         self._conn.commit()
         elapsed_ms = (time.perf_counter() - started) * 1000
         mode = "incremental-nav" if incremental_nav else "full"
@@ -776,6 +828,45 @@ class Database:
                 """,
                 rows,
             )
+
+    def _save_baseline_file_cache(self, settings: ProjectSettings) -> None:
+        project_name = settings.name.strip()
+        if not project_name:
+            return
+        for entry in settings.preplot_catalog:
+            path = Path(entry.file_path)
+            file_path, file_mtime, file_size = self._safe_file_fingerprint(path)
+            if not file_path:
+                continue
+            self.save_postplot_4d_file_cache(
+                project_name,
+                file_path,
+                path.name,
+                file_mtime,
+                file_size,
+                epsg_code=entry.crs_code,
+            )
+        for entry in settings.navplan_catalog:
+            path = Path(entry.file_path)
+            file_path, file_mtime, file_size = self._safe_file_fingerprint(path)
+            if not file_path:
+                continue
+            self.save_postplot_4d_file_cache(
+                project_name,
+                file_path,
+                path.name,
+                file_mtime,
+                file_size,
+                epsg_code=entry.crs_code,
+            )
+
+    @staticmethod
+    def _safe_file_fingerprint(path: Path) -> tuple[str, float, int]:
+        try:
+            stat = path.stat()
+        except OSError:
+            return "", 0.0, 0
+        return str(path.resolve()), float(stat.st_mtime), int(stat.st_size)
 
     def load_project(
         self, name: str, with_positions: bool = False
@@ -1463,6 +1554,288 @@ class Database:
                 ],
             )
         self._conn.commit()
+
+    def load_postplot_4d_file_cache(
+        self,
+        project_name: str,
+        file_path: str,
+        file_mtime: float,
+        file_size: int,
+    ) -> dict | None:
+        project_id = self.get_project_id(project_name)
+        if project_id is None:
+            return None
+        row = self._conn.execute(
+            """
+            SELECT epsg_code, receiver_feathers_cached, has_streamers
+            FROM postplot_4d_file_cache
+            WHERE project_id=? AND file_path=? AND file_mtime=? AND file_size=?
+            """,
+            (project_id, file_path, file_mtime, file_size),
+        ).fetchone()
+        if row is None:
+            return None
+        return {
+            "epsg_code": row["epsg_code"] or "",
+            "receiver_feathers_cached": bool(row["receiver_feathers_cached"]),
+            "has_streamers": bool(row["has_streamers"]),
+        }
+
+    def load_postplot_4d_file_cache_by_name(
+        self,
+        project_name: str,
+        file_name: str,
+    ) -> dict | None:
+        """Resolve cached file metadata by base file name only.
+
+        Recalc runs on data already imported into the project. Looking the
+        cache up by name (rather than full fingerprint) lets Diff Stat read
+        EPSG / streamer markers straight from the DB without ever touching the
+        (often very slow) network file to ``stat``/``resolve`` it. The newest
+        matching row wins so a re-import refreshes the value.
+        """
+        project_id = self.get_project_id(project_name)
+        if project_id is None or not file_name:
+            return None
+        row = self._conn.execute(
+            """
+            SELECT file_path, file_mtime, file_size, epsg_code,
+                   receiver_feathers_cached, has_streamers
+            FROM postplot_4d_file_cache
+            WHERE project_id=? AND file_name=?
+            ORDER BY updated_at DESC
+            LIMIT 1
+            """,
+            (project_id, file_name),
+        ).fetchone()
+        if row is None:
+            return None
+        return {
+            "file_path": row["file_path"] or "",
+            "file_mtime": float(row["file_mtime"] or 0.0),
+            "file_size": int(row["file_size"] or 0),
+            "epsg_code": row["epsg_code"] or "",
+            "receiver_feathers_cached": bool(row["receiver_feathers_cached"]),
+            "has_streamers": bool(row["has_streamers"]),
+        }
+
+    def save_postplot_4d_file_cache(
+        self,
+        project_name: str,
+        file_path: str,
+        file_name: str,
+        file_mtime: float,
+        file_size: int,
+        *,
+        epsg_code: str = "",
+        receiver_feathers_cached: bool = False,
+        has_streamers: bool = False,
+    ) -> None:
+        project_id = self.get_project_id(project_name)
+        if project_id is None:
+            return
+        now = self._now()
+        self._conn.execute(
+            """
+            INSERT INTO postplot_4d_file_cache (
+                project_id, file_path, file_name, file_mtime, file_size,
+                epsg_code, receiver_feathers_cached, has_streamers, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(project_id, file_path) DO UPDATE SET
+                file_name=excluded.file_name,
+                file_mtime=excluded.file_mtime,
+                file_size=excluded.file_size,
+                epsg_code=CASE
+                    WHEN excluded.epsg_code <> '' THEN excluded.epsg_code
+                    ELSE postplot_4d_file_cache.epsg_code
+                END,
+                receiver_feathers_cached=CASE
+                    WHEN excluded.receiver_feathers_cached = 1 THEN 1
+                    ELSE postplot_4d_file_cache.receiver_feathers_cached
+                END,
+                has_streamers=CASE
+                    WHEN excluded.has_streamers = 1 THEN 1
+                    WHEN excluded.receiver_feathers_cached = 1 THEN excluded.has_streamers
+                    ELSE postplot_4d_file_cache.has_streamers
+                END,
+                updated_at=excluded.updated_at
+            """,
+            (
+                project_id,
+                file_path,
+                file_name,
+                file_mtime,
+                file_size,
+                epsg_code,
+                int(receiver_feathers_cached),
+                int(has_streamers),
+                now,
+            ),
+        )
+        self._conn.commit()
+
+    def load_postplot_4d_receiver_feathers(
+        self,
+        project_name: str,
+        file_path: str,
+        file_mtime: float,
+        file_size: int,
+        *,
+        sequence_no: str = "",
+        line_name: str = "",
+        subline: str = "",
+    ) -> tuple[bool, dict[int, float]]:
+        project_id = self.get_project_id(project_name)
+        if project_id is None:
+            return False, {}
+        marker = self.load_postplot_4d_file_cache(
+            project_name, file_path, file_mtime, file_size
+        )
+        if marker is None or not marker.get("receiver_feathers_cached"):
+            return False, {}
+        clauses = [
+            "project_id=?",
+            "file_path=?",
+            "file_mtime=?",
+            "file_size=?",
+        ]
+        params: list[object] = [project_id, file_path, file_mtime, file_size]
+        if sequence_no:
+            clauses.append("sequence_no=?")
+            params.append(sequence_no)
+        if line_name:
+            clauses.append("line_name=?")
+            params.append(line_name)
+        if subline:
+            clauses.append("(subline='' OR subline=?)")
+            params.append(subline)
+        rows = self._conn.execute(
+            f"""
+            SELECT shotpoint, feather_deg
+            FROM postplot_4d_receiver_feathers
+            WHERE {' AND '.join(clauses)}
+            ORDER BY shotpoint
+            """,
+            params,
+        ).fetchall()
+        return True, {
+            int(row["shotpoint"]): float(row["feather_deg"])
+            for row in rows
+        }
+
+    def load_postplot_4d_receiver_feather_rows(
+        self,
+        project_name: str,
+        file_path: str,
+        file_mtime: float,
+        file_size: int,
+    ) -> tuple[bool, list[dict]]:
+        project_id = self.get_project_id(project_name)
+        if project_id is None:
+            return False, []
+        marker = self.load_postplot_4d_file_cache(
+            project_name, file_path, file_mtime, file_size
+        )
+        if marker is None or not marker.get("receiver_feathers_cached"):
+            return False, []
+        rows = self._conn.execute(
+            """
+            SELECT sequence_no, line_name, subline, preplot_no, shotpoint, feather_deg
+            FROM postplot_4d_receiver_feathers
+            WHERE project_id=? AND file_path=? AND file_mtime=? AND file_size=?
+            ORDER BY sequence_no, line_name, subline, preplot_no, shotpoint
+            """,
+            (project_id, file_path, file_mtime, file_size),
+        ).fetchall()
+        return True, [
+            {
+                "sequence_no": row["sequence_no"] or "",
+                "line_name": row["line_name"] or "",
+                "subline": row["subline"] or "",
+                "preplot_no": row["preplot_no"] or "",
+                "shotpoint": int(row["shotpoint"]),
+                "feather_deg": float(row["feather_deg"]),
+            }
+            for row in rows
+        ]
+
+    def load_postplot_4d_receiver_feather_rows_by_name(
+        self,
+        project_name: str,
+        file_name: str,
+    ) -> tuple[bool, list[dict]]:
+        """Receiver feather rows resolved by base file name (network-free).
+
+        Returns ``(True, rows)`` only when the named file has a cached feather
+        marker, mirroring :meth:`load_postplot_4d_receiver_feather_rows` but
+        keyed by name so recalc never has to ``stat`` the source file.
+        """
+        marker = self.load_postplot_4d_file_cache_by_name(project_name, file_name)
+        if marker is None or not marker.get("receiver_feathers_cached"):
+            return False, []
+        return self.load_postplot_4d_receiver_feather_rows(
+            project_name,
+            marker["file_path"],
+            marker["file_mtime"],
+            marker["file_size"],
+        )
+
+    def save_postplot_4d_receiver_feathers(
+        self,
+        project_name: str,
+        file_path: str,
+        file_name: str,
+        file_mtime: float,
+        file_size: int,
+        rows: list[dict],
+    ) -> None:
+        project_id = self.get_project_id(project_name)
+        if project_id is None:
+            return
+        now = self._now()
+        self._conn.execute(
+            """
+            DELETE FROM postplot_4d_receiver_feathers
+            WHERE project_id=? AND file_path=?
+            """,
+            (project_id, file_path),
+        )
+        if rows:
+            self._conn.executemany(
+                """
+                INSERT INTO postplot_4d_receiver_feathers (
+                    project_id, file_path, file_name, file_mtime, file_size,
+                    sequence_no, line_name, subline, preplot_no, shotpoint,
+                    feather_deg, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                [
+                    (
+                        project_id,
+                        file_path,
+                        file_name,
+                        file_mtime,
+                        file_size,
+                        row.get("sequence_no", ""),
+                        row.get("line_name", ""),
+                        row.get("subline", ""),
+                        row.get("preplot_no", ""),
+                        int(row.get("shotpoint", 0)),
+                        float(row.get("feather_deg", 0.0)),
+                        now,
+                    )
+                    for row in rows
+                ],
+            )
+        self.save_postplot_4d_file_cache(
+            project_name,
+            file_path,
+            file_name,
+            file_mtime,
+            file_size,
+            receiver_feathers_cached=True,
+            has_streamers=bool(rows),
+        )
 
     def clear_postplot_4d_preplot_shotpoints(self, project_name: str) -> int:
         """Remove generated preplot baseline cache rows for a project."""

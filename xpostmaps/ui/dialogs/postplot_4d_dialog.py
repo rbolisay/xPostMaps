@@ -33,6 +33,7 @@ from xpostmaps.core.postplot_4d_diff import (
     Postplot4DDiffRow,
     calculate_match_diff_rows,
     resolve_diff_map_epsg,
+    source_has_streamers,
 )
 from xpostmaps.core.postplot_4d_diff_worker import DiffStatRecalcWorker
 from xpostmaps.core.postplot_4d_matching import (
@@ -291,6 +292,7 @@ class Postplot4DDialog:
         crs_cache: dict[str, str] = {}
         diff_rows: list[Postplot4DDiffRow] = []
         bulk_recalc_worker: DiffStatRecalcWorker | None = None
+        single_recalc_worker: DiffStatRecalcWorker | None = None
         bulk_recalc_launch_pending = False
         host_dialog: SingleInstanceDialog | None = None
         crs_note: QLabel | None = None
@@ -407,13 +409,32 @@ class Postplot4DDialog:
                 f"{baseline_label}  |  {source_label}"
             )
 
-        def _file_newer_than_saved(path: Path | None, saved_at: datetime | None) -> bool:
-            if path is None or saved_at is None:
-                return False
+        def _cached_file_mtime(active_db: Database | None, file_ref: str) -> float | None:
+            # Read the file mtime recorded in the DB at import time instead of
+            # stat()-ing the live (often network) file. Network stat() costs
+            # ~1s/call, so this keeps the "skip already-calculated" check fast.
+            if active_db is None or not project_name.strip() or not file_ref:
+                return None
+            name = Path(file_ref).name
             try:
-                modified_at = datetime.fromtimestamp(path.stat().st_mtime, tz=saved_at.tzinfo)
-            except OSError:
+                cached = active_db.load_postplot_4d_file_cache_by_name(
+                    project_name.strip(), name
+                )
+            except Exception:  # noqa: BLE001
+                return None
+            if cached and cached.get("file_mtime"):
+                return float(cached["file_mtime"])
+            return None
+
+        def _cached_file_newer_than_saved(
+            active_db: Database | None,
+            file_ref: str,
+            saved_at: datetime | None,
+        ) -> bool:
+            mtime = _cached_file_mtime(active_db, file_ref)
+            if mtime is None or saved_at is None:
                 return False
+            modified_at = datetime.fromtimestamp(mtime, tz=saved_at.tzinfo)
             return modified_at > saved_at
 
         def diff_needs_recalculate(
@@ -432,9 +453,14 @@ class Postplot4DDialog:
             )
             if saved_at is None:
                 return True
+            source_ref = (
+                match_row.sequence_id.split("|", 1)[0] if match_row.sequence_id else ""
+            )
             return (
-                _file_newer_than_saved(_source_file_for_match(match_row), saved_at)
-                or _file_newer_than_saved(_baseline_file_for_match(match_row), saved_at)
+                _cached_file_newer_than_saved(active_db, source_ref, saved_at)
+                or _cached_file_newer_than_saved(
+                    active_db, match_row.baseline_file_name, saved_at
+                )
             )
 
         def persist_diff_rows(
@@ -455,16 +481,12 @@ class Postplot4DDialog:
             if notify and on_diffs_saved is not None:
                 on_diffs_saved()
 
-        def _diffs_missing_feather(
-            match_row: Postplot4DMatchRow,
-            rows: list[Postplot4DDiffRow],
-        ) -> bool:
-            # Older saved navplan diffs predate P190 feather parsing (or a
-            # subline-filter bug) and stored navplan feathers as nulls; recompute
-            # them so the navplan feather column populates.
-            if match_row.baseline_kind != "navplan" or not rows:
-                return False
-            return all(row.navplan_feather_deg is None for row in rows)
+        def _source_has_streamers_for_match(match_row: Postplot4DMatchRow) -> bool:
+            return source_has_streamers(
+                _source_file_for_match(match_row),
+                database=database,
+                project_name=project_name,
+            )
 
         def load_or_calculate_diffs(
             match_row: Postplot4DMatchRow,
@@ -478,7 +500,7 @@ class Postplot4DDialog:
                     match_row.baseline_kind,
                     match_row.sequence_id,
                 )
-                if stored and not _diffs_missing_feather(match_row, stored):
+                if stored:
                     return stored, "loaded"
             rows = calculate_match_diff_rows(
                 current_map_data(),
@@ -499,13 +521,20 @@ class Postplot4DDialog:
             assert coord_mode in ("en", "lat")
             baseline_h1, baseline_h2 = _baseline_coord_headers(match_row.baseline_kind, coord_mode)
             source_h1, source_h2 = _source_coord_headers(coord_mode)
-            show_feather = match_row.baseline_kind == "navplan"
+            # Navplan Feather is the baseline feather and only exists for a
+            # navplan baseline. Line Feather is the firing-source streamer
+            # feather: show it whenever streamers were detected in the P111/P190
+            # (line feather values present), even for a preplot baseline.
+            show_navplan_feather = match_row.baseline_kind == "navplan"
+            show_line_feather = any(
+                diff_row.line_feather_deg is not None for diff_row in diff_rows
+            ) or _source_has_streamers_for_match(match_row)
             column_labels = [
                 "Shotpoint No.",
                 baseline_h1,
                 baseline_h2,
             ]
-            if show_feather:
+            if show_navplan_feather:
                 column_labels.append("Navplan Feather")
             column_labels.extend(
                 [
@@ -516,7 +545,7 @@ class Postplot4DDialog:
                     "Radial (m)",
                 ]
             )
-            if show_feather:
+            if show_line_feather:
                 column_labels.append("Line Feather")
             header = diff_table.horizontalHeader()
             header.blockSignals(True)
@@ -574,7 +603,7 @@ class Postplot4DDialog:
                         baseline_a,
                         baseline_b,
                     ]
-                    if show_feather:
+                    if show_navplan_feather:
                         values.append(_format_feather(diff_row.navplan_feather_deg))
                     values.extend(
                         [
@@ -585,7 +614,7 @@ class Postplot4DDialog:
                             _format_offset(diff_row.radial_m),
                         ]
                     )
-                    if show_feather:
+                    if show_line_feather:
                         values.append(_format_feather(diff_row.line_feather_deg))
                     for col, value in enumerate(values):
                         _set_diff_table_item(diff_table, row_idx, col, value)
@@ -647,27 +676,87 @@ class Postplot4DDialog:
             return "not saved (no project database)"
 
         def recalculate_diffs() -> None:
+            nonlocal single_recalc_worker
             match_row = state["active_match"]
             if not isinstance(match_row, Postplot4DMatchRow):
                 return
-            nonlocal diff_rows
+            if single_recalc_worker is not None and single_recalc_worker.isRunning():
+                return
+            if database is None or not project_name.strip():
+                # No DB project is available to hand work to a background worker;
+                # keep the old direct path for unsaved/ad-hoc projects.
+                nonlocal diff_rows
+                recalc_btn.setEnabled(False)
+                coord_toggle.setEnabled(False)
+                _set_diff_summary(diff_summary, "Recalculating differences…", tone="busy")
+                recalc_btn.setText("Recalculating…")
+                QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+                QApplication.processEvents()
+                started = time.perf_counter()
+                try:
+                    diff_rows = calculate_match_diff_rows(
+                        current_map_data(),
+                        settings,
+                        positions(),
+                        match_row,
+                        database=database,
+                        project_name=project_name,
+                    )
+                    persist_diff_rows(match_row, diff_rows)
+                    refresh_diff_table()
+                    elapsed = time.perf_counter() - started
+                    stamp = datetime.now().strftime("%H:%M:%S")
+                    summary = (
+                        f"{len(diff_rows)} shotpoint difference(s) · "
+                        f"Recalculated at {stamp} ({elapsed:.1f} s, {_persist_note()})"
+                    )
+                    _set_diff_summary(diff_summary, summary, tone="done")
+                    if parent is not None:
+                        _show_host_status(
+                            parent,
+                            f"Diff stat recalculated: {len(diff_rows)} shotpoint(s) in {elapsed:.1f} s",
+                        )
+                except Exception as exc:  # noqa: BLE001
+                    _set_diff_summary(diff_summary, f"Recalculate failed: {exc}", tone="busy")
+                    if parent is not None:
+                        _show_host_status(parent, f"Diff stat recalculate failed: {exc}", 8000)
+                finally:
+                    recalc_btn.setEnabled(True)
+                    coord_toggle.setEnabled(True)
+                    recalc_btn.setText("Recalculate Diffs")
+                    QApplication.restoreOverrideCursor()
+                return
+
             recalc_btn.setEnabled(False)
             coord_toggle.setEnabled(False)
             _set_diff_summary(diff_summary, "Recalculating differences…", tone="busy")
             recalc_btn.setText("Recalculating…")
-            QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
-            QApplication.processEvents()
             started = time.perf_counter()
-            try:
-                diff_rows = calculate_match_diff_rows(
-                    current_map_data(),
-                    settings,
-                    positions(),
-                    match_row,
-                    database=database,
-                    project_name=project_name,
+
+            def _on_single_finished(
+                recalculated: int,
+                skipped: int,
+                failed: int,
+                elapsed: float,
+                cancelled: bool,
+            ) -> None:
+                nonlocal diff_rows, single_recalc_worker
+                single_recalc_worker = None
+                recalc_btn.setEnabled(True)
+                coord_toggle.setEnabled(True)
+                recalc_btn.setText("Recalculate Diffs")
+                if cancelled:
+                    _set_diff_summary(diff_summary, "Recalculate cancelled.", tone="normal")
+                    return
+                if failed:
+                    _set_diff_summary(diff_summary, "Recalculate failed.", tone="busy")
+                    return
+                stored = database.load_postplot_4d_diffs(
+                    project_name.strip(),
+                    match_row.baseline_kind,
+                    match_row.sequence_id,
                 )
-                persist_diff_rows(match_row, diff_rows)
+                diff_rows = stored
                 refresh_diff_table()
                 elapsed = time.perf_counter() - started
                 stamp = datetime.now().strftime("%H:%M:%S")
@@ -681,6 +770,8 @@ class Postplot4DDialog:
                 )
                 if parent is not None:
                     _show_host_status(parent, status)
+                if recalculated and on_diffs_saved is not None:
+                    on_diffs_saved()
                 QTimer.singleShot(
                     5000,
                     lambda: _set_diff_summary(
@@ -689,23 +780,26 @@ class Postplot4DDialog:
                         tone="normal",
                     ),
                 )
-            except Exception as exc:  # noqa: BLE001
-                _set_diff_summary(
+
+            single_recalc_worker = DiffStatRecalcWorker(
+                current_map_data,
+                settings,
+                positions,
+                match_rows=[match_row],
+                load_source_positions_per_match=True,
+                db_path=database.db_path,
+                project_name=project_name.strip(),
+                parent=host_dialog or parent,
+            )
+            single_recalc_worker.progress.connect(
+                lambda completed, total, detail: _set_diff_summary(
                     diff_summary,
-                    f"Recalculate failed: {exc}",
+                    f"Recalculating differences… {completed}/{total}: {detail}",
                     tone="busy",
                 )
-                if parent is not None:
-                    _show_host_status(
-                        parent,
-                        f"Diff stat recalculate failed: {exc}",
-                        8000,
-                    )
-            finally:
-                recalc_btn.setEnabled(True)
-                coord_toggle.setEnabled(True)
-                recalc_btn.setText("Recalculate Diffs")
-                QApplication.restoreOverrideCursor()
+            )
+            single_recalc_worker.finished_batch.connect(_on_single_finished)
+            single_recalc_worker.start()
 
         def _bulk_recalc_running() -> bool:
             return (
@@ -865,9 +959,10 @@ class Postplot4DDialog:
                 host_dialog or parent,
                 "Clear Diff Stat",
                 (
-                    f"This will permanently delete all saved Diff Stat rows and the "
-                    f"generated preplot baseline cache for the {active_baseline} baseline.\n\n"
-                    "Diff Stat and cache will be regenerated from source files when needed.\n"
+                    f"This will permanently delete only saved Diff Stat calculation rows "
+                    f"for the {active_baseline} baseline.\n\n"
+                    "Parsed/imported preplot, navplan, P111/P190 positions and feather "
+                    "cache rows will be kept so recalculation stays fast.\n"
                     f"Current project file size: {size_before_mb:.0f} MB.\n"
                     "The database will be compacted afterward to reclaim disk space "
                     "(this may take a minute on large projects).\n\nContinue?"
@@ -881,18 +976,17 @@ class Postplot4DDialog:
                 project_name.strip(),
                 active_baseline,
             )
-            cache_rows = database.clear_postplot_4d_preplot_shotpoints(project_name.strip())
             if isinstance(state["active_match"], Postplot4DMatchRow):
                 diff_rows = []
                 if stack.currentIndex() == 1:
                     refresh_diff_table()
                     _set_diff_summary(diff_summary, "Saved Diff Stat rows cleared.", tone="done")
-            if diff_rows_deleted == 0 and cache_rows == 0:
+            if diff_rows_deleted == 0:
                 compact_reply = QMessageBox.question(
                     host_dialog or parent,
                     "Compact Database",
                     (
-                        "No saved Diff Stat or preplot cache rows were found to delete.\n\n"
+                        "No saved Diff Stat rows were found to delete.\n\n"
                         f"The project file is still {size_before_mb:.0f} MB. "
                         "Compact it now to reclaim space left by earlier deletes?"
                     ),
@@ -901,7 +995,7 @@ class Postplot4DDialog:
                 )
                 if compact_reply != QMessageBox.StandardButton.Yes:
                     summary.setText(
-                        f"No saved Diff Stat or preplot cache rows found for project "
+                        f"No saved Diff Stat rows found for project "
                         f"{project_name.strip()!r}."
                     )
                     return
@@ -920,8 +1014,8 @@ class Postplot4DDialog:
                     QApplication.restoreOverrideCursor()
             size_after_mb = size_after_bytes / (1024 * 1024)
             summary.setText(
-                f"Cleared {diff_rows_deleted:,} Diff Stat row(s) and "
-                f"{cache_rows:,} preplot cache row(s) for {active_baseline} baseline. "
+                f"Cleared {diff_rows_deleted:,} Diff Stat row(s) for "
+                f"{active_baseline} baseline. Kept imported parse caches. "
                 f"Database compacted from {size_before_mb:.0f} MB to {size_after_mb:.0f} MB."
             )
             if on_diffs_saved is not None:

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+import os
 import re
 from dataclasses import dataclass, replace
 from collections import defaultdict
@@ -25,6 +26,7 @@ from xpostmaps.core.postplot_4d_matching import (
 from xpostmaps.parsers.metadata_parser import parse_file_metadata
 from xpostmaps.parsers.p190_parser import parse_p190_header
 from xpostmaps.parsers.p111_parser import (
+    ReceiverFeatherRecord,
     average_receiver_feathers_by_shotpoint,
     parse_p111_receiver_feathers,
     parse_p190_receiver_feathers,
@@ -61,6 +63,29 @@ _PREPLOT_DIRECTION_RE = re.compile(
     r"(?:LINE[-\s_]*DIRECTION|LINE\s*HEADING|HEADING|AZIMUTH|BEARING|ROTATION)",
     re.IGNORECASE,
 )
+_SOURCE_PATH_INDEX_CACHE: dict[tuple, dict[str, Path]] = {}
+# Network shares make path.stat()/resolve()/is_file() cost ~1s each, so we
+# memoise per-process for the duration of a recalc. Caches are reset at the
+# start of each recalc batch (see reset_postplot_4d_path_caches) so a fresh
+# import is always picked up.
+_FILE_FINGERPRINT_CACHE: dict[str, tuple[str, float, int]] = {}
+_RESOLVED_SOURCE_PATH_CACHE: dict[tuple, Path | None] = {}
+
+
+def _settings_source_key(settings: ProjectSettings | None) -> tuple:
+    if settings is None:
+        return ((), "")
+    return (
+        tuple(str(path) for path in settings.nav_files),
+        getattr(settings, "p111_p190_dir", "") or "",
+    )
+
+
+def reset_postplot_4d_path_caches() -> None:
+    """Drop memoised path/fingerprint caches (call before a recalc batch)."""
+    _FILE_FINGERPRINT_CACHE.clear()
+    _RESOLVED_SOURCE_PATH_CACHE.clear()
+    _SOURCE_PATH_INDEX_CACHE.clear()
 
 
 class CrsMismatchError(RuntimeError):
@@ -346,6 +371,41 @@ def _resolve_baseline_path(
     return None
 
 
+def _baseline_catalog_epsg(
+    settings: ProjectSettings | None,
+    baseline_kind: BaselineKind,
+    baseline_file_name: str,
+) -> str:
+    if settings is None or not baseline_file_name:
+        return ""
+    target_name = Path(baseline_file_name).name
+    if baseline_kind == "preplot":
+        for entry in settings.preplot_catalog:
+            if Path(entry.file_path).name == target_name:
+                return normalize_epsg(entry.crs_code)
+    if baseline_kind == "navplan":
+        for entry in settings.navplan_catalog:
+            if Path(entry.file_path).name == target_name:
+                return normalize_epsg(entry.crs_code)
+    return ""
+
+
+def _baseline_file_epsg(
+    settings: ProjectSettings | None,
+    baseline_kind: BaselineKind,
+    baseline_file_name: str,
+    path: Path | None,
+    *,
+    database=None,
+    project_name: str = "",
+) -> str:
+    return _baseline_catalog_epsg(settings, baseline_kind, baseline_file_name) or _file_epsg(
+        path,
+        database=database,
+        project_name=project_name,
+    )
+
+
 def _baseline_from_records(
     records: list[PositionRecord],
     baseline_name: str,
@@ -522,6 +582,15 @@ def load_baseline_shotpoints(
 
     path = _resolve_baseline_path(settings, baseline_kind, baseline_file_name)
     record_type = RecordType.NAVPLAN if baseline_kind == "navplan" else RecordType.PREPLOT
+    segments = (
+        map_data.navplan_segments if baseline_kind == "navplan" else map_data.preplot_segments
+    )
+    target_name = Path(baseline_file_name).name if baseline_file_name else ""
+    # Navplan baselines must be keyed by their real shotpoint numbers so they
+    # align with the firing-source point numbers during differencing. Parsing
+    # the navplan file gives authoritative point numbers; the segment fallback
+    # below only yields a synthetic 1..N index when segment.sequence_no is
+    # empty, which never intersects the source shotpoints (=> zero diff rows).
     if path is not None:
         try:
             if baseline_kind == "navplan":
@@ -544,10 +613,6 @@ def load_baseline_shotpoints(
         except OSError:
             pass
 
-    segments = (
-        map_data.navplan_segments if baseline_kind == "navplan" else map_data.preplot_segments
-    )
-    target_name = Path(baseline_file_name).name if baseline_file_name else ""
     merged: dict[BaselineKey, BaselineShotpoint] = {}
     for segment in segments:
         if target_name and segment.file_name and Path(segment.file_name).name != target_name:
@@ -643,10 +708,21 @@ def resolve_line_azimuth_degrees(
 
 
 def _file_fingerprint(path: Path | None) -> tuple[str, float, int]:
-    if path is None or not path.is_file():
+    if path is None:
         return "", 0.0, 0
-    stat = path.stat()
-    return str(path.resolve()), float(stat.st_mtime), int(stat.st_size)
+    cache_key = os.path.abspath(path)
+    cached = _FILE_FINGERPRINT_CACHE.get(cache_key)
+    if cached is not None:
+        return cached
+    try:
+        # A single stat() doubles as the existence check (is_file) and the
+        # mtime/size read, halving network round-trips versus is_file()+stat().
+        stat = path.stat()
+        fingerprint = (str(path.resolve()), float(stat.st_mtime), int(stat.st_size))
+    except OSError:
+        fingerprint = ("", 0.0, 0)
+    _FILE_FINGERPRINT_CACHE[cache_key] = fingerprint
+    return fingerprint
 
 
 def _populate_generated_lat_lon(
@@ -746,6 +822,27 @@ def _generate_preplot_shotpoints(
     return generated
 
 
+def _minimum_generated_preplot_count(
+    controls: list[PositionRecord],
+    source_count: int,
+) -> int:
+    ordered = sorted(
+        [record for record in controls if record.point_num > 0],
+        key=lambda record: record.point_num,
+    )
+    if len(ordered) < 2:
+        return 0
+    expected_shots: set[int] = set()
+    for start, end in zip(ordered, ordered[1:]):
+        sp0 = int(start.point_num)
+        sp1 = int(end.point_num)
+        if sp0 == sp1:
+            continue
+        step = 1 if sp1 > sp0 else -1
+        expected_shots.update(range(sp0, sp1 + step, step))
+    return len(expected_shots) * max(1, int(source_count or 1))
+
+
 def _generated_preplot_baseline(
     controls: list[PositionRecord],
     path: Path,
@@ -775,7 +872,12 @@ def _generated_preplot_baseline(
                 file_size,
             )
             if cached:
-                return {_baseline_key(point): point for point in cached}
+                expected_count = _minimum_generated_preplot_count(
+                    controls,
+                    header_info.number_of_sources,
+                )
+                if not expected_count or len(cached) >= expected_count:
+                    return {_baseline_key(point): point for point in cached}
 
     if header_info.shotpoint_interval_m is None:
         return {}
@@ -875,30 +977,94 @@ def _generated_preplot_baseline_from_segment(
     )
 
 
-def _file_epsg(path: Path | None) -> str:
+def _file_epsg(
+    path: Path | None,
+    *,
+    database=None,
+    project_name: str = "",
+) -> str:
     """Resolve the EPSG (datum + projection) declared in a nav/preplot file."""
-    if path is None or not path.is_file():
+    if path is None:
         return ""
+    # Network-free fast path: trust the project's imported cache by file name
+    # so recalc never has to stat/resolve the (slow) source file.
+    if database is not None and project_name.strip() and path.name:
+        by_name = database.load_postplot_4d_file_cache_by_name(
+            project_name.strip(),
+            path.name,
+        )
+        if by_name and by_name.get("epsg_code"):
+            return normalize_epsg(by_name.get("epsg_code", ""))
+    if not path.is_file():
+        return ""
+    file_path, file_mtime, file_size = _file_fingerprint(path)
+    if database is not None and project_name.strip() and file_path:
+        cached = database.load_postplot_4d_file_cache(
+            project_name.strip(),
+            file_path,
+            file_mtime,
+            file_size,
+        )
+        if cached and cached.get("epsg_code"):
+            return normalize_epsg(cached.get("epsg_code", ""))
     try:
         metadata = parse_file_metadata(path)
     except OSError:
         return ""
-    return normalize_epsg(metadata.get("epsg code", ""))
+    epsg = normalize_epsg(metadata.get("epsg code", ""))
+    if database is not None and project_name.strip() and file_path:
+        database.save_postplot_4d_file_cache(
+            project_name.strip(),
+            file_path,
+            path.name,
+            file_mtime,
+            file_size,
+            epsg_code=epsg,
+        )
+    return epsg
 
 
-def _source_file_epsg(settings: ProjectSettings | None, file_name: str) -> str:
-    if settings is None or not file_name:
-        return ""
-    target = Path(file_name).name
+def _source_path_index(settings: ProjectSettings | None) -> dict[str, Path]:
+    if settings is None:
+        return {}
+    key = (
+        tuple(str(path) for path in settings.nav_files),
+        getattr(settings, "p111_p190_dir", "") or "",
+    )
+    cached = _SOURCE_PATH_INDEX_CACHE.get(key)
+    if cached is not None:
+        return cached
+    indexed: dict[str, Path] = {}
     for raw in settings.nav_files:
         path = Path(raw)
-        if path.name == target and path.is_file():
-            return _file_epsg(path)
+        indexed.setdefault(path.name, path)
+    folder = getattr(settings, "p111_p190_dir", "") or ""
+    if folder:
+        base = Path(folder)
+        for name in list(indexed):
+            indexed.setdefault(name, base / name)
+    _SOURCE_PATH_INDEX_CACHE[key] = indexed
+    return indexed
+
+
+def _source_file_epsg(
+    settings: ProjectSettings | None,
+    file_name: str,
+    *,
+    database=None,
+    project_name: str = "",
+) -> str:
+    if settings is None or not file_name:
+        return ""
+    path = _resolve_source_path(settings, file_name)
+    if path is not None:
+        return _file_epsg(path, database=database, project_name=project_name)
+    target = Path(file_name).name
     folder = getattr(settings, "p111_p190_dir", "") or ""
     if folder:
         candidate = Path(folder) / target
         if candidate.is_file():
-            return _file_epsg(candidate)
+            return _file_epsg(candidate, database=database, project_name=project_name)
     return ""
 
 
@@ -906,16 +1072,20 @@ def _resolve_source_path(settings: ProjectSettings | None, file_name: str) -> Pa
     if settings is None or not file_name:
         return None
     target = Path(file_name).name
-    for raw in settings.nav_files:
-        path = Path(raw)
-        if path.name == target and path.is_file():
-            return path
-    folder = getattr(settings, "p111_p190_dir", "") or ""
-    if folder:
-        candidate = Path(folder) / target
-        if candidate.is_file():
-            return candidate
-    return None
+    cache_key = (_settings_source_key(settings), target)
+    if cache_key in _RESOLVED_SOURCE_PATH_CACHE:
+        return _RESOLVED_SOURCE_PATH_CACHE[cache_key]
+    # Resolve the candidate path purely from the in-memory index (no network
+    # is_file() probe). Callers that must actually read the file verify
+    # existence lazily; cache hits (recalc) never touch the filesystem.
+    indexed = _source_path_index(settings)
+    resolved = indexed.get(target)
+    if resolved is None:
+        folder = getattr(settings, "p111_p190_dir", "") or ""
+        if folder:
+            resolved = Path(folder) / target
+    _RESOLVED_SOURCE_PATH_CACHE[cache_key] = resolved
+    return resolved
 
 
 def _parse_receiver_feathers(path: Path) -> list:
@@ -941,19 +1111,55 @@ def _parse_receiver_feathers(path: Path) -> list:
     return parse_p111_receiver_feathers(path)
 
 
-def _receiver_feathers_for_path(
-    path: Path | None,
+def _receiver_records_from_cache_rows(rows: list[dict]) -> list[ReceiverFeatherRecord]:
+    return [
+        ReceiverFeatherRecord(
+            shotpoint=int(row.get("shotpoint", 0)),
+            line_name=str(row.get("line_name", "")),
+            streamer_id="AVG",
+            feather_deg=float(row.get("feather_deg", 0.0)),
+            sequence_no=str(row.get("sequence_no", "")),
+            subline=str(row.get("subline", "")),
+            preplot_no=str(row.get("preplot_no", "")),
+        )
+        for row in rows
+    ]
+
+
+def _receiver_cache_rows(records: list[ReceiverFeatherRecord]) -> list[dict]:
+    grouped: dict[tuple[str, str, str, str, int], list[float]] = {}
+    for record in records:
+        key = (
+            record.sequence_no,
+            record.line_name,
+            record.subline,
+            record.preplot_no,
+            record.shotpoint,
+        )
+        grouped.setdefault(key, []).append(record.feather_deg)
+    return [
+        {
+            "sequence_no": sequence_no,
+            "line_name": line_name,
+            "subline": subline,
+            "preplot_no": preplot_no,
+            "shotpoint": shotpoint,
+            "feather_deg": sum(values) / len(values),
+        }
+        for (sequence_no, line_name, subline, preplot_no, shotpoint), values
+        in grouped.items()
+        if values
+    ]
+
+
+def _filter_receiver_feather_records(
+    path: Path,
+    records: list[ReceiverFeatherRecord],
     *,
     line_name: str = "",
     sequence_group: str = "",
     subline: str = "",
-) -> dict[int, float]:
-    if path is None or not path.is_file():
-        return {}
-    try:
-        records = _parse_receiver_feathers(path)
-    except OSError:
-        return {}
+) -> list[ReceiverFeatherRecord]:
     if line_name:
         by_line = [
             record
@@ -986,6 +1192,211 @@ def _receiver_feathers_for_path(
         # the per-shotpoint feathers for an already file-scoped path.
         if by_subline:
             records = by_subline
+    return records
+
+
+def source_has_streamers(
+    path: Path | None,
+    *,
+    max_shot_probe: int = 16,
+    hard_line_cap: int = 4_000_000,
+    database=None,
+    project_name: str = "",
+) -> bool:
+    """Fast probe: does this firing-source file carry receiver/streamer records?
+
+    Firing-source-only P111/P190 files (e.g. 4030/7027 ``P111V`` exports) hold
+    only S/P shot positions and yield no streamer feather. Streamer surveys
+    (e.g. 0085 12-streamer, 10221 8-streamer) emit receiver (``R1,`` / fixed
+    ``R``) records from the very first shotpoint of DATA.
+
+    The header block can be very large (e.g. 10221 P190 sources have ~15k header
+    lines), so the probe must not bound on raw line count alone. It returns as
+    soon as a receiver record is seen and otherwise bails after ``max_shot_probe``
+    *data* shot records (headers are skipped for free), keeping source-only files
+    cheap on UI load. ``hard_line_cap`` is only a pathological-file safety valve.
+    """
+    if path is None:
+        return False
+    # Network-free fast path: a cached marker (from import) tells us whether the
+    # file carries streamers without re-probing the source over the network.
+    if database is not None and project_name.strip() and path.name:
+        by_name = database.load_postplot_4d_file_cache_by_name(
+            project_name.strip(),
+            path.name,
+        )
+        if by_name and (
+            by_name.get("has_streamers") or by_name.get("receiver_feathers_cached")
+        ):
+            return bool(by_name.get("has_streamers"))
+    if not path.is_file():
+        return False
+    file_path, file_mtime, file_size = _file_fingerprint(path)
+    if database is not None and project_name.strip() and file_path:
+        cached = database.load_postplot_4d_file_cache(
+            project_name.strip(),
+            file_path,
+            file_mtime,
+            file_size,
+        )
+        if cached and cached.get("has_streamers"):
+            return True
+    suffix = path.suffix.lower()
+    if suffix in (".p111", ".111"):
+        fmt = "p111"
+    elif suffix in (".p190", ".190", ".navplan"):
+        fmt = "p190"
+    else:
+        fmt = ""
+    shots_seen = 0
+    try:
+        with path.open("r", encoding="utf-8", errors="replace") as handle:
+            for index, raw in enumerate(handle):
+                if index >= hard_line_cap:
+                    break
+                if fmt == "p111" and raw.startswith(("H", "C")):
+                    header_text = raw.lower()
+                    if "receiver group definition" in header_text:
+                        if database is not None and project_name.strip() and file_path:
+                            database.save_postplot_4d_file_cache(
+                                project_name.strip(),
+                                file_path,
+                                path.name,
+                                file_mtime,
+                                file_size,
+                                has_streamers=True,
+                            )
+                        return True
+                if fmt == "p111" or raw.startswith(("R1,", "S1,")):
+                    if raw.startswith("R1,"):
+                        if database is not None and project_name.strip() and file_path:
+                            database.save_postplot_4d_file_cache(
+                                project_name.strip(),
+                                file_path,
+                                path.name,
+                                file_mtime,
+                                file_size,
+                                has_streamers=True,
+                            )
+                        return True
+                    if raw.startswith("S1,"):
+                        shots_seen += 1
+                        if shots_seen > max_shot_probe:
+                            if database is not None and project_name.strip() and file_path:
+                                database.save_postplot_4d_file_cache(
+                                    project_name.strip(),
+                                    file_path,
+                                    path.name,
+                                    file_mtime,
+                                    file_size,
+                                    receiver_feathers_cached=True,
+                                    has_streamers=False,
+                                )
+                            return False
+                    continue
+                head = raw[:1].upper()
+                # Fixed-width P190 receiver records start with ``R`` (never a
+                # comma in the first field); a P111-style ``R1,`` is handled
+                # above so this only matches genuine P190 receiver rows.
+                if head == "R" and "," not in raw[:4] and len(raw.rstrip()) >= 23:
+                    return True
+                if head == "S" and "," not in raw[:4]:
+                    shots_seen += 1
+                    if shots_seen > max_shot_probe:
+                        if database is not None and project_name.strip() and file_path:
+                            database.save_postplot_4d_file_cache(
+                                project_name.strip(),
+                                file_path,
+                                path.name,
+                                file_mtime,
+                                file_size,
+                                receiver_feathers_cached=True,
+                                has_streamers=False,
+                            )
+                        return False
+    except OSError:
+        return False
+    if database is not None and project_name.strip() and file_path:
+        database.save_postplot_4d_file_cache(
+            project_name.strip(),
+            file_path,
+            path.name,
+            file_mtime,
+            file_size,
+            receiver_feathers_cached=True,
+            has_streamers=False,
+        )
+    return False
+
+
+def _receiver_feathers_for_path(
+    path: Path | None,
+    *,
+    line_name: str = "",
+    sequence_group: str = "",
+    subline: str = "",
+    database=None,
+    project_name: str = "",
+) -> dict[int, float]:
+    if path is None:
+        return {}
+    # Network-free fast path: serve the persisted feather index by file name so
+    # recalc reads the DB instead of re-parsing the source over the network.
+    if database is not None and project_name.strip() and path.name:
+        cached, cache_rows = database.load_postplot_4d_receiver_feather_rows_by_name(
+            project_name.strip(),
+            path.name,
+        )
+        if cached:
+            records = _receiver_records_from_cache_rows(cache_rows)
+            records = _filter_receiver_feather_records(
+                path,
+                records,
+                line_name=line_name,
+                sequence_group=sequence_group,
+                subline=subline,
+            )
+            return average_receiver_feathers_by_shotpoint(records)
+    if not path.is_file():
+        return {}
+    file_path, file_mtime, file_size = _file_fingerprint(path)
+    if database is not None and project_name.strip() and file_path:
+        cached, cache_rows = database.load_postplot_4d_receiver_feather_rows(
+            project_name.strip(),
+            file_path,
+            file_mtime,
+            file_size,
+        )
+        if cached:
+            records = _receiver_records_from_cache_rows(cache_rows)
+            records = _filter_receiver_feather_records(
+                path,
+                records,
+                line_name=line_name,
+                sequence_group=sequence_group,
+                subline=subline,
+            )
+            return average_receiver_feathers_by_shotpoint(records)
+    try:
+        records = _parse_receiver_feathers(path)
+    except OSError:
+        return {}
+    if database is not None and project_name.strip() and file_path:
+        database.save_postplot_4d_receiver_feathers(
+            project_name.strip(),
+            file_path,
+            path.name,
+            file_mtime,
+            file_size,
+            _receiver_cache_rows(records),
+        )
+    records = _filter_receiver_feather_records(
+        path,
+        records,
+        line_name=line_name,
+        sequence_group=sequence_group,
+        subline=subline,
+    )
     return average_receiver_feathers_by_shotpoint(records)
 
 
@@ -1041,6 +1452,9 @@ def _reproject_sources(
     sources: dict[int, PositionRecord],
     settings: ProjectSettings | None,
     dst_epsg: str,
+    *,
+    database=None,
+    project_name: str = "",
 ) -> dict[int, PositionRecord]:
     """Reproject firing-source shotpoints into the common map CRS (no-op if equal)."""
     dst = normalize_epsg(dst_epsg)
@@ -1053,7 +1467,14 @@ def _reproject_sources(
     epsg_cache: dict[str, str] = {}
     for file_name, shotpoints in by_file.items():
         if file_name not in epsg_cache:
-            epsg_cache[file_name] = normalize_epsg(_source_file_epsg(settings, file_name))
+            epsg_cache[file_name] = normalize_epsg(
+                _source_file_epsg(
+                    settings,
+                    file_name,
+                    database=database,
+                    project_name=project_name,
+                )
+            )
         src = epsg_cache[file_name]
         if not src or src == dst:
             for shotpoint in shotpoints:
@@ -1155,6 +1576,9 @@ def assess_diff_crs_consistency(
     settings: ProjectSettings | None,
     positions: list[PositionRecord],
     match_row: Postplot4DMatchRow,
+    *,
+    database=None,
+    project_name: str = "",
 ) -> DiffCrsAssessment:
     """Validate that baseline + firing-source coordinates resolve to ONE CRS.
 
@@ -1179,12 +1603,27 @@ def assess_diff_crs_consistency(
             "",
             (),
         )
-    baseline_epsg = _file_epsg(baseline_path)
+    baseline_epsg = _baseline_file_epsg(
+        settings,
+        match_row.baseline_kind,
+        match_row.baseline_file_name,
+        baseline_path,
+        database=database,
+        project_name=project_name,
+    )
 
     sources = source_shotpoints_for_match(positions, match_row)
     source_files = sorted({record.file_name for record in sources.values() if record.file_name})
     source_epsgs = tuple(
-        normalize_epsg(_source_file_epsg(settings, file_name)) for file_name in source_files
+        normalize_epsg(
+            _source_file_epsg(
+                settings,
+                file_name,
+                database=database,
+                project_name=project_name,
+            )
+        )
+        for file_name in source_files
     )
 
     if not baseline_epsg:
@@ -1271,7 +1710,14 @@ def calculate_match_diff_rows(
     database=None,
     project_name: str = "",
 ) -> list[Postplot4DDiffRow]:
-    assessment = assess_diff_crs_consistency(map_data, settings, positions, match_row)
+    assessment = assess_diff_crs_consistency(
+        map_data,
+        settings,
+        positions,
+        match_row,
+        database=database,
+        project_name=project_name,
+    )
     if not assessment.ok:
         raise CrsMismatchError(assessment.reason)
     map_epsg = resolve_diff_map_epsg(map_data, settings)
@@ -1292,34 +1738,68 @@ def calculate_match_diff_rows(
     )
     # Ensure baseline and firing sources share one projected CRS (datum +
     # projection) before differencing. No-op when files already match map_epsg.
-    baseline = _reproject_baseline(baseline, _file_epsg(baseline_path), map_epsg)
+    baseline = _reproject_baseline(
+        baseline,
+        _baseline_file_epsg(
+            settings,
+            match_row.baseline_kind,
+            match_row.baseline_file_name,
+            baseline_path,
+            database=database,
+            project_name=project_name,
+        ),
+        map_epsg,
+    )
     sources = source_shotpoints_for_match(positions, match_row)
-    sources = _reproject_sources(sources, settings, map_epsg)
+    sources = _reproject_sources(
+        sources,
+        settings,
+        map_epsg,
+        database=database,
+        project_name=project_name,
+    )
     navplan_feathers: dict[int, float] | None = None
-    line_feathers: dict[int, float] | None = None
     if match_row.baseline_kind == "navplan":
         navplan_feathers = _receiver_feathers_for_path(
             baseline_path,
             line_name=match_row.baseline_name,
             subline=match_row.subline,
+            database=database,
+            project_name=project_name,
         )
-        source_paths = {
-            _resolve_source_path(settings, record.file_name)
-            for record in sources.values()
-            if record.file_name
-        }
-        source_paths.discard(None)
-        combined_line_feathers: dict[int, float] = {}
-        target_group = sequence_group_id(match_row.sequence_id)
-        for source_path in source_paths:
-            combined_line_feathers.update(
-                _receiver_feathers_for_path(
-                    source_path,
-                    sequence_group=target_group,
-                    subline=match_row.subline,
-                )
+    # Line feather is the firing-source streamer feather and is independent of
+    # the baseline kind: it is meaningful for a preplot baseline too, whenever
+    # the P111/P190 source carries streamers. It stays empty (column hidden)
+    # for firing-source-only files that have no receiver records.
+    source_file_names = {
+        record.file_name for record in sources.values() if record.file_name
+    }
+    source_paths = {
+        _resolve_source_path(settings, file_name) for file_name in source_file_names
+    }
+    source_paths.discard(None)
+    line_feathers: dict[int, float] = {}
+    target_group = sequence_group_id(match_row.sequence_id)
+    for source_path in source_paths:
+        # Gate the expensive receiver-feather parse behind a cheap streamer
+        # probe: firing-source-only files (e.g. 4030/7027 P111V) have no
+        # streamers, so a full multi-pass parse here would only burn time
+        # (~33 ms/file) producing nothing. The probe bails in ~0.5 ms.
+        if not source_has_streamers(
+            source_path,
+            database=database,
+            project_name=project_name,
+        ):
+            continue
+        line_feathers.update(
+            _receiver_feathers_for_path(
+                source_path,
+                sequence_group=target_group,
+                subline=match_row.subline,
+                database=database,
+                project_name=project_name,
             )
-        line_feathers = combined_line_feathers
+        )
     return compute_postplot_4d_diff_rows(
         baseline,
         sources,
@@ -1328,6 +1808,186 @@ def calculate_match_diff_rows(
         navplan_feathers=navplan_feathers,
         line_feathers=line_feathers,
     )
+
+
+_MAX_FEATHER_WARM_WORKERS = 8
+
+
+def warm_postplot_4d_parse_caches(
+    map_data: MapData | None,
+    settings: ProjectSettings,
+    database,
+    project_name: str,
+    *,
+    include_receiver_feathers: bool = True,
+    db_path=None,
+    progress_callback=None,
+    cancelled=None,
+) -> tuple[int, int]:
+    """Populate parse-derived Diff Stat inputs in the DB, never diff results.
+
+    This is intended for background import/save work. It precomputes dense
+    preplot baseline shotpoints for every imported preplot line and caches
+    receiver/streamer feather metadata for P111/P190/navplan files. The math is
+    the same as the on-demand Diff Stat path; this only moves the work earlier.
+    """
+    if map_data is None or database is None or not project_name.strip():
+        return 0, 0
+
+    def is_cancelled() -> bool:
+        return bool(cancelled and cancelled())
+
+    map_epsg = resolve_diff_map_epsg(map_data, settings)
+    preplot_segments = [
+        segment
+        for segment in map_data.preplot_segments
+        if segment.file_name and segment.line_name
+    ]
+    feather_paths: list[Path] = []
+    if include_receiver_feathers:
+        seen_paths: set[str] = set()
+        for raw in [
+            *settings.nav_files,
+            *settings.navplan_files,
+            *(entry.file_path for entry in settings.navplan_catalog),
+        ]:
+            if not raw:
+                continue
+            path = Path(raw)
+            key = str(path)
+            if key in seen_paths:
+                continue
+            seen_paths.add(key)
+            feather_paths.append(path)
+
+    total = len(preplot_segments) + len(feather_paths)
+    completed = 0
+    preplot_lines = 0
+    feather_files = 0
+
+    for segment in preplot_segments:
+        if is_cancelled():
+            break
+        path = _resolve_baseline_path(settings, "preplot", segment.file_name)
+        generated = _generated_preplot_baseline_from_segment(
+            segment,
+            segment.line_name,
+            path,
+            database=database,
+            project_name=project_name,
+            map_epsg=map_epsg,
+        )
+        if generated:
+            preplot_lines += 1
+        completed += 1
+        if progress_callback:
+            progress_callback(
+                completed,
+                total,
+                f"Cached preplot line {segment.line_name}",
+            )
+
+    def _warm_one(path: Path, warm_db) -> bool:
+        # Network feather files are I/O bound, so reading several at once hides
+        # SMB latency. EPSG + streamer probe + feather index are cached per file.
+        _file_epsg(path, database=warm_db, project_name=project_name)
+        if source_has_streamers(path, database=warm_db, project_name=project_name):
+            _receiver_feathers_for_path(
+                path,
+                database=warm_db,
+                project_name=project_name,
+            )
+            return True
+        return False
+
+    warm_workers = (
+        min(len(feather_paths), _MAX_FEATHER_WARM_WORKERS)
+        if db_path is not None
+        else 1
+    )
+
+    if warm_workers <= 1:
+        for path in feather_paths:
+            if is_cancelled():
+                break
+            if _warm_one(path, database):
+                feather_files += 1
+            completed += 1
+            if progress_callback:
+                progress_callback(
+                    completed,
+                    total,
+                    f"Cached feather data for {path.name}",
+                )
+        return preplot_lines, feather_files
+
+    # Parallel across files: each worker thread gets its own DB connection
+    # (sqlite connections are single-thread) with a busy timeout so concurrent
+    # writers queue instead of raising "database is locked".
+    import threading
+    from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
+
+    from xpostmaps.core.database import Database
+
+    thread_local = threading.local()
+    opened_dbs: list[Database] = []
+    opened_lock = threading.Lock()
+
+    def _worker_db() -> Database:
+        db = getattr(thread_local, "db", None)
+        if db is None:
+            db = Database(db_path)
+            try:
+                db._conn.execute("PRAGMA busy_timeout=30000")
+            except Exception:  # noqa: BLE001
+                pass
+            thread_local.db = db
+            with opened_lock:
+                opened_dbs.append(db)
+        return db
+
+    def _task(path: Path) -> bool:
+        return _warm_one(path, _worker_db())
+
+    executor = ThreadPoolExecutor(max_workers=warm_workers)
+    try:
+        pending_iter = iter(feather_paths)
+        futures: dict = {}
+
+        def _submit_next() -> None:
+            while not is_cancelled() and len(futures) < warm_workers:
+                try:
+                    nxt = next(pending_iter)
+                except StopIteration:
+                    return
+                futures[executor.submit(_task, nxt)] = nxt
+
+        _submit_next()
+        while futures and not is_cancelled():
+            done, _ = wait(futures, timeout=0.2, return_when=FIRST_COMPLETED)
+            for future in done:
+                path = futures.pop(future)
+                try:
+                    if future.result():
+                        feather_files += 1
+                except Exception:  # noqa: BLE001
+                    pass
+                completed += 1
+                if progress_callback:
+                    progress_callback(
+                        completed,
+                        total,
+                        f"Cached feather data for {path.name}",
+                    )
+            _submit_next()
+    finally:
+        executor.shutdown(wait=True, cancel_futures=True)
+        with opened_lock:
+            for db in opened_dbs:
+                db.close()
+            opened_dbs.clear()
+
+    return preplot_lines, feather_files
 
 
 def diff_row_to_dict(row: Postplot4DDiffRow) -> dict:
