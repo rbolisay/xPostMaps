@@ -92,6 +92,8 @@ class NavplanCatalogEntry:
     fsp: int = 0
     lsp: int = 0
     total_points: int = 0
+    file_mtime_ns: int = 0
+    file_size: int = 0
 
 
 @dataclass

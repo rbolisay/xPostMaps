@@ -22,8 +22,9 @@ from PySide6.QtWidgets import (
 from xpostmaps.core.crs_utils import epsg_label
 from xpostmaps.core.models import ProjectSettings
 from xpostmaps.core.navplan_catalog_utils import (
-    build_navplan_catalog,
+    catalog_for_saved_files,
     collect_navplan_files_from_folder,
+    refresh_navplan_catalog,
     renumber_navplan_catalog,
 )
 from xpostmaps.ui.dialogs.base_dialog import SingleInstanceDialog
@@ -161,10 +162,18 @@ class ImportNavplanDialog:
             "catalog": list(settings.navplan_catalog),
         }
 
-        def rebuild_catalog() -> None:
-            paths = [Path(path) for path in state["files"] if Path(path).is_file()]
-            state["catalog"] = build_navplan_catalog(paths) if paths else []
-            renumber_navplan_catalog(state["catalog"])
+        def rebuild_catalog(*, force: bool = False) -> None:
+            state["catalog"] = refresh_navplan_catalog(
+                state["files"],
+                state["catalog"],
+                force=force,
+            )
+
+        def load_saved_catalog() -> None:
+            state["catalog"] = catalog_for_saved_files(
+                state["files"],
+                settings.navplan_catalog,
+            )
 
         def apply_changes() -> None:
             settings.navplan_files = list(state["files"])
@@ -242,7 +251,7 @@ class ImportNavplanDialog:
                 state["files"] = _unique_existing_paths(
                     [path for path in state["files"] if Path(path).is_file()]
                 )
-            rebuild_catalog()
+            rebuild_catalog(force=False)
             refresh_table(table)
 
         def remove_selected() -> None:
@@ -261,7 +270,12 @@ class ImportNavplanDialog:
             state["folders"] = [
                 folder for folder in state["folders"] if folder in remaining_dirs
             ]
-            rebuild_catalog()
+            state["catalog"] = [
+                entry
+                for entry in state["catalog"]
+                if entry.file_path not in remove_paths
+            ]
+            renumber_navplan_catalog(state["catalog"])
             refresh_table(table)
 
         def build(dialog: SingleInstanceDialog) -> None:
@@ -272,7 +286,7 @@ class ImportNavplanDialog:
             state["folders"] = _unique_existing_paths(
                 [folder for folder in folders if Path(folder).is_dir()]
             )
-            rebuild_catalog()
+            load_saved_catalog()
             layout = dialog.content_layout
             _clear_layout(layout)
 

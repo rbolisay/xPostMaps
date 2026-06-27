@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 from xpostmaps.core.crs_utils import normalize_epsg
@@ -70,39 +71,103 @@ def renumber_navplan_catalog(entries: list[NavplanCatalogEntry]) -> None:
         entry.navplan_number = index
 
 
-def build_navplan_catalog(paths: list[Path]) -> list[NavplanCatalogEntry]:
+def catalog_path_key(path: str | Path) -> str:
+    """Normalize catalog file paths for stable lookup without network resolve."""
+    return os.path.normcase(os.path.normpath(str(path)))
+
+
+def _file_fingerprint(path: Path) -> tuple[int, int]:
+    try:
+        stat = path.stat()
+    except OSError:
+        return (0, 0)
+    return (int(stat.st_mtime_ns), int(stat.st_size))
+
+
+def _entry_matches_file(entry: NavplanCatalogEntry, path: Path) -> bool:
+    if entry.file_mtime_ns <= 0 and entry.file_size <= 0:
+        return False
+    mtime_ns, size = _file_fingerprint(path)
+    return mtime_ns == entry.file_mtime_ns and size == entry.file_size
+
+
+def build_navplan_catalog_entry(path: Path) -> NavplanCatalogEntry | None:
+    if not path.is_file():
+        return None
+    result = parse_navplan_source_file(path)
+    crs = (
+        result.metadata.get("epsg code")
+        or result.metadata.get("epsg")
+        or result.metadata.get("authority")
+        or ""
+    )
+    navplan_name = (
+        result.metadata.get("preplot line number")
+        or result.metadata.get("linename/subline")
+        or path.stem
+    )
+    fsp, lsp = _fsp_lsp_from_records(result.records)
+    mtime_ns, size = _file_fingerprint(path)
+    return NavplanCatalogEntry(
+        navplan_name=navplan_name.strip("/ ") or path.stem,
+        line_direction=line_direction_from_metadata(result.metadata),
+        file_path=str(path),
+        crs_code=normalize_epsg(crs) or crs,
+        fsp=fsp,
+        lsp=lsp,
+        total_points=len(result.records),
+        file_mtime_ns=mtime_ns,
+        file_size=size,
+    )
+
+
+def catalog_for_saved_files(
+    file_paths: list[str],
+    saved_catalog: list[NavplanCatalogEntry],
+) -> list[NavplanCatalogEntry]:
+    """Return saved catalog rows for known files without touching the filesystem."""
+    by_path = {catalog_path_key(entry.file_path): entry for entry in saved_catalog}
     catalog: list[NavplanCatalogEntry] = []
-    for index, path in enumerate(sorted(paths), start=1):
-        resolved = path.resolve()
-        if not resolved.is_file():
-            continue
-        result = parse_navplan_source_file(resolved)
-        crs = (
-            result.metadata.get("epsg code")
-            or result.metadata.get("epsg")
-            or result.metadata.get("authority")
-            or ""
-        )
-        navplan_name = (
-            result.metadata.get("preplot line number")
-            or result.metadata.get("linename/subline")
-            or resolved.stem
-        )
-        fsp, lsp = _fsp_lsp_from_records(result.records)
-        catalog.append(
-            NavplanCatalogEntry(
-                navplan_number=index,
-                navplan_name=navplan_name.strip("/ ") or resolved.stem,
-                line_direction=line_direction_from_metadata(result.metadata),
-                file_path=str(resolved),
-                crs_code=normalize_epsg(crs) or crs,
-                fsp=fsp,
-                lsp=lsp,
-                total_points=len(result.records),
-            )
-        )
+    for raw_path in sorted(file_paths, key=lambda value: catalog_path_key(value)):
+        entry = by_path.get(catalog_path_key(raw_path))
+        if entry is not None:
+            catalog.append(entry)
     renumber_navplan_catalog(catalog)
     return catalog
+
+
+def refresh_navplan_catalog(
+    file_paths: list[str],
+    saved_catalog: list[NavplanCatalogEntry] | None = None,
+    *,
+    force: bool = False,
+) -> list[NavplanCatalogEntry]:
+    """Rebuild catalog entries, reusing saved rows when files are unchanged."""
+    saved = saved_catalog or []
+    by_path = {catalog_path_key(entry.file_path): entry for entry in saved}
+    catalog: list[NavplanCatalogEntry] = []
+    for raw_path in sorted(file_paths, key=lambda value: catalog_path_key(value)):
+        path = Path(raw_path)
+        if not path.is_file():
+            continue
+        key = catalog_path_key(path)
+        if not force:
+            saved_entry = by_path.get(key)
+            if saved_entry is not None and _entry_matches_file(saved_entry, path):
+                catalog.append(saved_entry)
+                continue
+        entry = build_navplan_catalog_entry(path)
+        if entry is not None:
+            catalog.append(entry)
+    renumber_navplan_catalog(catalog)
+    return catalog
+
+
+def build_navplan_catalog(paths: list[Path]) -> list[NavplanCatalogEntry]:
+    return refresh_navplan_catalog(
+        [str(path) for path in paths],
+        force=True,
+    )
 
 
 def _fsp_lsp_from_records(records) -> tuple[int, int]:
@@ -142,16 +207,19 @@ def build_navplan_catalog_from_segments(
         file_segments = segments_by_name.get(path.name, result.segments)
         fsp, lsp = _fsp_lsp_from_records(result.records)
         total_points = sum(len(segment.xs) for segment in file_segments) or len(result.records)
+        mtime_ns, size = _file_fingerprint(path)
         catalog.append(
             NavplanCatalogEntry(
                 navplan_number=index,
                 navplan_name=navplan_name.strip("/ ") or path.stem,
                 line_direction=line_direction_from_metadata(result.metadata),
-                file_path=str(path.resolve()),
+                file_path=str(path),
                 crs_code=normalize_epsg(crs) or crs,
                 fsp=fsp,
                 lsp=lsp,
                 total_points=total_points,
+                file_mtime_ns=mtime_ns,
+                file_size=size,
             )
         )
     renumber_navplan_catalog(catalog)
@@ -241,6 +309,8 @@ def navplan_catalog_to_json(catalog: list[NavplanCatalogEntry]) -> list[dict]:
             "fsp": entry.fsp,
             "lsp": entry.lsp,
             "total_points": entry.total_points,
+            "file_mtime_ns": entry.file_mtime_ns,
+            "file_size": entry.file_size,
         }
         for entry in catalog
     ]
@@ -259,6 +329,8 @@ def navplan_catalog_from_json(data: list[dict] | None) -> list[NavplanCatalogEnt
             fsp=int(item.get("fsp", 0)),
             lsp=int(item.get("lsp", 0)),
             total_points=int(item.get("total_points", 0)),
+            file_mtime_ns=int(item.get("file_mtime_ns", 0)),
+            file_size=int(item.get("file_size", 0)),
         )
         for item in data
     ]
