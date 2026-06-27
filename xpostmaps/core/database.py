@@ -19,7 +19,12 @@ from xpostmaps.core.postplot_4d_diff import (
     Postplot4DDiffRow,
     diff_row_from_dict,
 )
-from xpostmaps.core.sequence_utils import nav_cache_from_json, nav_cache_to_json
+from xpostmaps.core.sequence_utils import (
+    nav_cache_from_json,
+    nav_cache_to_json,
+    navplan_cache_from_json,
+    preplot_cache_from_json,
+)
 from xpostmaps.core.models import (
     DisplayMode,
     GeoBounds,
@@ -169,6 +174,14 @@ class Database:
         if "nav_file_cache_json" not in cols:
             self._conn.execute(
                 "ALTER TABLE projects ADD COLUMN nav_file_cache_json TEXT DEFAULT '{}'"
+            )
+        if "preplot_file_cache_json" not in cols:
+            self._conn.execute(
+                "ALTER TABLE projects ADD COLUMN preplot_file_cache_json TEXT DEFAULT '{}'"
+            )
+        if "navplan_file_cache_json" not in cols:
+            self._conn.execute(
+                "ALTER TABLE projects ADD COLUMN navplan_file_cache_json TEXT DEFAULT '{}'"
             )
         if "nav_files_explicit" not in cols:
             self._conn.execute(
@@ -456,6 +469,8 @@ class Database:
         )
         legend_json = json.dumps(legend_to_dict(settings.legend_config))
         nav_cache_json = json.dumps(nav_cache_to_json(map_data.nav_file_cache))
+        preplot_cache_json = json.dumps(nav_cache_to_json(map_data.preplot_file_cache))
+        navplan_cache_json = json.dumps(nav_cache_to_json(map_data.navplan_file_cache))
         minimap_view_json = json.dumps(settings.minimap_view)
         map_view_json = json.dumps(settings.map_view)
 
@@ -486,7 +501,8 @@ class Database:
                     show_overlay=?, show_preplots=?,
                     postmap_info_json=?, bounds_json=?, geo_bounds_json=?,
                     stats_json=?, source_files_json=?, nav_files_json=?,
-                    preplot_files_json=?, nav_file_cache_json=?, logo_path=?,
+                    preplot_files_json=?, nav_file_cache_json=?, preplot_file_cache_json=?,
+                    navplan_file_cache_json=?, logo_path=?,
                     legend_config_json=?, nav_files_explicit=?, preplot_files_explicit=?,
                     preplot_catalog_json=?, minimap_view_json=?,
                     navplan_files_json=?, navplan_files_explicit=?,
@@ -512,6 +528,8 @@ class Database:
                     nav_files_json,
                     preplot_files_json,
                     nav_cache_json,
+                    preplot_cache_json,
+                    navplan_cache_json,
                     settings.logo_path,
                     legend_json,
                     int(settings.nav_files_explicit),
@@ -553,13 +571,14 @@ class Database:
                     display_mode, show_source, show_vessel, show_overlay, show_preplots,
                     postmap_info_json, bounds_json, geo_bounds_json, stats_json,
                     source_files_json, nav_files_json, preplot_files_json,
-                    nav_file_cache_json, logo_path, legend_config_json,
+                    nav_file_cache_json, preplot_file_cache_json, navplan_file_cache_json,
+                    logo_path, legend_config_json,
                     nav_files_explicit, preplot_files_explicit, preplot_catalog_json,
                     minimap_view_json, navplan_files_json, navplan_files_explicit,
                     navplans_dir, navplan_catalog_json, map_view_json,
                     postplot_4d_baseline,
                     created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     settings.name,
@@ -579,6 +598,8 @@ class Database:
                     nav_files_json,
                     preplot_files_json,
                     nav_cache_json,
+                    preplot_cache_json,
+                    navplan_cache_json,
                     settings.logo_path,
                     legend_json,
                     int(settings.nav_files_explicit),
@@ -988,6 +1009,16 @@ class Database:
             nav_file_cache=nav_cache_from_json(
                 json.loads(row["nav_file_cache_json"] or "{}")
                 if "nav_file_cache_json" in row.keys()
+                else {}
+            ),
+            preplot_file_cache=preplot_cache_from_json(
+                json.loads(row["preplot_file_cache_json"] or "{}")
+                if "preplot_file_cache_json" in row.keys()
+                else {}
+            ),
+            navplan_file_cache=navplan_cache_from_json(
+                json.loads(row["navplan_file_cache_json"] or "{}")
+                if "navplan_file_cache_json" in row.keys()
                 else {}
             ),
             survey_perimeters=self._load_survey_perimeters(project_id),

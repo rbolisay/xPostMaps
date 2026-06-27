@@ -80,6 +80,8 @@ class PreplotCatalogEntry:
     file_path: str = ""
     crs_code: str = ""
     total_lines: int = 0
+    file_mtime_ns: int = 0
+    file_size: int = 0
 
 
 @dataclass
@@ -338,6 +340,8 @@ class MapData:
     postmap_info: PostmapInfo = field(default_factory=PostmapInfo)
     source_files: list[str] = field(default_factory=list)
     nav_file_cache: dict[str, tuple[float, int, str]] = field(default_factory=dict)
+    preplot_file_cache: dict[str, tuple[float, int, str]] = field(default_factory=dict)
+    navplan_file_cache: dict[str, tuple[float, int, str]] = field(default_factory=dict)
     survey_perimeters: list[SurveyPerimeter] = field(default_factory=list)
     preplot_file_order: list[str] = field(default_factory=list)
     navplan_file_order: list[str] = field(default_factory=list)

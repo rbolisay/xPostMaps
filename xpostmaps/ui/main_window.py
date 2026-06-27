@@ -1043,6 +1043,12 @@ class MainWindow(QMainWindow):
         skipped = map_data.stats.get("nav_files_skipped", 0)
         parsed = map_data.stats.get("nav_files_parsed", 0)
         skip_note = f", {skipped} nav file(s) unchanged" if skipped else ""
+        preplot_skipped = map_data.stats.get("preplot_files_skipped", 0)
+        if preplot_skipped:
+            skip_note += f", {preplot_skipped} preplot unchanged"
+        navplan_skipped = map_data.stats.get("navplan_files_skipped", 0)
+        if navplan_skipped:
+            skip_note += f", {navplan_skipped} navplan unchanged"
         self._left.set_status(
             f"Loaded {map_data.stats.get('total_records', 0):,} nav records, "
             f"{map_data.stats.get('preplot_lines', 0)} preplot lines from "

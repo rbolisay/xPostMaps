@@ -15,11 +15,25 @@ from xpostmaps.core.models import (
 
 # Bump when navigation parsing logic changes (invalidates incremental nav cache).
 NAV_PARSE_VERSION = "p190-header-v3"
+PREPLOT_PARSE_VERSION = "preplot-v1"
+NAVPLAN_PARSE_VERSION = "navplan-v1"
+
+
+def import_file_signature(path: Path, version: str) -> tuple[float, int, str]:
+    stat = path.stat()
+    return stat.st_mtime, stat.st_size, version
 
 
 def nav_file_signature(path: Path) -> tuple[float, int, str]:
-    stat = path.stat()
-    return stat.st_mtime, stat.st_size, NAV_PARSE_VERSION
+    return import_file_signature(path, NAV_PARSE_VERSION)
+
+
+def preplot_file_signature(path: Path) -> tuple[float, int, str]:
+    return import_file_signature(path, PREPLOT_PARSE_VERSION)
+
+
+def navplan_file_signature(path: Path) -> tuple[float, int, str]:
+    return import_file_signature(path, NAVPLAN_PARSE_VERSION)
 
 
 def nav_file_cache_key(path: Path) -> str:
@@ -83,6 +97,21 @@ def nav_cache_to_json(cache: dict[str, tuple[float, int, str]]) -> dict[str, lis
 
 
 def nav_cache_from_json(data: dict | None) -> dict[str, tuple[float, int, str]]:
+    return import_file_cache_from_json(data, NAV_PARSE_VERSION)
+
+
+def preplot_cache_from_json(data: dict | None) -> dict[str, tuple[float, int, str]]:
+    return import_file_cache_from_json(data, PREPLOT_PARSE_VERSION)
+
+
+def navplan_cache_from_json(data: dict | None) -> dict[str, tuple[float, int, str]]:
+    return import_file_cache_from_json(data, NAVPLAN_PARSE_VERSION)
+
+
+def import_file_cache_from_json(
+    data: dict | None,
+    version: str,
+) -> dict[str, tuple[float, int, str]]:
     if not data:
         return {}
     result: dict[str, tuple[float, int, str]] = {}
@@ -91,10 +120,10 @@ def nav_cache_from_json(data: dict | None) -> dict[str, tuple[float, int, str]]:
             continue
         mtime = float(values[0])
         size = int(values[1])
-        version = str(values[2]) if len(values) >= 3 else ""
-        if version != NAV_PARSE_VERSION:
+        cached_version = str(values[2]) if len(values) >= 3 else ""
+        if cached_version != version:
             continue
-        result[path] = (mtime, size, version)
+        result[path] = (mtime, size, cached_version)
     return result
 
 

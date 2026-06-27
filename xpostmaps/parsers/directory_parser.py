@@ -11,19 +11,30 @@ import numpy as np
 
 from xpostmaps.core.models import (
     GeoBounds,
+    LineSegment,
     MapData,
     PositionRecord,
     PostmapInfo,
     ProjectSettings,
     RecordType,
     SurveyBounds,
+    SurveyPerimeter,
 )
-from xpostmaps.core.sequence_utils import nav_file_cache_key, nav_file_signature
-from xpostmaps.core.navplan_catalog_utils import parse_navplan_files, resolve_navplan_files
+from xpostmaps.core.sequence_utils import (
+    nav_file_cache_key,
+    nav_file_signature,
+    navplan_file_signature,
+    preplot_file_signature,
+)
+from xpostmaps.core.navplan_catalog_utils import resolve_navplan_files
 from xpostmaps.parsers.metadata_parser import collect_postmap_metadata
 from xpostmaps.parsers.p111_parser import parse_p111_file, scan_vessel_id
 from xpostmaps.parsers.p190_parser import parse_p190_file
-from xpostmaps.parsers.preplot_parser import parse_preplot_files, resolve_preplot_files
+from xpostmaps.parsers.preplot_parser import (
+    parse_navplan_source_file,
+    parse_preplot_file,
+    resolve_preplot_files,
+)
 from xpostmaps.parsers.sequence_builder import build_display_sequences, records_to_segments
 from xpostmaps.parsers.survey_perimeter_parser import parse_survey_perimeters
 from xpostmaps.utils.numba_accel import compute_bounds
@@ -215,6 +226,29 @@ def _scan_shared_vessel_id(files: list[Path]) -> str | None:
     return None
 
 
+def _segments_for_file(segments: list[LineSegment], path: Path) -> list[LineSegment]:
+    name = path.name
+    ref = str(path)
+    return [
+        segment
+        for segment in segments
+        if segment.file_name == name or segment.file_name == ref
+    ]
+
+
+def _perimeters_for_file(
+    perimeters: list[SurveyPerimeter],
+    path: Path,
+) -> list[SurveyPerimeter]:
+    name = path.name
+    ref = str(path)
+    return [
+        perimeter
+        for perimeter in perimeters
+        if perimeter.file_name == name or perimeter.file_name == ref
+    ]
+
+
 def parse_navigation_directory(
     settings: ProjectSettings,
     progress_callback=None,
@@ -350,24 +384,69 @@ def parse_navigation_directory(
                 all_y.extend(seg.ys)
 
     preplot_stats: dict[str, int] = {}
+    skipped_preplot = 0
+    parsed_preplot = 0
     if settings.show_preplots and preplot_files:
-        if progress_callback:
-            progress_callback(int(100 * step / total_steps), "Parsing preplot/navplan…")
-        segments, _meta, preplot_stats = parse_preplot_files(preplot_files)
-        map_data.preplot_segments = segments
-        map_data.survey_perimeters = parse_survey_perimeters(preplot_files)
+        preplot_cache: dict[str, tuple[float, int, str]] = dict(
+            existing_map_data.preplot_file_cache if existing_map_data else {}
+        )
+        active_preplot_keys = {nav_file_cache_key(path) for path in preplot_files}
+        preplot_cache = {
+            key: value for key, value in preplot_cache.items() if key in active_preplot_keys
+        }
+        preplot_segments: list[LineSegment] = []
+        survey_perimeters: list[SurveyPerimeter] = []
+        for path in preplot_files:
+            cache_key = nav_file_cache_key(path)
+            signature = preplot_file_signature(path)
+            if existing_map_data and preplot_cache.get(cache_key) == signature:
+                preplot_segments.extend(
+                    _segments_for_file(existing_map_data.preplot_segments, path)
+                )
+                survey_perimeters.extend(
+                    _perimeters_for_file(existing_map_data.survey_perimeters, path)
+                )
+                skipped_preplot += 1
+                if progress_callback:
+                    progress_callback(
+                        int(100 * step / total_steps),
+                        f"Skipping preplot {path.name} (unchanged)",
+                    )
+                step += 1
+                continue
+            if progress_callback:
+                progress_callback(
+                    int(100 * step / total_steps),
+                    f"Parsing preplot {path.name}",
+                )
+            result = parse_preplot_file(path)
+            preplot_segments.extend(result.segments)
+            survey_perimeters.extend(parse_survey_perimeters([path]))
+            preplot_cache[cache_key] = signature
+            parsed_preplot += 1
+            preplot_stats["preplot_files"] = preplot_stats.get("preplot_files", 0) + 1
+            preplot_stats["preplot_lines"] = preplot_stats.get("preplot_lines", 0) + len(
+                result.segments
+            )
+            preplot_stats["total_points"] = preplot_stats.get("total_points", 0) + len(
+                result.records
+            )
+            step += 1
+        map_data.preplot_segments = preplot_segments
+        map_data.survey_perimeters = survey_perimeters
         map_data.preplot_file_order = [str(path) for path in preplot_files]
-        for seg in segments:
+        map_data.preplot_file_cache = preplot_cache
+        for seg in preplot_segments:
             all_x.extend(seg.xs)
             all_y.extend(seg.ys)
-        for perimeter in map_data.survey_perimeters:
+        for perimeter in survey_perimeters:
             all_x.extend(perimeter.xs)
             all_y.extend(perimeter.ys)
-        step += len(preplot_files)
     elif existing_map_data and not settings.preplot_files_explicit:
         map_data.preplot_segments = list(existing_map_data.preplot_segments)
         map_data.survey_perimeters = list(existing_map_data.survey_perimeters)
         map_data.preplot_file_order = list(existing_map_data.preplot_file_order)
+        map_data.preplot_file_cache = dict(existing_map_data.preplot_file_cache)
         if not map_data.preplot_file_order and map_data.preplot_segments:
             seen: list[str] = []
             for segment in map_data.preplot_segments:
@@ -384,21 +463,62 @@ def parse_navigation_directory(
         map_data.preplot_segments = []
         map_data.survey_perimeters = []
         map_data.preplot_file_order = []
+        map_data.preplot_file_cache = {}
 
     navplan_stats: dict[str, int] = {}
+    skipped_navplan = 0
+    parsed_navplan = 0
     if settings.show_preplots and navplan_files:
-        if progress_callback:
-            progress_callback(int(100 * step / total_steps), "Parsing navplan…")
-        navplan_segments, _meta, navplan_stats = parse_navplan_files(navplan_files)
+        navplan_cache: dict[str, tuple[float, int, str]] = dict(
+            existing_map_data.navplan_file_cache if existing_map_data else {}
+        )
+        active_navplan_keys = {nav_file_cache_key(path) for path in navplan_files}
+        navplan_cache = {
+            key: value for key, value in navplan_cache.items() if key in active_navplan_keys
+        }
+        navplan_segments: list[LineSegment] = []
+        for path in navplan_files:
+            cache_key = nav_file_cache_key(path)
+            signature = navplan_file_signature(path)
+            if existing_map_data and navplan_cache.get(cache_key) == signature:
+                navplan_segments.extend(
+                    _segments_for_file(existing_map_data.navplan_segments, path)
+                )
+                skipped_navplan += 1
+                if progress_callback:
+                    progress_callback(
+                        int(100 * step / total_steps),
+                        f"Skipping navplan {path.name} (unchanged)",
+                    )
+                step += 1
+                continue
+            if progress_callback:
+                progress_callback(
+                    int(100 * step / total_steps),
+                    f"Parsing navplan {path.name}",
+                )
+            result = parse_navplan_source_file(path)
+            navplan_segments.extend(result.segments)
+            navplan_cache[cache_key] = signature
+            parsed_navplan += 1
+            navplan_stats["navplan_files"] = navplan_stats.get("navplan_files", 0) + 1
+            navplan_stats["navplan_lines"] = navplan_stats.get("navplan_lines", 0) + len(
+                result.segments
+            )
+            navplan_stats["navplan_points"] = navplan_stats.get("navplan_points", 0) + len(
+                result.records
+            )
+            step += 1
         map_data.navplan_segments = navplan_segments
         map_data.navplan_file_order = [str(path) for path in navplan_files]
+        map_data.navplan_file_cache = navplan_cache
         for seg in navplan_segments:
             all_x.extend(seg.xs)
             all_y.extend(seg.ys)
-        step += len(navplan_files)
     elif existing_map_data and not settings.navplan_files_explicit:
         map_data.navplan_segments = list(existing_map_data.navplan_segments)
         map_data.navplan_file_order = list(existing_map_data.navplan_file_order)
+        map_data.navplan_file_cache = dict(existing_map_data.navplan_file_cache)
         if not map_data.navplan_file_order and map_data.navplan_segments:
             seen: list[str] = []
             for segment in map_data.navplan_segments:
@@ -411,6 +531,7 @@ def parse_navigation_directory(
     else:
         map_data.navplan_segments = []
         map_data.navplan_file_order = []
+        map_data.navplan_file_cache = {}
 
     xs_arr = np.array(all_x, dtype=np.float64)
     ys_arr = np.array(all_y, dtype=np.float64)
@@ -431,9 +552,13 @@ def parse_navigation_directory(
         "nav_files_skipped": skipped_files,
         "nav_files_active_names": [path.name for path in main_files],
         "nav_files_parsed_names": [path.name for path in files_to_parse],
-        "preplot_files": preplot_stats.get("preplot_files", 0),
+        "preplot_files": preplot_stats.get("preplot_files", parsed_preplot + skipped_preplot),
+        "preplot_files_parsed": parsed_preplot,
+        "preplot_files_skipped": skipped_preplot,
         "preplot_lines": preplot_stats.get("preplot_lines", 0),
-        "navplan_files": navplan_stats.get("navplan_files", 0),
+        "navplan_files": navplan_stats.get("navplan_files", parsed_navplan + skipped_navplan),
+        "navplan_files_parsed": parsed_navplan,
+        "navplan_files_skipped": skipped_navplan,
         "navplan_lines": navplan_stats.get("navplan_lines", 0),
         "navplan_points": navplan_stats.get("navplan_points", 0),
         "survey_perimeters": len(map_data.survey_perimeters),

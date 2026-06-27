@@ -3,8 +3,6 @@
 from __future__ import annotations
 
 from pathlib import Path
-
-from xpostmaps.core.crs_utils import normalize_epsg
 from xpostmaps.core.models import (
     LegendConfig,
     LineSegment,
@@ -12,6 +10,7 @@ from xpostmaps.core.models import (
     PreplotCatalogEntry,
     PreplotLegendEntry,
 )
+from xpostmaps.core.navplan_catalog_utils import catalog_path_key
 from xpostmaps.parsers.preplot_parser import parse_preplot_file
 from xpostmaps.ui.theme import PREPLOT_LINE
 
@@ -25,29 +24,83 @@ def renumber_preplot_catalog(entries: list[PreplotCatalogEntry]) -> None:
         entry.preplot_number = index
 
 
-def build_preplot_catalog(paths: list[Path]) -> list[PreplotCatalogEntry]:
+def _file_fingerprint(path: Path) -> tuple[int, int]:
+    try:
+        stat = path.stat()
+    except OSError:
+        return (0, 0)
+    return (int(stat.st_mtime_ns), int(stat.st_size))
+
+
+def _entry_matches_file(entry: PreplotCatalogEntry, path: Path) -> bool:
+    if entry.file_mtime_ns <= 0 and entry.file_size <= 0:
+        return False
+    mtime_ns, size = _file_fingerprint(path)
+    return mtime_ns == entry.file_mtime_ns and size == entry.file_size
+
+
+def build_preplot_catalog_entry(path: Path) -> PreplotCatalogEntry | None:
+    if not path.is_file():
+        return None
+    result = parse_preplot_file(path)
+    crs = (
+        result.metadata.get("epsg code")
+        or result.metadata.get("epsg")
+        or result.metadata.get("authority")
+        or ""
+    )
+    mtime_ns, size = _file_fingerprint(path)
+    return PreplotCatalogEntry(
+        file_path=str(path),
+        crs_code=normalize_epsg(crs) or crs,
+        total_lines=len(result.segments),
+        file_mtime_ns=mtime_ns,
+        file_size=size,
+    )
+
+
+def catalog_for_saved_files(
+    file_paths: list[str],
+    saved_catalog: list[PreplotCatalogEntry],
+) -> list[PreplotCatalogEntry]:
+    by_path = {catalog_path_key(entry.file_path): entry for entry in saved_catalog}
     catalog: list[PreplotCatalogEntry] = []
-    for index, path in enumerate(sorted(paths), start=1):
-        resolved = path.resolve()
-        if not resolved.is_file():
-            continue
-        result = parse_preplot_file(resolved)
-        crs = (
-            result.metadata.get("epsg code")
-            or result.metadata.get("epsg")
-            or result.metadata.get("authority")
-            or ""
-        )
-        catalog.append(
-            PreplotCatalogEntry(
-                preplot_number=index,
-                file_path=str(resolved),
-                crs_code=normalize_epsg(crs) or crs,
-                total_lines=len(result.segments),
-            )
-        )
+    for raw_path in sorted(file_paths, key=lambda value: catalog_path_key(value)):
+        entry = by_path.get(catalog_path_key(raw_path))
+        if entry is not None:
+            catalog.append(entry)
     renumber_preplot_catalog(catalog)
     return catalog
+
+
+def refresh_preplot_catalog(
+    file_paths: list[str],
+    saved_catalog: list[PreplotCatalogEntry] | None = None,
+    *,
+    force: bool = False,
+) -> list[PreplotCatalogEntry]:
+    saved = saved_catalog or []
+    by_path = {catalog_path_key(entry.file_path): entry for entry in saved}
+    catalog: list[PreplotCatalogEntry] = []
+    for raw_path in sorted(file_paths, key=lambda value: catalog_path_key(value)):
+        path = Path(raw_path)
+        if not path.is_file():
+            continue
+        key = catalog_path_key(path)
+        if not force:
+            saved_entry = by_path.get(key)
+            if saved_entry is not None and _entry_matches_file(saved_entry, path):
+                catalog.append(saved_entry)
+                continue
+        entry = build_preplot_catalog_entry(path)
+        if entry is not None:
+            catalog.append(entry)
+    renumber_preplot_catalog(catalog)
+    return catalog
+
+
+def build_preplot_catalog(paths: list[Path]) -> list[PreplotCatalogEntry]:
+    return refresh_preplot_catalog([str(path) for path in paths], force=True)
 
 
 def build_preplot_catalog_from_segments(
@@ -72,12 +125,15 @@ def build_preplot_catalog_from_segments(
             or result.metadata.get("authority")
             or fallback_crs
         )
+        mtime_ns, size = _file_fingerprint(path)
         catalog.append(
             PreplotCatalogEntry(
                 preplot_number=index,
-                file_path=str(path.resolve()),
+                file_path=str(path),
                 crs_code=normalize_epsg(crs) or crs,
                 total_lines=line_counts.get(path.name, len(result.segments)),
+                file_mtime_ns=mtime_ns,
+                file_size=size,
             )
         )
     renumber_preplot_catalog(catalog)
@@ -167,6 +223,8 @@ def catalog_to_json(catalog: list[PreplotCatalogEntry]) -> list[dict]:
             "file_path": entry.file_path,
             "crs_code": entry.crs_code,
             "total_lines": entry.total_lines,
+            "file_mtime_ns": entry.file_mtime_ns,
+            "file_size": entry.file_size,
         }
         for entry in catalog
     ]
@@ -181,6 +239,8 @@ def catalog_from_json(data: list[dict] | None) -> list[PreplotCatalogEntry]:
             file_path=str(item.get("file_path", "")),
             crs_code=str(item.get("crs_code", "")),
             total_lines=int(item.get("total_lines", 0)),
+            file_mtime_ns=int(item.get("file_mtime_ns", 0)),
+            file_size=int(item.get("file_size", 0)),
         )
         for item in data
     ]

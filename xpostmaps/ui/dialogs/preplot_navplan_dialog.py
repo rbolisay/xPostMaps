@@ -20,7 +20,8 @@ from PySide6.QtWidgets import (
 from xpostmaps.core.crs_utils import epsg_label
 from xpostmaps.core.models import PreplotCatalogEntry, ProjectSettings
 from xpostmaps.core.preplot_catalog_utils import (
-    build_preplot_catalog,
+    catalog_for_saved_files,
+    refresh_preplot_catalog,
     renumber_preplot_catalog,
 )
 from xpostmaps.parsers.preplot_parser import PREPLOT_EXTENSIONS
@@ -108,10 +109,18 @@ class PreplotNavplanDialog:
             "catalog": list(settings.preplot_catalog),
         }
 
-        def rebuild_catalog() -> None:
-            paths = [Path(path) for path in state["files"] if Path(path).is_file()]
-            state["catalog"] = build_preplot_catalog(paths) if paths else []
-            renumber_preplot_catalog(state["catalog"])
+        def rebuild_catalog(*, force: bool = False) -> None:
+            state["catalog"] = refresh_preplot_catalog(
+                state["files"],
+                state["catalog"],
+                force=force,
+            )
+
+        def load_saved_catalog() -> None:
+            state["catalog"] = catalog_for_saved_files(
+                state["files"],
+                settings.preplot_catalog,
+            )
 
         def apply_changes() -> None:
             settings.preplot_files = list(state["files"])
@@ -181,7 +190,12 @@ class PreplotNavplanDialog:
             state["files"] = [
                 path for path in state["files"] if path not in remove_paths
             ]
-            rebuild_catalog()
+            state["catalog"] = [
+                entry
+                for entry in state["catalog"]
+                if entry.file_path not in remove_paths
+            ]
+            renumber_preplot_catalog(state["catalog"])
             refresh_table(table)
 
         def rescan() -> None:
@@ -191,13 +205,13 @@ class PreplotNavplanDialog:
                 state["files"] = [
                     path for path in state["files"] if Path(path).is_file()
                 ]
-            rebuild_catalog()
+            rebuild_catalog(force=False)
             refresh_table(table)
 
         def build(dialog: SingleInstanceDialog) -> None:
             state["files"] = list(settings.preplot_files)
             state["folder"] = settings.preplots_dir or initial_dir
-            rebuild_catalog()
+            load_saved_catalog()
             layout = dialog.content_layout
             _clear_layout(layout)
 
