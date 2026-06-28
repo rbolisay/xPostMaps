@@ -17,20 +17,30 @@ from PySide6.QtWidgets import (
 from xpostmaps.core.postplot_4d_diff import Postplot4DDiffRow
 from xpostmaps.core.postplot_4d_matching import Postplot4DMatchRow
 from xpostmaps.core.postplot_4d_plot_data import (
-    BoundaryRow,
     PlotKind,
     PLOT_KIND_LABELS,
     build_plot_series,
-    default_source_styles,
+    feather_diff_tab_available,
     feather_tab_available,
     unique_sources_from_diff_rows,
+)
+from xpostmaps.core.postplot_4d_plot_settings import (
+    resolve_boundaries_for_kind,
+    resolve_source_styles_for_line,
+    save_kind_settings,
 )
 from xpostmaps.ui.postplot_4d_stat_plot.controls import PlotTabControls, YAxisControls
 from xpostmaps.ui.postplot_4d_stat_plot.plot_widget import PlotCanvas
 from xpostmaps.ui.postplot_4d_stat_plot.theme import STAT_PLOT_TAB_STYLE, STAT_PLOT_VIEW_STYLE
 
-_PLOT_KINDS: tuple[PlotKind, ...] = ("crossline", "inline", "radial", "feather")
-_DEFAULT_BOUNDARIES = [BoundaryRow(abs_boundary=6.0), BoundaryRow(abs_boundary=9.0)]
+_PLOT_KINDS: tuple[PlotKind, ...] = (
+    "crossline",
+    "inline",
+    "radial",
+    "feather",
+    "feather_diff",
+)
+_OPTIONAL_PLOT_KINDS: tuple[PlotKind, ...] = ("feather", "feather_diff")
 
 
 class _PlotTabPage(QWidget):
@@ -96,7 +106,7 @@ class Postplot4DStatPlotView(QWidget):
             self._tab_pages[kind] = page
             self._tabs.addTab(page, PLOT_KIND_LABELS[kind])
             controls = PlotTabControls(parent=self)
-            controls.changed.connect(lambda k=kind: self._render_tab(k))
+            controls.changed.connect(lambda k=kind: self._on_kind_controls_changed(k))
             self._tab_controls[kind] = controls
             self._controls_stack.addWidget(controls)
         self._tabs.currentChanged.connect(self._on_tab_changed)
@@ -123,10 +133,9 @@ class Postplot4DStatPlotView(QWidget):
         self._diff_rows = list(diff_rows)
         self._streamers_detected = streamers_detected
         self._sources = unique_sources_from_diff_rows(diff_rows)
-        default_styles = default_source_styles(self._sources)
-        for controls in self._tab_controls.values():
-            controls.set_sources(default_styles)
-            controls.set_boundaries(list(_DEFAULT_BOUNDARIES))
+        for kind, controls in self._tab_controls.items():
+            controls.set_sources(resolve_source_styles_for_line(self._sources, kind))
+            controls.set_boundaries(resolve_boundaries_for_kind(kind))
         if match_row.subline:
             self._title.setText(f"{match_row.line_name}.{match_row.subline} 4D Stat Plot")
         else:
@@ -136,9 +145,17 @@ class Postplot4DStatPlotView(QWidget):
             diff_rows,
             streamers_detected=streamers_detected,
         )
-        feather_index = self._tabs.indexOf(self._tab_pages["feather"])
-        if feather_index >= 0:
-            self._tabs.setTabVisible(feather_index, show_feather)
+        show_feather_diff = feather_diff_tab_available(
+            match_row,
+            streamers_detected=streamers_detected,
+        )
+        for kind, visible in (
+            ("feather", show_feather),
+            ("feather_diff", show_feather_diff),
+        ):
+            tab_index = self._tabs.indexOf(self._tab_pages[kind])
+            if tab_index >= 0:
+                self._tabs.setTabVisible(tab_index, visible)
         self._sync_controls_stack()
         self._refresh_all_tabs()
         QTimer.singleShot(0, self._refresh_all_tabs)
@@ -192,6 +209,11 @@ class Postplot4DStatPlotView(QWidget):
             streamers_detected=self._streamers_detected,
         ):
             kinds.append("feather")
+        if feather_diff_tab_available(
+            self._match_row,
+            streamers_detected=self._streamers_detected,
+        ):
+            kinds.append("feather_diff")
         return kinds
 
     def _sync_controls_stack(self) -> None:
@@ -202,6 +224,16 @@ class Postplot4DStatPlotView(QWidget):
     def _on_tab_changed(self, _index: int) -> None:
         self._sync_controls_stack()
         self._refresh_current_tab()
+
+    def _on_kind_controls_changed(self, kind: PlotKind) -> None:
+        controls = self._tab_controls.get(kind)
+        if controls is not None:
+            save_kind_settings(
+                kind,
+                controls.source_styles(),
+                controls.boundaries(),
+            )
+        self._render_tab(kind)
 
     def _on_combine_changed(self, checked: bool) -> None:
         for page in self._tab_pages.values():
@@ -240,8 +272,9 @@ class Postplot4DStatPlotView(QWidget):
             return
         for kind in self.available_plot_kinds():
             self._render_tab(kind)
-        if "feather" not in self.available_plot_kinds():
-            self._render_tab("feather")
+        for kind in _OPTIONAL_PLOT_KINDS:
+            if kind not in self.available_plot_kinds():
+                self._render_tab(kind)
 
     def refresh(self) -> None:
         self._refresh_all_tabs()

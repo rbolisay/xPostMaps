@@ -34,6 +34,12 @@ class StatPlotViewBox(MapViewBox):
         self._reset_zoom_cb = reset_zoom
         self._left_click_cb = left_click
 
+    def left_click_was_drag(self) -> bool:
+        """Return whether the last left press included a zoom-window drag."""
+        dragged = self._left_drag_moved
+        self._left_drag_moved = False
+        return dragged
+
     def mouseDragEvent(self, ev, axis=None) -> None:
         if ev.button() == Qt.MouseButton.LeftButton:
             if ev.isStart():

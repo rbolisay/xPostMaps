@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from PySide6.QtWidgets import QWidget
+from PySide6.QtWidgets import QApplication, QWidget
 
 # Outer dialog margins + title bar (approximate client chrome).
 _DIALOG_CHROME_WIDTH = 48
@@ -33,3 +33,17 @@ def postplot_4d_dialog_size(parent: QWidget | None) -> tuple[int, int]:
     """Postplot 4D / 4D Stat Plot window size — map sheet width, 15% shorter height."""
     width, height = map_sheet_dialog_size(parent)
     return width, max(480, int(height * _POSTPLOT_4D_HEIGHT_SCALE))
+
+
+def center_widget_on_screen(widget: QWidget) -> None:
+    """Move *widget* so its frame is centered on the available screen area."""
+    screen = widget.screen().availableGeometry() if widget.screen() else None
+    if screen is None:
+        primary = QApplication.primaryScreen()
+        if primary is not None:
+            screen = primary.availableGeometry()
+    if screen is None:
+        return
+    frame = widget.frameGeometry()
+    frame.moveCenter(screen.center())
+    widget.move(frame.topLeft())

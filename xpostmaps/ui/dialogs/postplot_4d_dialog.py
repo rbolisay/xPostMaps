@@ -44,7 +44,7 @@ from xpostmaps.core.postplot_4d_matching import (
     build_postplot_4d_rows,
 )
 from xpostmaps.parsers.metadata_parser import parse_file_metadata
-from xpostmaps.ui.dialog_size_utils import postplot_4d_dialog_size
+from xpostmaps.ui.dialog_size_utils import center_widget_on_screen, postplot_4d_dialog_size
 from xpostmaps.ui.dialogs.postplot_4d_plot_pdf_dialog import Postplot4DStatPlotPdfDialog
 from xpostmaps.ui.dialogs.base_dialog import SingleInstanceDialog
 from xpostmaps.ui.postplot_4d_stat_plot import Postplot4DStatPlotView
@@ -657,6 +657,13 @@ class Postplot4DDialog:
             _finalize_diff_table_layout(diff_table)
             _autosize_dialog_width(host_dialog, diff_table)
 
+        def _frame_and_center_dialog() -> None:
+            if host_dialog is None:
+                return
+            width, height = postplot_4d_dialog_size(parent)
+            host_dialog.resize(width, height)
+            center_widget_on_screen(host_dialog)
+
         def show_diff_stat(match_row: Postplot4DMatchRow) -> None:
             nonlocal diff_rows
             state["active_match"] = match_row
@@ -682,6 +689,7 @@ class Postplot4DDialog:
                     host_dialog.setWindowTitle(_diff_title(match_row))
                 plot_btn.setEnabled(False)
                 stack.setCurrentIndex(1)
+                _frame_and_center_dialog()
                 return
             diff_title.setText(_diff_title(match_row))
             if diff_crs_note is not None:
@@ -704,6 +712,7 @@ class Postplot4DDialog:
                 host_dialog.setWindowTitle(_diff_title(match_row))
             plot_btn.setEnabled(bool(diff_rows))
             stack.setCurrentIndex(1)
+            _frame_and_center_dialog()
 
         def show_main_view() -> None:
             state["active_match"] = None
@@ -728,8 +737,7 @@ class Postplot4DDialog:
                     )
                 else:
                     host_dialog.setWindowTitle(f"{match_row.line_name} 4D Stat Plot")
-                plot_w, plot_h = postplot_4d_dialog_size(parent)
-                host_dialog.resize(plot_w, plot_h)
+                _frame_and_center_dialog()
             stack.setCurrentIndex(2)
             QTimer.singleShot(0, plot_view.refresh)
             QTimer.singleShot(100, plot_view.refresh)
@@ -1374,6 +1382,7 @@ class Postplot4DDialog:
                 show_diff_stat(state["active_match"])
             else:
                 refresh_table()
+                _frame_and_center_dialog()
 
         summary = QLabel("")
         table = QTableWidget()

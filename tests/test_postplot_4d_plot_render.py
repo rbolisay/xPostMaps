@@ -12,7 +12,11 @@ from PySide6.QtWidgets import QApplication
 from xpostmaps.core.postplot_4d_diff import Postplot4DDiffRow
 from xpostmaps.core.postplot_4d_matching import Postplot4DMatchRow
 from xpostmaps.core.postplot_4d_plot_data import BoundaryRow, build_plot_series, default_source_styles
-from xpostmaps.ui.postplot_4d_stat_plot.plot_widget import PlotCanvas
+from xpostmaps.ui.postplot_4d_stat_plot.plot_widget import (
+    PlotCanvas,
+    TimeSeriesPlotWidget,
+    nearest_pick_point,
+)
 
 
 @pytest.fixture(scope="module")
@@ -67,6 +71,34 @@ def _non_white_fraction(image) -> float:
                 non_white += 1
     sampled = ((width + 2) // 3) * ((height + 2) // 3)
     return non_white / max(sampled, 1)
+
+
+def test_nearest_pick_point_selects_closest_shotpoint() -> None:
+    picked = nearest_pick_point(
+        [(100.0, 1.0, "G01"), (101.0, 5.0, "G01")],
+        mouse_x=100.4,
+        mouse_y=1.1,
+        x_tol=1.0,
+        y_tol=1.0,
+    )
+    assert picked == (100.0, 1.0, "G01")
+
+
+def test_time_series_plot_shows_selection_text(qapp) -> None:
+    match, rows = _sample_match_and_rows()
+    plot = TimeSeriesPlotWidget("crossline")
+    plot.resize(800, 480)
+    styles = default_source_styles(["G01"])
+    series = build_plot_series(rows, match, "crossline", "G01")
+    plot.render([series], styles, [], y_min=None, y_max=None, auto_y=True)
+    plot.show()
+    qapp.processEvents()
+    assert len(plot._pick_points) == 11
+    plot._show_pick(100.0, float(np.sin(100)), "G01")
+    qapp.processEvents()
+    assert plot._selection_edit.isVisible()
+    assert "SP 100" in plot._selection_edit.text()
+    assert "G01" in plot._selection_edit.text()
 
 
 def test_plot_canvas_renders_crossline_with_boundaries(qapp) -> None:

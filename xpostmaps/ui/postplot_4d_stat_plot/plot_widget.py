@@ -75,6 +75,48 @@ def _style_lookup(styles: list[SourceStyleRow]) -> dict[str, SourceStyleRow]:
     return {row.source_no: row for row in styles}
 
 
+def _pick_tolerance(
+    viewbox: pg.ViewBox,
+    *,
+    radius_px: float = _PICK_RADIUS_PX,
+) -> tuple[float, float]:
+    (x_range, y_range) = viewbox.viewRange()
+    x_span = x_range[1] - x_range[0]
+    y_span = y_range[1] - y_range[0]
+    view_rect = viewbox.sceneBoundingRect()
+    width = max(view_rect.width(), 1.0)
+    height = max(view_rect.height(), 1.0)
+    return x_span * radius_px / width, y_span * radius_px / height
+
+
+def nearest_pick_point(
+    pick_points: list[tuple[float, float, str]],
+    mouse_x: float,
+    mouse_y: float,
+    x_tol: float,
+    y_tol: float,
+) -> tuple[float, float, str] | None:
+    """Return the nearest data point within *radius_px* (ellipse in data space)."""
+    if not pick_points or x_tol <= 0.0 or y_tol <= 0.0:
+        return None
+    best: tuple[float, float, str] | None = None
+    best_dist = 1.0
+    for shotpoint, value, source_no in pick_points:
+        dx = (shotpoint - mouse_x) / x_tol
+        dy = (value - mouse_y) / y_tol
+        dist = dx * dx + dy * dy
+        if dist < best_dist:
+            best_dist = dist
+            best = (shotpoint, value, source_no)
+    return best
+
+
+def _format_pick_value(kind: PlotKind, value: float) -> str:
+    if kind in ("feather", "feather_diff"):
+        return f"{value:.2f}"
+    return f"{value:.3f}"
+
+
 class TimeSeriesPlotWidget(pg.PlotWidget):
     """Single time-series plot with navigation, point pick, and stats overlay."""
 
@@ -86,6 +128,13 @@ class TimeSeriesPlotWidget(pg.PlotWidget):
         self._pick_points: list[tuple[float, float, str]] = []
         self._extent_x: tuple[float, float] | None = None
         self._extent_y: tuple[float, float] | None = None
+        self._selection_marker = pg.ScatterPlotItem(
+            size=11,
+            pen=pg.mkPen("#111827", width=1.5),
+            brush=pg.mkBrush(255, 255, 255, 230),
+            symbol="o",
+        )
+        self._selection_marker.setZValue(200)
         self._selection_edit = QLineEdit()
         self._stats_label = QLabel()
         super().__init__(parent=parent, background=_PLOT_BG, viewBox=self._viewbox)
@@ -97,11 +146,15 @@ class TimeSeriesPlotWidget(pg.PlotWidget):
         self._selection_edit.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self._selection_edit.hide()
         self._stats_label.setStyleSheet(_OVERLAY_STYLE)
+        self.addItem(self._selection_marker)
+        self._selection_marker.hide()
         self._viewbox.set_handlers(
             center_average=self._center_average,
             reset_zoom=self._reset_zoom,
-            left_click=self._on_left_click,
         )
+        scene = self.scene()
+        if scene is not None:
+            scene.sigMouseClicked.connect(self._on_scene_mouse_clicked)
         self._position_overlays()
 
     def resizeEvent(self, event) -> None:  # noqa: N802
@@ -115,10 +168,12 @@ class TimeSeriesPlotWidget(pg.PlotWidget):
         self._selection_edit.adjustSize()
         self._selection_edit.setFixedWidth(min(300, max(180, self.width() // 3)))
         self._selection_edit.move(margin, margin)
+        self._selection_edit.raise_()
 
         self._stats_label.adjustSize()
         stats_y = self.height() - self._stats_label.height() - margin
         self._stats_label.move(margin, max(margin, stats_y))
+        self._stats_label.raise_()
 
     def _set_selection_text(self, text: str) -> None:
         self._selection_edit.setText(text)
@@ -127,6 +182,49 @@ class TimeSeriesPlotWidget(pg.PlotWidget):
             self._position_overlays()
         else:
             self._selection_edit.hide()
+            self._selection_marker.hide()
+
+    def _show_pick(self, shotpoint: float, value: float, source_no: str) -> None:
+        sp_text = str(int(shotpoint)) if shotpoint == int(shotpoint) else f"{shotpoint:.1f}"
+        unit = PLOT_KIND_UNITS[self._kind]
+        self._set_selection_text(
+            f"SP {sp_text}: {_format_pick_value(self._kind, value)} {unit}  ({source_no})"
+        )
+        self._selection_marker.setData([shotpoint], [value])
+        self._selection_marker.show()
+
+    def _on_scene_mouse_clicked(self, ev) -> None:
+        if ev.button() != Qt.MouseButton.LeftButton or ev.double():
+            return
+        if self._viewbox.left_click_was_drag():
+            return
+        vb = self._viewbox
+        mouse = vb.mapSceneToView(ev.scenePos())
+        x_tol, y_tol = _pick_tolerance(vb)
+        picked = nearest_pick_point(
+            self._pick_points,
+            mouse.x(),
+            mouse.y(),
+            x_tol,
+            y_tol,
+        )
+        if picked is None:
+            self._set_selection_text("")
+            return
+        shotpoint, value, source_no = picked
+        self._show_pick(shotpoint, value, source_no)
+
+    def _bind_curve_pick(self, curve: pg.PlotDataItem, source_no: str) -> None:
+        if not hasattr(curve, "sigPointsClicked"):
+            return
+
+        def on_points_clicked(_item, points, _ev) -> None:
+            if not points:
+                return
+            pos = points[0].pos()
+            self._show_pick(pos.x(), pos.y(), source_no)
+
+        curve.sigPointsClicked.connect(on_points_clicked)
 
     def _center_average(self) -> None:
         if self._extent_x is None or self._extent_y is None:
@@ -150,26 +248,6 @@ class TimeSeriesPlotWidget(pg.PlotWidget):
 
     def _reset_zoom(self) -> None:
         self._viewbox.zoom_to_extent()
-
-    def _on_left_click(self, ev) -> None:
-        pos = ev.scenePos()
-        best: tuple[float, float, str] | None = None
-        best_dist = float(_PICK_RADIUS_PX * _PICK_RADIUS_PX)
-        vb = self._viewbox
-        for shotpoint, value, source_no in self._pick_points:
-            scene_pt = vb.mapFromView(pg.Point(shotpoint, value))
-            dx = scene_pt.x() - pos.x()
-            dy = scene_pt.y() - pos.y()
-            dist = dx * dx + dy * dy
-            if dist < best_dist:
-                best_dist = dist
-                best = (shotpoint, value, source_no)
-        if best is None:
-            self._set_selection_text("")
-            return
-        shotpoint, value, source_no = best
-        sp_text = str(int(shotpoint)) if shotpoint == int(shotpoint) else f"{shotpoint:.1f}"
-        self._set_selection_text(f"SP {sp_text}: {value:.3f}  ({source_no})")
 
     def _update_stats_overlay(self, values: list[float]) -> None:
         if not values:
@@ -199,6 +277,7 @@ class TimeSeriesPlotWidget(pg.PlotWidget):
         self._boundary_items.clear()
         self._pick_points.clear()
         self._set_selection_text("")
+        self._selection_marker.hide()
 
         style_by_source = _style_lookup(styles)
         all_values: list[float] = []
@@ -227,6 +306,7 @@ class TimeSeriesPlotWidget(pg.PlotWidget):
                 connect="all",
             )
             self._curve_items.append(curve)
+            self._bind_curve_pick(curve, series.source_no)
             all_values.extend(y_data.tolist())
             all_x.extend(x_data.tolist())
             for shotpoint, value in zip(x_data.tolist(), y_data.tolist(), strict=False):

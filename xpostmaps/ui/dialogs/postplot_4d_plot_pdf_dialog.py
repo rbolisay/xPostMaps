@@ -37,7 +37,7 @@ from xpostmaps.core.postplot_4d_plot_pdf import (
     Postplot4DStatPlotPdfOptions,
     default_4d_stat_pdf_filename,
     export_4d_stat_plot_pdf,
-    render_4d_stat_plot_preview,
+    render_4d_stat_plot_preview_pages,
     resolve_4d_stat_output_path,
     resolved_plot_kinds,
 )
@@ -69,6 +69,7 @@ class Postplot4DStatPlotPdfDialog:
         fallback_dir = default_output_dir or Path.cwd()
         default_dir = load_pdf_output_directory(fallback_dir)
         feather_available = "feather" in plot_view.available_plot_kinds()
+        feather_diff_available = "feather_diff" in plot_view.available_plot_kinds()
 
         def build(dialog: SingleInstanceDialog) -> None:
             layout = dialog.content_layout
@@ -141,7 +142,7 @@ class Postplot4DStatPlotPdfDialog:
             plots_group = QGroupBox("Plots to include")
             plots_layout = QVBoxLayout(plots_group)
             plot_checks: dict[PlotKind, QCheckBox] = {}
-            for kind in ("crossline", "inline", "radial", "feather"):
+            for kind in ("crossline", "inline", "radial", "feather", "feather_diff"):
                 box = QCheckBox(PLOT_KIND_LABELS[kind])
                 box.setChecked(True)
                 if kind == "feather":
@@ -149,6 +150,13 @@ class Postplot4DStatPlotPdfDialog:
                     if not feather_available:
                         box.setChecked(False)
                         box.setToolTip("Feather is unavailable for this line.")
+                if kind == "feather_diff":
+                    box.setEnabled(feather_diff_available)
+                    if not feather_diff_available:
+                        box.setChecked(False)
+                        box.setToolTip(
+                            "Feather Diff requires a navplan baseline and detected streamers."
+                        )
                 plot_checks[kind] = box
                 plots_layout.addWidget(box)
             left_form.addRow(plots_group)
@@ -158,8 +166,8 @@ class Postplot4DStatPlotPdfDialog:
             left_form.addRow("", open_after)
 
             hint = QLabel(
-                "Preview shows the first page that will be exported. "
-                "Each selected plot type is written to its own PDF page "
+                "Use the preview arrows to step through every PDF page. "
+                "Each selected plot type is written to its own page "
                 "(one page per source when Combine Sources is off)."
             )
             hint.setWordWrap(True)
@@ -187,17 +195,36 @@ class Postplot4DStatPlotPdfDialog:
             preview_label.setStyleSheet(
                 "background: #ffffff; border: 1px solid #30363d; color: #444;"
             )
-            preview_scroll = QScrollArea()
-            preview_scroll.setWidgetResizable(True)
-            preview_scroll.setFrameShape(QScrollArea.Shape.StyledPanel)
+            prev_page_btn = QPushButton("◀")
+            prev_page_btn.setFixedWidth(36)
+            prev_page_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+            next_page_btn = QPushButton("▶")
+            next_page_btn.setFixedWidth(36)
+            next_page_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+            page_counter = QLabel("Page 0 of 0")
+            page_counter.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            page_counter.setStyleSheet("color: #8b949e; font-size: 11px;")
+            nav_row = QHBoxLayout()
+            nav_row.addStretch()
+            nav_row.addWidget(prev_page_btn)
+            nav_row.addWidget(page_counter)
+            nav_row.addWidget(next_page_btn)
+            nav_row.addStretch()
             preview_host = QWidget()
             preview_layout = QVBoxLayout(preview_host)
             preview_layout.addWidget(preview_title)
             preview_layout.addWidget(preview_label, stretch=1)
+            preview_layout.addLayout(nav_row)
+            preview_scroll = QScrollArea()
+            preview_scroll.setWidgetResizable(True)
+            preview_scroll.setFrameShape(QScrollArea.Shape.StyledPanel)
             preview_scroll.setWidget(preview_host)
             body.addWidget(preview_scroll, stretch=1)
 
             layout.addLayout(body)
+
+            preview_pages: list = []
+            preview_index = 0
 
             preview_timer = QTimer(dialog)
             preview_timer.setSingleShot(True)
@@ -221,25 +248,35 @@ class Postplot4DStatPlotPdfDialog:
                     include_inline=plot_checks["inline"].isChecked(),
                     include_radial=plot_checks["radial"].isChecked(),
                     include_feather=plot_checks["feather"].isChecked(),
+                    include_feather_diff=plot_checks["feather_diff"].isChecked(),
                 )
 
             def sync_margin_controls() -> None:
                 margin_custom.setVisible(margin_combo.currentText() == "Custom")
 
-            def refresh_preview() -> None:
-                opts = current_options()
-                if not resolved_plot_kinds(plot_view, opts):
+            def _sync_page_nav() -> None:
+                total = len(preview_pages)
+                if total <= 0:
+                    page_counter.setText("Page 0 of 0")
+                    prev_page_btn.setEnabled(False)
+                    next_page_btn.setEnabled(False)
+                    return
+                page_counter.setText(f"Page {preview_index + 1} of {total}")
+                prev_page_btn.setEnabled(preview_index > 0)
+                next_page_btn.setEnabled(preview_index < total - 1)
+
+            def _show_preview_page() -> None:
+                if not preview_pages:
                     preview_label.setText("Select at least one plot type")
                     preview_label.setPixmap(QPixmap())
+                    _sync_page_nav()
                     return
-                image = render_4d_stat_plot_preview(
-                    plot_view,
-                    opts,
-                    logo_path=logo_path,
-                )
+                index = max(0, min(preview_index, len(preview_pages) - 1))
+                image = preview_pages[index]
                 if image.isNull():
                     preview_label.setText("Preview unavailable")
                     preview_label.setPixmap(QPixmap())
+                    _sync_page_nav()
                     return
                 pix = QPixmap.fromImage(image)
                 scaled = pix.scaled(
@@ -249,6 +286,37 @@ class Postplot4DStatPlotPdfDialog:
                 )
                 preview_label.setText("")
                 preview_label.setPixmap(scaled)
+                _sync_page_nav()
+
+            def refresh_preview() -> None:
+                nonlocal preview_pages, preview_index
+                opts = current_options()
+                if not resolved_plot_kinds(plot_view, opts):
+                    preview_pages = []
+                    preview_index = 0
+                    _show_preview_page()
+                    return
+                preview_pages = render_4d_stat_plot_preview_pages(
+                    plot_view,
+                    opts,
+                    logo_path=logo_path,
+                )
+                preview_index = 0
+                _show_preview_page()
+
+            def show_previous_page() -> None:
+                nonlocal preview_index
+                if preview_index <= 0:
+                    return
+                preview_index -= 1
+                _show_preview_page()
+
+            def show_next_page() -> None:
+                nonlocal preview_index
+                if preview_index >= len(preview_pages) - 1:
+                    return
+                preview_index += 1
+                _show_preview_page()
 
             def schedule_preview() -> None:
                 preview_timer.start()
@@ -330,6 +398,8 @@ class Postplot4DStatPlotPdfDialog:
             browse_btn.clicked.connect(browse_output)
             export_btn.clicked.connect(on_export)
             close_btn.clicked.connect(dialog.close)
+            prev_page_btn.clicked.connect(show_previous_page)
+            next_page_btn.clicked.connect(show_next_page)
 
             sync_margin_controls()
             schedule_preview()

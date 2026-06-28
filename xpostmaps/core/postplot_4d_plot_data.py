@@ -10,16 +10,17 @@ from typing import Literal
 import numpy as np
 
 from xpostmaps.core.models import LineStyle
-from xpostmaps.core.postplot_4d_diff import Postplot4DDiffRow
+from xpostmaps.core.postplot_4d_diff import Postplot4DDiffRow, feather_diff_deg
 from xpostmaps.core.postplot_4d_matching import Postplot4DMatchRow
 
-PlotKind = Literal["crossline", "inline", "radial", "feather"]
+PlotKind = Literal["crossline", "inline", "radial", "feather", "feather_diff"]
 
 PLOT_KIND_LABELS: dict[PlotKind, str] = {
     "crossline": "Crossline",
     "inline": "Inline",
     "radial": "Radial",
     "feather": "Feather",
+    "feather_diff": "Feather Diff",
 }
 
 PLOT_KIND_PDF_LABELS: dict[PlotKind, str] = {
@@ -27,6 +28,7 @@ PLOT_KIND_PDF_LABELS: dict[PlotKind, str] = {
     "inline": "In-line",
     "radial": "Radial",
     "feather": "Feather",
+    "feather_diff": "Feather Diff",
 }
 
 PLOT_KIND_UNITS: dict[PlotKind, str] = {
@@ -34,6 +36,7 @@ PLOT_KIND_UNITS: dict[PlotKind, str] = {
     "inline": "meter",
     "radial": "meter",
     "feather": "degree",
+    "feather_diff": "degree",
 }
 
 DEFAULT_SOURCE_COLORS: tuple[str, ...] = (
@@ -157,6 +160,11 @@ def _value_for_kind(diff_row: Postplot4DDiffRow, kind: PlotKind) -> float | None
         return diff_row.radial_m
     if kind == "feather":
         return diff_row.line_feather_deg
+    if kind == "feather_diff":
+        return feather_diff_deg(
+            line_feather_deg=diff_row.line_feather_deg,
+            navplan_feather_deg=diff_row.navplan_feather_deg,
+        )
     return None
 
 
@@ -220,6 +228,19 @@ def feather_tab_available(
     if streamers_detected:
         return True
     return any(row.line_feather_deg is not None for row in diff_rows)
+
+
+def feather_diff_tab_available(
+    match_row: Postplot4DMatchRow | None,
+    *,
+    streamers_detected: bool,
+) -> bool:
+    """Feather Diff requires navplan baseline and detected streamers."""
+    return (
+        match_row is not None
+        and match_row.baseline_kind == "navplan"
+        and streamers_detected
+    )
 
 
 def line_title(match_row: Postplot4DMatchRow) -> str:

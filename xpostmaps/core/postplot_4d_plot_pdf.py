@@ -45,6 +45,7 @@ class Postplot4DStatPlotPdfOptions:
     include_inline: bool = True
     include_radial: bool = True
     include_feather: bool = True
+    include_feather_diff: bool = True
 
 
 def resolve_4d_stat_output_path(options: Postplot4DStatPlotPdfOptions) -> Path:
@@ -72,6 +73,8 @@ def resolved_plot_kinds(
         selected.append("radial")
     if options.include_feather and "feather" in available:
         selected.append("feather")
+    if options.include_feather_diff and "feather_diff" in available:
+        selected.append("feather_diff")
     return selected
 
 
@@ -294,6 +297,37 @@ def compose_4d_stat_plot_pages(
     return pages
 
 
+def render_4d_stat_plot_preview_pages(
+    view: Postplot4DStatPlotView,
+    options: Postplot4DStatPlotPdfOptions,
+    *,
+    logo_path: str = "",
+    dpi: int = 120,
+) -> list[QImage]:
+    """Render all export pages at preview resolution."""
+    if not resolved_plot_kinds(view, options):
+        return [_preview_placeholder_image("Select at least one plot")]
+    try:
+        return compose_4d_stat_plot_pages(
+            view,
+            options,
+            logo_path=logo_path,
+            dpi=dpi,
+        )
+    except ValueError:
+        return [_preview_placeholder_image("Select at least one plot")]
+
+
+def _preview_placeholder_image(message: str) -> QImage:
+    image = QImage(640, 480, QImage.Format.Format_ARGB32)
+    image.fill(Qt.GlobalColor.white)
+    painter = QPainter(image)
+    painter.setPen(Qt.GlobalColor.darkGray)
+    painter.drawText(image.rect(), Qt.AlignmentFlag.AlignCenter, message)
+    painter.end()
+    return image
+
+
 def render_4d_stat_plot_preview(
     view: Postplot4DStatPlotView,
     options: Postplot4DStatPlotPdfOptions,
@@ -301,21 +335,7 @@ def render_4d_stat_plot_preview(
     logo_path: str = "",
 ) -> QImage:
     """Render a lightweight preview of the first export page."""
-    try:
-        pages = compose_4d_stat_plot_pages(
-            view,
-            options,
-            logo_path=logo_path,
-            dpi=120,
-        )
-    except ValueError:
-        image = QImage(640, 480, QImage.Format.Format_ARGB32)
-        image.fill(Qt.GlobalColor.white)
-        painter = QPainter(image)
-        painter.setPen(Qt.GlobalColor.darkGray)
-        painter.drawText(image.rect(), Qt.AlignmentFlag.AlignCenter, "Select at least one plot")
-        painter.end()
-        return image
+    pages = render_4d_stat_plot_preview_pages(view, options, logo_path=logo_path)
     return pages[0]
 
 

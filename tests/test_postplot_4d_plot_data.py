@@ -5,6 +5,7 @@ from xpostmaps.core.postplot_4d_matching import Postplot4DMatchRow
 from xpostmaps.core.postplot_4d_plot_data import (
     build_plot_series,
     compute_series_stats,
+    feather_diff_tab_available,
     normalize_source_label,
     shotpoint_order,
     unique_sources_from_diff_rows,
@@ -17,6 +18,7 @@ def _diff_row(
     *,
     crossline: float = 1.0,
     feather: float | None = None,
+    navplan_feather: float | None = None,
 ) -> Postplot4DDiffRow:
     return Postplot4DDiffRow(
         shotpoint=shotpoint,
@@ -31,6 +33,7 @@ def _diff_row(
         crossline_m=crossline,
         inline_m=0.0,
         radial_m=0.0,
+        navplan_feather_deg=navplan_feather,
         line_feather_deg=feather,
         firing_source_id=source_id,
     )
@@ -89,3 +92,53 @@ def test_compute_series_stats() -> None:
     assert stats.maximum == 2.0
     assert stats.mean == 0.0
     assert round(stats.rms, 2) == 1.63
+
+
+def test_build_feather_diff_series() -> None:
+    match = Postplot4DMatchRow(
+        baseline_name="Base",
+        baseline_kind="navplan",
+        line_name="Line",
+        subline="",
+        sequence_no="1",
+        first_sp=100,
+        last_sp=101,
+        line_direction="Up-line",
+        sequence_id="file|1|Line",
+    )
+    rows = [
+        _diff_row(100, "001", navplan_feather=1.25, feather=-2.5),
+        _diff_row(101, "001", navplan_feather=2.0, feather=0.0),
+    ]
+    series = build_plot_series(rows, match, "feather_diff", "G01")
+    assert series.shotpoints == [100, 101]
+    assert series.values == [-3.75, -2.0]
+
+
+def test_feather_diff_tab_requires_navplan_and_streamers() -> None:
+    navplan_match = Postplot4DMatchRow(
+        baseline_name="Base",
+        baseline_kind="navplan",
+        line_name="Line",
+        subline="",
+        sequence_no="1",
+        first_sp=100,
+        last_sp=101,
+        line_direction="Up-line",
+        sequence_id="file|1|Line",
+    )
+    preplot_match = Postplot4DMatchRow(
+        baseline_name="Base",
+        baseline_kind="preplot",
+        line_name="Line",
+        subline="",
+        sequence_no="1",
+        first_sp=100,
+        last_sp=101,
+        line_direction="Up-line",
+        sequence_id="file|1|Line",
+    )
+    assert feather_diff_tab_available(navplan_match, streamers_detected=True)
+    assert not feather_diff_tab_available(navplan_match, streamers_detected=False)
+    assert not feather_diff_tab_available(preplot_match, streamers_detected=True)
+    assert not feather_diff_tab_available(None, streamers_detected=True)
