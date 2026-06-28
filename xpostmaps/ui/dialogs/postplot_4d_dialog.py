@@ -43,7 +43,10 @@ from xpostmaps.core.postplot_4d_matching import (
     build_postplot_4d_rows,
 )
 from xpostmaps.parsers.metadata_parser import parse_file_metadata
+from xpostmaps.ui.dialog_size_utils import map_sheet_dialog_size
+from xpostmaps.ui.dialogs.postplot_4d_plot_pdf_dialog import Postplot4DStatPlotPdfDialog
 from xpostmaps.ui.dialogs.base_dialog import SingleInstanceDialog
+from xpostmaps.ui.postplot_4d_stat_plot import Postplot4DStatPlotView
 
 CoordMode = Literal["en", "lat"]
 
@@ -662,6 +665,7 @@ class Postplot4DDialog:
                 )
                 if host_dialog is not None:
                     host_dialog.setWindowTitle(_diff_title(match_row))
+                plot_btn.setEnabled(False)
                 stack.setCurrentIndex(1)
                 return
             diff_title.setText(_diff_title(match_row))
@@ -683,6 +687,7 @@ class Postplot4DDialog:
             _set_diff_summary(diff_summary, summary, tone="normal")
             if host_dialog is not None:
                 host_dialog.setWindowTitle(_diff_title(match_row))
+            plot_btn.setEnabled(bool(diff_rows))
             stack.setCurrentIndex(1)
 
         def show_main_view() -> None:
@@ -691,6 +696,48 @@ class Postplot4DDialog:
             _autosize_dialog_width(host_dialog, table)
             if host_dialog is not None:
                 host_dialog.setWindowTitle("Postplot 4D")
+
+        def show_plot_view() -> None:
+            match_row = state["active_match"]
+            if not isinstance(match_row, Postplot4DMatchRow) or not diff_rows:
+                return
+            plot_view.set_data(
+                match_row,
+                diff_rows,
+                streamers_detected=_source_has_streamers_for_match(match_row),
+            )
+            if host_dialog is not None:
+                if match_row.subline:
+                    host_dialog.setWindowTitle(
+                        f"{match_row.line_name}.{match_row.subline} 4D Stat Plot"
+                    )
+                else:
+                    host_dialog.setWindowTitle(f"{match_row.line_name} 4D Stat Plot")
+                host_dialog.showMaximized()
+            stack.setCurrentIndex(2)
+            QTimer.singleShot(0, plot_view.refresh)
+            QTimer.singleShot(100, plot_view.refresh)
+
+        def show_diff_table_view() -> None:
+            match_row = state["active_match"]
+            if isinstance(match_row, Postplot4DMatchRow) and host_dialog is not None:
+                host_dialog.setWindowTitle(_diff_title(match_row))
+            stack.setCurrentIndex(1)
+
+        def export_plot_pdf() -> None:
+            if not isinstance(state["active_match"], Postplot4DMatchRow) or not diff_rows:
+                return
+            default_dir = (
+                Path(database.db_path).parent
+                if database is not None and database.db_path
+                else Path.cwd()
+            )
+            Postplot4DStatPlotPdfDialog.open(
+                host_dialog or parent,
+                plot_view=plot_view,
+                logo_path=settings.logo_path,
+                default_output_dir=default_dir,
+            )
 
         def _persist_note() -> str:
             if database is not None and project_name.strip():
@@ -763,6 +810,13 @@ class Postplot4DDialog:
                 _reset_single_recalc_button()
                 diff_rows = list(rows)  # type: ignore[arg-type]
                 refresh_diff_table()
+                plot_btn.setEnabled(bool(diff_rows))
+                if stack.currentIndex() == 2 and isinstance(match_row, Postplot4DMatchRow):
+                    plot_view.set_data(
+                        match_row,
+                        diff_rows,
+                        streamers_detected=_source_has_streamers_for_match(match_row),
+                    )
                 stamp = datetime.now().strftime("%H:%M:%S")
                 summary = (
                     f"{len(diff_rows)} shotpoint difference(s) · "
@@ -1153,7 +1207,7 @@ class Postplot4DDialog:
             refresh_table()
 
         def build(dialog: SingleInstanceDialog) -> None:
-            nonlocal summary, table, stack, diff_title, diff_table, diff_summary, coord_toggle, recalc_btn, bulk_recalc_btn, host_dialog, crs_note, diff_crs_note
+            nonlocal summary, table, stack, diff_title, diff_table, diff_summary, coord_toggle, recalc_btn, bulk_recalc_btn, host_dialog, crs_note, diff_crs_note, plot_view, plot_btn, diff_table_panel, diff_toolbar
             host_dialog = dialog
             layout = dialog.content_layout
             _clear_layout(layout)
@@ -1237,35 +1291,63 @@ class Postplot4DDialog:
             recalc_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
             recalc_btn.setMinimumSize(170, 32)
             recalc_btn.clicked.connect(recalculate_diffs)
+            plot_btn = QPushButton("4D Stat Plot")
+            plot_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+            plot_btn.setMinimumSize(130, 32)
+            plot_btn.clicked.connect(show_plot_view)
             back_btn = QPushButton("Back")
             back_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
             back_btn.setMinimumSize(80, 32)
             back_btn.clicked.connect(show_main_view)
             diff_toolbar.addWidget(coord_toggle)
             diff_toolbar.addWidget(recalc_btn)
+            diff_toolbar.addWidget(plot_btn)
             diff_toolbar.addStretch()
             diff_toolbar.addWidget(back_btn)
             diff_layout.addLayout(diff_toolbar)
 
+            diff_table_panel = QWidget()
+            diff_table_layout = QVBoxLayout(diff_table_panel)
+            diff_table_layout.setContentsMargins(0, 0, 0, 0)
+
             diff_title = QLabel("")
             diff_title.setStyleSheet("font-weight: 600;")
-            diff_layout.addWidget(diff_title)
+            diff_table_layout.addWidget(diff_title)
 
             diff_summary = QLabel("")
             diff_summary.setStyleSheet("color: #8b949e; font-size: 11px;")
-            diff_layout.addWidget(diff_summary)
+            diff_table_layout.addWidget(diff_summary)
 
             diff_table = QTableWidget(0, 8)
             _configure_table(diff_table)
-            diff_layout.addWidget(diff_table, stretch=1)
+            diff_table_layout.addWidget(diff_table, stretch=1)
             diff_crs_note = QLabel("")
             diff_crs_note.setStyleSheet(_DIFF_SUMMARY_STYLE)
             diff_crs_note.setWordWrap(True)
-            diff_layout.addWidget(diff_crs_note)
+            diff_table_layout.addWidget(diff_crs_note)
+            diff_layout.addWidget(diff_table_panel, stretch=1)
+
+            plot_view = Postplot4DStatPlotView(parent=diff_page)
+            plot_view.back_requested.connect(show_diff_table_view)
+            plot_view.export_pdf_requested.connect(export_plot_pdf)
+            plot_view.setVisible(False)
 
             stack.addWidget(main_page)
             stack.addWidget(diff_page)
+            stack.addWidget(plot_view)
             layout.addWidget(stack, stretch=1)
+
+            def _on_stack_changed(index: int) -> None:
+                on_table = index == 1
+                diff_table_panel.setVisible(on_table)
+                coord_toggle.setVisible(on_table)
+                recalc_btn.setVisible(on_table)
+                plot_btn.setVisible(on_table)
+                plot_view.setVisible(index == 2)
+                if index == 2:
+                    plot_view.refresh()
+
+            stack.currentChanged.connect(_on_stack_changed)
 
             if not hasattr(dialog, "_xpost_bulk_recalc_hook"):
                 dialog.finished.connect(_cancel_bulk_recalc_if_running)
@@ -1286,12 +1368,18 @@ class Postplot4DDialog:
         coord_toggle = QPushButton()
         recalc_btn = QPushButton()
         bulk_recalc_btn = QPushButton()
+        plot_view = Postplot4DStatPlotView()
+        plot_btn = QPushButton()
+        diff_table_panel = QWidget()
+        diff_toolbar = QHBoxLayout()
+
+        plot_w, plot_h = map_sheet_dialog_size(parent)
 
         return SingleInstanceDialog.show_dialog(
             cls.KEY,
             "Postplot 4D",
             build,
             parent,
-            width=1120,
-            height=884,
+            width=plot_w,
+            height=plot_h,
         )

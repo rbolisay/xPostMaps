@@ -154,6 +154,10 @@ class MainWindow(QMainWindow):
         self._connect_signals()
         self._refresh_ui()
 
+    def map_sheet_size(self) -> tuple[int, int]:
+        """Pixel width and height of the map + right pane sheet."""
+        return self._map.width() + self._right.width(), self._map.height()
+
     def _connect_signals(self) -> None:
         self._left.project_name_changed.connect(self._on_project_name_changed)
         self._left.browse_load_project.connect(self._open_project_browser)

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 # Color palette
 BG_DARK = "#0d1117"
 BG_MAP = "#121a24"
@@ -518,6 +520,34 @@ def themed_open_file(
         return ""
     selected = picker.selectedFiles()
     return selected[0] if selected else ""
+
+
+def themed_save_file(
+    parent,
+    title: str,
+    start_dir: str = "",
+    file_filter: str = "",
+    default_name: str = "",
+) -> str:
+    """Show a dark-themed save-file picker."""
+    from PySide6.QtWidgets import QFileDialog
+
+    initial = start_dir
+    if default_name:
+        initial = str(Path(start_dir) / default_name) if start_dir else default_name
+    picker = QFileDialog(parent, title, initial)
+    picker.setAcceptMode(QFileDialog.AcceptMode.AcceptSave)
+    if file_filter:
+        picker.setNameFilter(file_filter)
+    picker.setOption(QFileDialog.Option.DontUseNativeDialog, True)
+    apply_file_dialog_theme(picker)
+    if picker.exec() != QFileDialog.DialogCode.Accepted:
+        return ""
+    selected = picker.selectedFiles()
+    path = selected[0] if selected else ""
+    if path and not path.lower().endswith(".pdf"):
+        path = f"{path}.pdf"
+    return path
 
 
 def themed_open_files(
