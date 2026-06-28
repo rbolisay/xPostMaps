@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import copy
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -17,6 +19,8 @@ from PySide6.QtGui import (
 )
 from PySide6.QtWidgets import QApplication, QWidget
 
+from xpostmaps.core.models import LegendConfig, MapData
+from xpostmaps.core.polygon_import_service import non_imported_polygon_entries
 from xpostmaps.utils.vector_export import VectorExportContext
 
 # Portrait width × height in millimetres (ISO / common North American sizes).
@@ -33,7 +37,7 @@ PAPER_SIZES_MM: dict[str, tuple[float, float]] = {
 }
 
 PAPER_SIZE_NAMES: tuple[str, ...] = tuple(PAPER_SIZES_MM.keys())
-DPI_OPTIONS: tuple[int, ...] = (150, 200, 300, 600, 900, 1200, 2000)
+DPI_OPTIONS: tuple[int, ...] = (300, 600, 900, 1200, 2000, 2500, 3000)
 
 MARGIN_PRESETS_MM: dict[str, float] = {
     "Default": 10.0,
@@ -75,12 +79,98 @@ class PdfExportOptions:
     output_dir: Path
     filename: str
     paper: str = "A3"
-    dpi: int = 600
+    dpi: int = 2000
     landscape: bool = True
     margin_mm: float = 10.0
     scale_mode: str = "Default"
     scale_percent: int = 100
     line_detail_percent: int = 100
+    export_layered_pdf: bool = False
+
+
+@dataclass(frozen=True)
+class LegendLayerSpec:
+    """One Layer Styles table row exported as a PDF optional-content layer."""
+
+    section: str
+    index: int
+    name: str
+    hidden: bool
+
+    @property
+    def display_name(self) -> str:
+        section_labels = {
+            "area": "Area",
+            "preplot": "Preplot",
+            "navplan": "Navplan",
+            "postplot": "PostPlot",
+        }
+        label = section_labels.get(self.section, self.section.title())
+        return f"{label}: {self.name}"
+
+
+def iter_legend_layer_specs(legend: LegendConfig) -> list[LegendLayerSpec]:
+    """Return every Layer Styles table row in UI order."""
+    specs: list[LegendLayerSpec] = []
+    for index, entry in enumerate(non_imported_polygon_entries(legend.areas)):
+        if entry.name.strip():
+            specs.append(
+                LegendLayerSpec(
+                    section="area",
+                    index=index,
+                    name=entry.name.strip(),
+                    hidden=entry.hidden,
+                )
+            )
+    for index, entry in enumerate(legend.preplot_lines):
+        if entry.name.strip():
+            specs.append(
+                LegendLayerSpec(
+                    section="preplot",
+                    index=index,
+                    name=entry.name.strip(),
+                    hidden=entry.hidden,
+                )
+            )
+    for index, entry in enumerate(legend.navplan_lines):
+        if entry.name.strip():
+            specs.append(
+                LegendLayerSpec(
+                    section="navplan",
+                    index=index,
+                    name=entry.name.strip(),
+                    hidden=entry.hidden,
+                )
+            )
+    for index, entry in enumerate(legend.postplot_lines):
+        if entry.name.strip():
+            specs.append(
+                LegendLayerSpec(
+                    section="postplot",
+                    index=index,
+                    name=entry.name.strip(),
+                    hidden=entry.hidden,
+                )
+            )
+    return specs
+
+
+def legend_with_only_layer(legend: LegendConfig, spec: LegendLayerSpec) -> LegendConfig:
+    """Keep one Layer Styles row visible and hide every other row."""
+    cfg = copy.deepcopy(legend)
+
+    def _visible(section: str, index: int) -> bool:
+        return section == spec.section and index == spec.index
+
+    for index, entry in enumerate(non_imported_polygon_entries(cfg.areas)):
+        entry.hidden = not _visible("area", index)
+    for index, entry in enumerate(cfg.preplot_lines):
+        entry.hidden = not _visible("preplot", index)
+    for index, entry in enumerate(cfg.navplan_lines):
+        entry.hidden = not _visible("navplan", index)
+    for index, entry in enumerate(cfg.postplot_lines):
+        entry.hidden = not _visible("postplot", index)
+    return cfg
 
 
 def effective_raster_dpi(dpi: int, *, preview: bool = False) -> int:
@@ -899,3 +989,261 @@ def write_pdf_vector(
 ) -> None:
     """Prepare widgets and write a hybrid vector PDF (UI thread only)."""
     compose_pdf_hybrid(path, map_widget, right_pane, options)
+
+
+def _begin_hybrid_pass(
+    map_widget: QWidget,
+    right_pane: QWidget,
+    options: PdfExportOptions,
+) -> tuple[QRectF, QRectF]:
+    """Run the exact hybrid prepare sequence and return (map_rect, pane_rect).
+
+    Mirrors :func:`compose_pdf_hybrid` ordering precisely: the right pane is
+    snapshotted FIRST (which changes its width/height for export), then geometry
+    is measured from the post-snapshot pane so the strip ``fit`` (map zoom) and
+    the pane rect match the single-pass hybrid export exactly.
+    """
+    device_dpi = effective_vector_dpi(options.dpi)
+    map_w = max(map_widget.width(), 1)
+    map_h = max(map_widget.height(), 1)
+    right_pane.prepare_export_snapshot(map_height=map_h)
+    apply_export_grid_harmonization(map_widget, right_pane)
+    pane_w = max(right_pane.width(), 1)
+    pane_h = max(right_pane.height(), 1)
+    map_rect, pane_rect, _fit = _pdf_strip_layout(
+        options,
+        device_dpi,
+        map_aspect=map_w / map_h,
+        pane_aspect=pane_w / pane_h,
+    )
+    vector_ctx = None
+    if options.line_detail_percent < 100:
+        vector_ctx = build_vector_export_context(
+            map_widget,
+            device_w=float(map_rect.width()),
+            device_h=float(map_rect.height()),
+            line_detail_percent=options.line_detail_percent,
+        )
+    pen_scale = float(map_rect.height()) / map_h
+    prepare = getattr(map_widget, "prepare_for_export", None)
+    if callable(prepare):
+        prepare(
+            wysiwyg=False,
+            vector_ctx=vector_ctx,
+            pen_scale=pen_scale,
+        )
+    return map_rect, pane_rect
+
+
+def _end_hybrid_pass(map_widget: QWidget, right_pane: QWidget) -> None:
+    clear_export_grid_harmonization(map_widget, right_pane)
+    right_pane.reset_export_snapshot()
+    end_export = getattr(map_widget, "end_export", None)
+    if callable(end_export):
+        end_export(wysiwyg=False)
+
+
+def _write_hybrid_layer_overlay_pdf(
+    path: Path,
+    map_widget: QWidget,
+    options: PdfExportOptions,
+    map_rect: QRectF,
+) -> None:
+    """Write one Layer Styles row as vector linework aligned to the final map box."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    device_dpi = effective_vector_dpi(options.dpi)
+    layout = page_layout_for(options.paper, options.landscape)
+    writer = QPdfWriter(str(path))
+    writer.setResolution(device_dpi)
+    writer.setPageLayout(layout)
+
+    render_data = getattr(map_widget, "render_vector_data_only", None)
+    if not callable(render_data):
+        raise RuntimeError("Layered PDF export requires vector map rendering.")
+
+    painter = QPainter(writer)
+    painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+    painter.setRenderHint(QPainter.RenderHint.TextAntialiasing, True)
+    render_data(painter, map_rect, auto_end_export=False)
+    painter.end()
+
+
+def _write_hybrid_base_pdf(
+    path: Path,
+    map_widget: QWidget,
+    right_pane: QWidget,
+    options: PdfExportOptions,
+    map_rect: QRectF,
+    pane_rect: QRectF,
+) -> None:
+    """Write map chrome and the right pane; linework is supplied by OCG overlays."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    device_dpi = effective_vector_dpi(options.dpi)
+    layout = page_layout_for(options.paper, options.landscape)
+    writer = QPdfWriter(str(path))
+    writer.setResolution(device_dpi)
+    writer.setPageLayout(layout)
+    page_rect = layout.paintRectPixels(device_dpi)
+
+    render_chrome = getattr(map_widget, "render_vector_chrome_only", None)
+    if not callable(render_chrome):
+        raise RuntimeError("Layered PDF export requires vector map rendering.")
+
+    painter = QPainter(writer)
+    painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+    painter.setRenderHint(QPainter.RenderHint.TextAntialiasing, True)
+    painter.fillRect(page_rect, Qt.GlobalColor.white)
+    painter.fillRect(map_rect, Qt.GlobalColor.white)
+    render_chrome(painter, map_rect, auto_end_export=False)
+    paint_pane = getattr(right_pane, "paint_for_pdf", None)
+    if callable(paint_pane):
+        paint_pane(
+            painter,
+            pane_rect,
+            device_dpi=device_dpi,
+            max_raster_dpi=600,
+        )
+    else:
+        pane_image = render_pane_for_export(
+            right_pane,
+            max(int(round(pane_rect.height())), 1),
+        )
+        if not pane_image.isNull():
+            painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
+            painter.drawImage(pane_rect, pane_image)
+    painter.end()
+
+
+def _merge_layered_pdf(
+    out_path: Path,
+    base_pdf: Path,
+    layer_pdfs: list[tuple[LegendLayerSpec, Path]],
+    options: PdfExportOptions,
+) -> None:
+    try:
+        import fitz
+    except ImportError as exc:
+        raise RuntimeError(
+            "Layered PDF export requires PyMuPDF. Install it with: pip install PyMuPDF"
+        ) from exc
+
+    device_dpi = effective_vector_dpi(options.dpi)
+    layout = page_layout_for(options.paper, options.landscape)
+    page_rect = layout.paintRectPixels(device_dpi)
+    page_w_pt = page_rect.width() * 72.0 / device_dpi
+    page_h_pt = page_rect.height() * 72.0 / device_dpi
+
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    doc = fitz.open()
+    page = doc.new_page(width=page_w_pt, height=page_h_pt)
+    target = page.rect
+
+    with fitz.open(str(base_pdf)) as base_doc:
+        page.show_pdf_page(target, base_doc, 0)
+
+    # Each layer overlay is a full-size page whose only content is the survey
+    # linework already positioned at the map rect (everything else transparent),
+    # so it overlays the base full-page-to-full-page and aligns exactly.
+    for spec, layer_pdf in layer_pdfs:
+        with fitz.open(str(layer_pdf)) as layer_doc:
+            ocg = doc.add_ocg(spec.display_name, on=not spec.hidden)
+            page.show_pdf_page(target, layer_doc, 0, oc=ocg)
+
+    doc.save(str(out_path))
+    doc.close()
+
+
+def compose_pdf_layered(
+    path: Path,
+    map_widget: QWidget,
+    right_pane: QWidget,
+    options: PdfExportOptions,
+    legend: LegendConfig,
+    map_data: MapData,
+    *,
+    progress_callback=None,
+) -> None:
+    """Write a hybrid vector PDF with one optional-content layer per Layer Styles row."""
+    render_vector = getattr(map_widget, "render_vector", None)
+    render_chrome = getattr(map_widget, "render_vector_chrome_only", None)
+    render_data = getattr(map_widget, "render_vector_data_only", None)
+    if not callable(render_vector) or not callable(render_chrome) or not callable(render_data):
+        compose_pdf_hybrid(path, map_widget, right_pane, options)
+        return
+
+    layer_specs = iter_legend_layer_specs(legend)
+    if not layer_specs:
+        compose_pdf_hybrid(path, map_widget, right_pane, options)
+        return
+
+    set_legend = getattr(map_widget, "set_legend", None)
+    render_map = getattr(map_widget, "render", None)
+    end_export = getattr(map_widget, "end_export", None)
+    ensure_settled = getattr(map_widget, "ensure_settled_for_capture", None)
+    if not callable(set_legend) or not callable(render_map):
+        raise RuntimeError("Layered PDF export requires a live map widget.")
+
+    # ``render(force=True)`` preserves the current view by reading the live
+    # viewRange before the rebuild and restoring it afterwards, so the base page
+    # and every layer overlay share the exact on-screen view/scale. We must NOT
+    # call restore_view here: round-tripping through world coords re-applies the
+    # aspect lock and shifts the data relative to the base chrome.
+    original_legend = copy.deepcopy(legend)
+    with tempfile.TemporaryDirectory(prefix="xpostmaps_layered_pdf_") as tmp_dir:
+        tmp = Path(tmp_dir)
+        base_pdf = tmp / "base.pdf"
+        layer_pdfs: list[tuple[LegendLayerSpec, Path]] = []
+
+        try:
+            # Base page: same hybrid layout/scaling as compose_pdf_hybrid, but the
+            # map linework is omitted so each Layer Styles row can be toggled as an
+            # optional-content layer. Map chrome (axes, neatline, north arrow) and
+            # the right pane are drawn here.
+            map_rect, pane_rect = _begin_hybrid_pass(map_widget, right_pane, options)
+            try:
+                _write_hybrid_base_pdf(
+                    base_pdf,
+                    map_widget,
+                    right_pane,
+                    options,
+                    map_rect,
+                    pane_rect,
+                )
+            finally:
+                _end_hybrid_pass(map_widget, right_pane)
+
+            total = len(layer_specs)
+            for index, spec in enumerate(layer_specs, start=1):
+                if progress_callback is not None:
+                    progress_callback(index, total, spec.display_name)
+                set_legend(legend_with_only_layer(original_legend, spec))
+                render_map(map_data, force=True)
+                if callable(ensure_settled):
+                    ensure_settled()
+                layer_map_rect, _pane_rect = _begin_hybrid_pass(
+                    map_widget, right_pane, options
+                )
+                layer_pdf = tmp / f"layer_{index:03d}.pdf"
+                try:
+                    _write_hybrid_layer_overlay_pdf(
+                        layer_pdf,
+                        map_widget,
+                        options,
+                        layer_map_rect,
+                    )
+                finally:
+                    _end_hybrid_pass(map_widget, right_pane)
+                layer_pdfs.append((spec, layer_pdf))
+
+            if progress_callback is not None:
+                progress_callback(total, total, "Merging PDF layers…")
+            _merge_layered_pdf(path, base_pdf, layer_pdfs, options)
+        finally:
+            set_legend(original_legend)
+            render_map(map_data, force=True)
+            if callable(ensure_settled):
+                ensure_settled()
+            clear_export_grid_harmonization(map_widget, right_pane)
+            right_pane.reset_export_snapshot()
+            if callable(end_export):
+                end_export(wysiwyg=False)

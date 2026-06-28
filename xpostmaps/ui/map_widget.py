@@ -1300,6 +1300,75 @@ class PostplotMapWidget(QWidget):
         if auto_end_export:
             self.end_export(wysiwyg=False)
 
+    def render_vector_data_only(
+        self,
+        painter: QPainter,
+        target: QRectF,
+        *,
+        auto_end_export: bool = True,
+    ) -> None:
+        """Render only survey linework into ``target`` on a transparent background.
+
+        Uses the same ``QGraphicsScene.render`` call as :meth:`render_vector` so the
+        geometry, alignment and vector sharpness are identical; the map chrome
+        (axes, neatline, north arrow) and the opaque plot background are suppressed
+        so the result can be stacked as a transparent PDF optional-content layer.
+        """
+        if not self._export_prepared:
+            self._restore_export_detail(use_export_pens=True)
+        self._reposition_overlays()
+        plot = self._plot
+        scene = plot.scene()
+        source = plot.mapToScene(plot.viewport().rect()).boundingRect()
+        vb = plot.getViewBox()
+
+        hidden_axes: list = []
+        for axis_name in ("left", "bottom", "top", "right"):
+            axis = self._plot_item.getAxis(axis_name)
+            if axis.isVisible():
+                axis.setVisible(False)
+                hidden_axes.append(axis)
+        old_scene_bg = scene.backgroundBrush()
+        vb.setBackgroundColor((0, 0, 0, 0))
+        scene.setBackgroundBrush(Qt.GlobalColor.transparent)
+
+        painter.save()
+        try:
+            painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+            painter.setRenderHint(QPainter.RenderHint.TextAntialiasing, True)
+            scene.render(painter, target, source, Qt.AspectRatioMode.IgnoreAspectRatio)
+        finally:
+            painter.restore()
+            scene.setBackgroundBrush(old_scene_bg)
+            vb.setBackgroundColor(BG_MAP_PRINT)
+            for axis in hidden_axes:
+                axis.setVisible(True)
+            if auto_end_export:
+                self.end_export(wysiwyg=False)
+
+    def render_vector_chrome_only(
+        self,
+        painter: QPainter,
+        target: QRectF,
+        *,
+        auto_end_export: bool = True,
+    ) -> None:
+        """Paint map axes/frame/north arrow without survey linework (layered PDF base)."""
+        hidden: list[pg.GraphicsItem] = []
+        for item in self._plot_items:
+            if item.isVisible():
+                item.setVisible(False)
+                hidden.append(item)
+        for dots, _raster in self._export_dot_items:
+            if dots.isVisible():
+                dots.setVisible(False)
+                hidden.append(dots)
+        try:
+            self.render_vector(painter, target, auto_end_export=auto_end_export)
+        finally:
+            for item in hidden:
+                item.setVisible(True)
+
     def clear(self) -> None:
         view_box = self._plot.getViewBox()
         scene = self._plot.scene()

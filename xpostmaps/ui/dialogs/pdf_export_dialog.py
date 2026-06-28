@@ -39,6 +39,7 @@ from xpostmaps.core.pdf_export import (
     PdfExportOptions,
     capture_export_images,
     compose_pdf_hybrid,
+    compose_pdf_layered,
     compose_pdf_vector_from_captures,
     default_pdf_filename,
     render_sheet_hybrid_preview,
@@ -107,7 +108,7 @@ class PdfExportDialog:
             dpi_combo = QComboBox()
             for dpi in DPI_OPTIONS:
                 dpi_combo.addItem(f"{dpi} DPI", dpi)
-            dpi_combo.setCurrentIndex(DPI_OPTIONS.index(600))
+            dpi_combo.setCurrentIndex(DPI_OPTIONS.index(2000))
             left_form.addRow("Resolution (DPI)", dpi_combo)
 
             orientation_combo = QComboBox()
@@ -171,12 +172,18 @@ class PdfExportDialog:
             open_after.setChecked(True)
             left_form.addRow("", open_after)
 
+            export_layered = QCheckBox("Export Layered PDF")
+            export_layered.setChecked(True)
+            left_form.addRow("", export_layered)
+
             hint = QLabel(
                 "Postplot linework is written as true PDF vectors — zoom stays sharp, "
                 "not pixelated. Set Map detail to 100 to keep full geometry (matches "
                 "the map); lower values decimate for faster export. "
                 "The right pane is re-rendered for crisp text. "
-                "Turn off high-quality layout for a faster screen-capture PDF."
+                "Turn off high-quality layout for a faster screen-capture PDF. "
+                "Export Layered PDF writes each Layer Styles row as a separate "
+                "Acrobat layer (requires high-quality layout)."
             )
             hint.setWordWrap(True)
             hint.setStyleSheet("color: #8b949e; font-size: 11px;")
@@ -243,6 +250,11 @@ class PdfExportDialog:
                 enabled = vector_mode.isChecked()
                 detail_slider.setEnabled(enabled)
                 detail_value.setEnabled(enabled)
+                export_layered.setEnabled(enabled)
+
+            def sync_layered_controls() -> None:
+                if export_layered.isChecked() and not vector_mode.isChecked():
+                    export_layered.setChecked(False)
 
             def sync_detail_label() -> None:
                 detail_value.setText(str(detail_slider.value()))
@@ -260,6 +272,7 @@ class PdfExportDialog:
                     scale_mode=scale_mode,
                     scale_percent=scale_percent,
                     line_detail_percent=detail_slider.value(),
+                    export_layered_pdf=export_layered.isChecked(),
                 )
 
             def _with_map_visible(action, *, hide_dialog: bool = True):
@@ -418,13 +431,27 @@ class PdfExportDialog:
                     progress.show()
                     QApplication.processEvents()
                     try:
+                        def _layer_progress(index: int, total: int, label: str) -> None:
+                            if progress is not None:
+                                progress.setLabelText(
+                                    f"Writing PDF… ({index}/{total})\n{label}"
+                                )
+                                QApplication.processEvents()
+
+                        export_fn = compose_pdf_layered if opts.export_layered_pdf else compose_pdf_hybrid
+                        export_kwargs = {
+                            "path": out_path,
+                            "map_widget": map_widget,
+                            "right_pane": right_pane,
+                            "options": opts,
+                        }
+                        if opts.export_layered_pdf:
+                            export_kwargs["legend"] = settings.legend_config
+                            export_kwargs["map_data"] = map_data
+                            export_kwargs["progress_callback"] = _layer_progress
+
                         _with_map_visible(
-                            lambda: compose_pdf_hybrid(
-                                out_path,
-                                map_widget,
-                                right_pane,
-                                opts,
-                            ),
+                            lambda: export_fn(**export_kwargs),
                             hide_dialog=False,
                         )
                     except Exception as exc:  # noqa: BLE001
@@ -488,12 +515,15 @@ class PdfExportDialog:
             scale_combo.currentIndexChanged.connect(schedule_preview)
             scale_custom.valueChanged.connect(schedule_preview)
             vector_mode.stateChanged.connect(sync_vector_controls)
+            vector_mode.stateChanged.connect(sync_layered_controls)
             vector_mode.stateChanged.connect(schedule_preview)
+            export_layered.stateChanged.connect(sync_layered_controls)
             detail_slider.valueChanged.connect(sync_detail_label)
             detail_slider.valueChanged.connect(schedule_preview)
             sync_margin_controls()
             sync_scale_controls()
             sync_vector_controls()
+            sync_layered_controls()
             sync_detail_label()
 
             schedule_preview()
