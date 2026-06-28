@@ -14,7 +14,7 @@ from xpostmaps.core.models import (
 )
 
 # Bump when navigation parsing logic changes (invalidates incremental nav cache).
-NAV_PARSE_VERSION = "p190-header-v3"
+NAV_PARSE_VERSION = "p111-vessel-id-per-shot-v1"
 PREPLOT_PARSE_VERSION = "preplot-v1"
 NAVPLAN_PARSE_VERSION = "navplan-v1"
 

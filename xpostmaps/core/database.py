@@ -305,6 +305,14 @@ class Database:
             self._conn.execute(
                 "ALTER TABLE postplot_4d_diffs ADD COLUMN line_feather_deg REAL"
             )
+        if "vessel_id" not in diff_cols:
+            self._conn.execute(
+                "ALTER TABLE postplot_4d_diffs ADD COLUMN vessel_id TEXT DEFAULT ''"
+            )
+        if "firing_source_id" not in diff_cols:
+            self._conn.execute(
+                "ALTER TABLE postplot_4d_diffs ADD COLUMN firing_source_id TEXT DEFAULT ''"
+            )
         self._conn.execute(
             """
             CREATE TABLE IF NOT EXISTS postplot_4d_preplot_shotpoints (
@@ -1284,8 +1292,9 @@ class Database:
                 baseline_x, baseline_y, baseline_latitude, baseline_longitude,
                 source_x, source_y, source_latitude, source_longitude,
                 crossline_m, inline_m, radial_m,
-                navplan_feather_deg, line_feather_deg, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                navplan_feather_deg, line_feather_deg,
+                vessel_id, firing_source_id, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             [
                 (
@@ -1307,6 +1316,8 @@ class Database:
                     row.radial_m,
                     row.navplan_feather_deg,
                     row.line_feather_deg,
+                    row.vessel_id,
+                    row.firing_source_id,
                     now,
                 )
                 for row in rows
@@ -1328,7 +1339,8 @@ class Database:
             SELECT shotpoint, baseline_x, baseline_y, baseline_latitude, baseline_longitude,
                    source_x, source_y, source_latitude, source_longitude,
                    crossline_m, inline_m, radial_m,
-                   navplan_feather_deg, line_feather_deg
+                   navplan_feather_deg, line_feather_deg,
+                   vessel_id, firing_source_id
             FROM postplot_4d_diffs
             WHERE project_id=? AND baseline_kind=? AND sequence_id=?
             ORDER BY shotpoint
@@ -1352,6 +1364,8 @@ class Database:
                     "radial_m": row["radial_m"],
                     "navplan_feather_deg": row["navplan_feather_deg"],
                     "line_feather_deg": row["line_feather_deg"],
+                    "vessel_id": row["vessel_id"] or "",
+                    "firing_source_id": row["firing_source_id"] or "",
                 }
             )
             for row in rows
@@ -1371,7 +1385,8 @@ class Database:
             SELECT sequence_id, shotpoint, baseline_x, baseline_y, baseline_latitude,
                    baseline_longitude, source_x, source_y, source_latitude,
                    source_longitude, crossline_m, inline_m, radial_m,
-                   navplan_feather_deg, line_feather_deg
+                   navplan_feather_deg, line_feather_deg,
+                   vessel_id, firing_source_id
             FROM postplot_4d_diffs
             WHERE project_id=? AND baseline_kind=?
             ORDER BY sequence_id, shotpoint
@@ -1400,6 +1415,8 @@ class Database:
                         "radial_m": row["radial_m"],
                         "navplan_feather_deg": row["navplan_feather_deg"],
                         "line_feather_deg": row["line_feather_deg"],
+                        "vessel_id": row["vessel_id"] or "",
+                        "firing_source_id": row["firing_source_id"] or "",
                     }
                 )
             )

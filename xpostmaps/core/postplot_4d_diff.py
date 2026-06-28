@@ -148,6 +148,8 @@ class Postplot4DDiffRow:
     radial_m: float
     navplan_feather_deg: float | None = None
     line_feather_deg: float | None = None
+    vessel_id: str = ""
+    firing_source_id: str = ""
 
 
 def _parse_azimuth_degrees(line_direction: str) -> float | None:
@@ -653,6 +655,66 @@ def source_shotpoints_for_match(
             continue
         result[record.point_num] = record
     return result
+
+
+def vessel_shotpoints_for_match(
+    positions: list[PositionRecord],
+    match_row: Postplot4DMatchRow,
+) -> dict[int, str]:
+    if not match_row.sequence_id:
+        return {}
+    target_group = sequence_group_id(match_row.sequence_id)
+    result: dict[int, str] = {}
+    for record in positions:
+        if record.record_type != RecordType.VESSEL:
+            continue
+        group = make_sequence_group_id(record.file_name, record.sequence_no, record.line_name)
+        if group != target_group:
+            continue
+        if match_row.subline and record.subline and record.subline != match_row.subline:
+            continue
+        if record.point_num <= 0 or not record.vessel_id:
+            continue
+        # Per-shotpoint vessel ID: later records override (same SP should agree).
+        result[record.point_num] = record.vessel_id
+    return result
+
+
+def enrich_diff_rows_from_positions(
+    rows: list[Postplot4DDiffRow],
+    positions: list[PositionRecord],
+    match_row: Postplot4DMatchRow,
+) -> list[Postplot4DDiffRow]:
+    """Fill missing vessel / firing-source IDs on saved diff rows from nav positions."""
+    if not rows or not positions:
+        return rows
+    sources = source_shotpoints_for_match(positions, match_row)
+    vessels = vessel_shotpoints_for_match(positions, match_row)
+    enriched: list[Postplot4DDiffRow] = []
+    changed = False
+    for row in rows:
+        vessel_id = row.vessel_id
+        firing_source_id = row.firing_source_id
+        source = sources.get(row.shotpoint)
+        if source:
+            if not firing_source_id:
+                firing_source_id = source.source_id
+            if not vessel_id:
+                vessel_id = source.vessel_id or vessels.get(row.shotpoint, "")
+        elif not vessel_id:
+            vessel_id = vessels.get(row.shotpoint, "")
+        if vessel_id != row.vessel_id or firing_source_id != row.firing_source_id:
+            changed = True
+            enriched.append(
+                replace(
+                    row,
+                    vessel_id=vessel_id,
+                    firing_source_id=firing_source_id,
+                )
+            )
+        else:
+            enriched.append(row)
+    return enriched if changed else rows
 
 
 def _load_baseline_line_direction(path: Path | None) -> str:
@@ -1581,6 +1643,7 @@ def compute_postplot_4d_diff_rows(
     baseline_path: Path | None = None,
     navplan_feathers: dict[int, float] | None = None,
     line_feathers: dict[int, float] | None = None,
+    vessel_ids: dict[int, str] | None = None,
 ) -> list[Postplot4DDiffRow]:
     if not baseline or not sources:
         return []
@@ -1604,6 +1667,10 @@ def compute_postplot_4d_diff_rows(
         delta_e = source.x - base.x
         delta_n = source.y - base.y
         inline, crossline, radial = _offset_components(delta_e, delta_n, azimuth)
+        vessel_id = source.vessel_id
+        if not vessel_id and vessel_ids:
+            vessel_id = vessel_ids.get(shotpoint, "")
+        firing_source_id = source.source_id
         rows.append(
             Postplot4DDiffRow(
                 shotpoint=shotpoint,
@@ -1624,6 +1691,8 @@ def compute_postplot_4d_diff_rows(
                 line_feather_deg=(
                     line_feathers.get(shotpoint) if line_feathers else None
                 ),
+                vessel_id=vessel_id,
+                firing_source_id=firing_source_id,
             )
         )
     return rows
@@ -1860,6 +1929,7 @@ def calculate_match_diff_rows(
         )
     baseline = _sync_baseline_geographic(baseline, map_epsg)
     sources = _sync_source_geographic(sources, map_epsg)
+    vessel_ids = vessel_shotpoints_for_match(positions, match_row)
     return compute_postplot_4d_diff_rows(
         baseline,
         sources,
@@ -1867,6 +1937,7 @@ def calculate_match_diff_rows(
         baseline_path=baseline_path,
         navplan_feathers=navplan_feathers,
         line_feathers=line_feathers,
+        vessel_ids=vessel_ids,
     )
 
 
@@ -2066,6 +2137,8 @@ def diff_row_to_dict(row: Postplot4DDiffRow) -> dict:
         "radial_m": row.radial_m,
         "navplan_feather_deg": row.navplan_feather_deg,
         "line_feather_deg": row.line_feather_deg,
+        "vessel_id": row.vessel_id,
+        "firing_source_id": row.firing_source_id,
     }
 
 
@@ -2094,4 +2167,6 @@ def diff_row_from_dict(data: dict) -> Postplot4DDiffRow:
         radial_m=float(data.get("radial_m", 0.0)),
         navplan_feather_deg=_optional_float(data.get("navplan_feather_deg")),
         line_feather_deg=_optional_float(data.get("line_feather_deg")),
+        vessel_id=str(data.get("vessel_id", "")),
+        firing_source_id=str(data.get("firing_source_id", "")),
     )

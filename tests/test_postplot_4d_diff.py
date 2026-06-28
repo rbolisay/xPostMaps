@@ -307,6 +307,95 @@ def test_diff_rows_compare_firing_source_to_matching_preplot_source_position() -
     assert len(rows) == 1
     assert rows[0].baseline_x == -25.0
     assert abs(rows[0].crossline_m - 5.0) < 1e-6
+    assert rows[0].firing_source_id == "G02"
+
+
+def test_diff_rows_include_vessel_and_firing_source_ids() -> None:
+    baseline = {
+        100: BaselineShotpoint(shotpoint=100, x=0.0, y=0.0),
+    }
+    sources = {
+        100: PositionRecord(
+            file_name="line.p111",
+            record_type=RecordType.SOURCE,
+            line_name="LINE01",
+            vessel_id="AMU",
+            source_id="G01",
+            point_num=100,
+            x=1.0,
+            y=2.0,
+        )
+    }
+    rows = compute_postplot_4d_diff_rows(
+        baseline,
+        sources,
+        "0.0",
+        vessel_ids={100: "AMU"},
+    )
+    assert len(rows) == 1
+    assert rows[0].vessel_id == "AMU"
+    assert rows[0].firing_source_id == "G01"
+
+
+def test_enrich_diff_rows_fills_vessel_id_from_vessel_positions() -> None:
+    from xpostmaps.core.postplot_4d_diff import enrich_diff_rows_from_positions
+    from xpostmaps.core.postplot_4d_matching import Postplot4DMatchRow
+
+    match_row = Postplot4DMatchRow(
+        baseline_name="1065P1A-070",
+        baseline_kind="navplan",
+        line_name="1065P1A-070",
+        subline="a070",
+        sequence_no="70",
+        first_sp=1489,
+        last_sp=1508,
+        line_direction="179.97°",
+        sequence_id="70.1065P1A-070.a070.p111|70|1065P1A-070|source",
+    )
+    rows = [
+        Postplot4DDiffRow(
+            shotpoint=1600,
+            baseline_x=0.0,
+            baseline_y=0.0,
+            baseline_latitude="",
+            baseline_longitude="",
+            source_x=1.0,
+            source_y=2.0,
+            source_latitude="",
+            source_longitude="",
+            crossline_m=0.0,
+            inline_m=0.0,
+            radial_m=0.0,
+            firing_source_id="G02",
+        )
+    ]
+    positions = [
+        PositionRecord(
+            file_name="70.1065P1A-070.a070.p111",
+            record_type=RecordType.SOURCE,
+            line_name="1065P1A-070",
+            vessel_id="",
+            source_id="G02",
+            point_num=1600,
+            x=1.0,
+            y=2.0,
+            sequence_no="70",
+        ),
+        PositionRecord(
+            file_name="70.1065P1A-070.a070.p111",
+            record_type=RecordType.VESSEL,
+            line_name="1065P1A-070",
+            vessel_id="AWA",
+            source_id="",
+            point_num=1600,
+            x=1.0,
+            y=2.0,
+            sequence_no="70",
+        ),
+    ]
+    enriched = enrich_diff_rows_from_positions(rows, positions, match_row)
+    assert enriched[0].vessel_id == "AWA"
+    assert enriched[0].firing_source_id == "G02"
 
 
 def test_diff_rows_remap_preplot_source_side_for_reverse_acquisition() -> None:

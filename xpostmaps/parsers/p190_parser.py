@@ -220,6 +220,7 @@ def parse_p190_file(path: Path) -> list[PositionRecord]:
     firing_by_shot: dict[tuple[str, int], PositionRecord] = {}
     depth_by_shot: dict[tuple[str, int], float] = {}
     vessel_indices_by_shot: dict[tuple[str, int], list[int]] = {}
+    vessel_id_by_shot: dict[tuple[str, int], str] = {}
     fallback_line_name, fallback_subline = _parse_linename_subline_from_filename(path)
     header_state = {
         "line_name": fallback_line_name,
@@ -267,8 +268,16 @@ def parse_p190_file(path: Path) -> list[PositionRecord]:
             if rec.record_type == RecordType.SOURCE:
                 firing_by_shot[key] = rec
                 continue
+            if rec.vessel_id:
+                vessel_id_by_shot[key] = rec.vessel_id
             vessel_indices_by_shot.setdefault(key, []).append(len(records))
             records.append(rec)
+
+    for firing in firing_by_shot.values():
+        if firing.vessel_id:
+            continue
+        firing_key = shot_key(firing.line_name, firing.point_num)
+        firing.vessel_id = vessel_id_by_shot.get(firing_key, "")
 
     records.extend(firing_by_shot.values())
     return records

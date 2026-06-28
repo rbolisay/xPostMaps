@@ -160,6 +160,24 @@ def _fallback_gun_code(code: str) -> bool:
     return code.startswith("G") and len(code) == 3 and code[1:].isdigit()
 
 
+def _is_vessel_p1_device(
+    device_id: str,
+    *,
+    gun_codes: frozenset[str],
+    echosounder_id: str | None,
+    vessel_codes: frozenset[str],
+) -> bool:
+    """Return True when a P1 device ID is a vessel reference (not gun/echo)."""
+    if not device_id or device_id == echosounder_id:
+        return False
+    if device_id in gun_codes or _fallback_gun_code(device_id):
+        return False
+    if vessel_codes:
+        return device_id in vessel_codes
+    # Legacy files without HC vessel definitions: accept any non-gun P1 device.
+    return True
+
+
 def _calculate_azimuth_degrees(x1: float, y1: float, x2: float, y2: float) -> float | None:
     dx = x2 - x1
     dy = y2 - y1
@@ -323,11 +341,12 @@ def scan_projected_axis_order(path: Path, scan_limit: int = 2000) -> tuple[str, 
 def scan_p111_header_context(
     path: Path,
     scan_limit: int = 5000,
-) -> tuple[str | None, str | None, frozenset[str], tuple[str, str] | None]:
+) -> tuple[str | None, str | None, frozenset[str], tuple[str, str] | None, frozenset[str]]:
     """Scan P111 header once for vessel, echosounder, gun codes, and axis order."""
     vessel_id: str | None = None
     echosounder_id: str | None = None
     gun_codes: set[str] = set()
+    vessel_codes: set[str] = set()
     axes_by_crs: dict[str, dict[int, str]] = {}
     try:
         with path.open("r", encoding="utf-8", errors="replace") as handle:
@@ -346,11 +365,10 @@ def scan_p111_header_context(
                         device_type = _field(fields, 8).lower()
                         description = _field(fields, 15) if len(fields) > 15 else ""
                         if device_id:
-                            if vessel_id is None and (
-                                device_type == "vessel"
-                                or description == "Vessel Reference Point"
-                            ):
-                                vessel_id = device_id
+                            if device_type == "vessel" or description == "Vessel Reference Point":
+                                vessel_codes.add(device_id)
+                                if vessel_id is None:
+                                    vessel_id = device_id
                             if echosounder_id is None and (
                                 "echo sounder" in device_type
                                 or "echosounder" in device_type
@@ -385,7 +403,7 @@ def scan_p111_header_context(
                     continue
                 axes_by_crs.setdefault(crs_number, {})[axis_number] = axis
     except OSError:
-        return None, None, frozenset(), None
+        return None, None, frozenset(), None, frozenset()
 
     axis_order: tuple[str, str] | None = None
     for axes in axes_by_crs.values():
@@ -393,7 +411,7 @@ def scan_p111_header_context(
         if set(ordered) == {"easting", "northing"} and len(ordered) >= 2:
             axis_order = ordered[:2]
             break
-    return vessel_id, echosounder_id, frozenset(gun_codes), axis_order
+    return vessel_id, echosounder_id, frozenset(gun_codes), axis_order, frozenset(vessel_codes)
 
 
 def scan_p111_receiver_endpoint_targets(
@@ -1652,13 +1670,23 @@ def parse_p111_file(path: Path, vessel_id: str | None = None) -> list[PositionRe
     Matches xSeisView shot-block logic: S1 identifies which gun fired at each
     shotpoint; coordinates prefer the matching P1 air-gun record. Other P1 gun
     positions (G01/G02/G03 arrays) are never emitted as source records.
+
+    Vessel ID is resolved per shotpoint from the P1 vessel record at that
+    shotpoint (supports multi-vessel acquisition where different vessels fire
+    on alternating shotpoints). The optional ``vessel_id`` argument is kept for
+    API compatibility but is not used to filter records.
     """
     records: list[PositionRecord] = []
     file_name = path.name
 
-    scanned_vessel_id, echosounder_id, gun_codes, axis_order = scan_p111_header_context(path)
-    if vessel_id is None:
-        vessel_id = scanned_vessel_id
+    (
+        scanned_vessel_id,
+        echosounder_id,
+        gun_codes,
+        axis_order,
+        vessel_codes,
+    ) = scan_p111_header_context(path)
+    default_vessel_id = scanned_vessel_id or vessel_id
 
     current_sequence = "N/A"
     current_line_name = "N/A"
@@ -1667,6 +1695,7 @@ def parse_p111_file(path: Path, vessel_id: str | None = None) -> list[PositionRe
     has_cc_headers = False
     pending_firing: _PendingFiringShot | None = None
     depth_by_shot: dict[tuple[str, int], float] = {}
+    vessel_id_by_shot: dict[tuple[str, int], str] = {}
     record_indices_by_shot: dict[tuple[str, int], list[int]] = {}
 
     def _shot_key(point_num: int) -> tuple[str, int]:
@@ -1696,16 +1725,32 @@ def parse_p111_file(path: Path, vessel_id: str | None = None) -> list[PositionRe
         for record_index in record_indices_by_shot.get(key, []):
             records[record_index].depth = depth
 
+    def _resolve_vessel_id_for_shot(point_num: int) -> str:
+        return vessel_id_by_shot.get(_shot_key(point_num), "")
+
+    def _note_vessel_id(point_num: int, device_id: str) -> None:
+        key = _shot_key(point_num)
+        vessel_id_by_shot[key] = device_id
+        for record_index in record_indices_by_shot.get(key, []):
+            record = records[record_index]
+            if record.record_type == RecordType.SOURCE:
+                record.vessel_id = device_id
+
     def flush_firing() -> None:
         nonlocal pending_firing
         if pending_firing is None:
             return
+        shot_vessel_id = _resolve_vessel_id_for_shot(pending_firing.point_num)
+        if not shot_vessel_id and len(vessel_codes) == 1:
+            shot_vessel_id = next(iter(vessel_codes))
+        elif not shot_vessel_id:
+            shot_vessel_id = default_vessel_id or ""
         records.append(
             PositionRecord(
                 file_name=file_name,
                 record_type=RecordType.SOURCE,
                 line_name=pending_firing.line_name or "UNNAMED",
-                vessel_id="",
+                vessel_id=shot_vessel_id,
                 source_id=pending_firing.firing_code,
                 point_num=pending_firing.point_num,
                 x=pending_firing.x,
@@ -1833,7 +1878,12 @@ def parse_p111_file(path: Path, vessel_id: str | None = None) -> list[PositionRe
                 if device_id in gun_codes or _fallback_gun_code(device_id):
                     continue
 
-                if not vessel_id or device_id != vessel_id:
+                if not _is_vessel_p1_device(
+                    device_id,
+                    gun_codes=gun_codes,
+                    echosounder_id=echosounder_id,
+                    vessel_codes=vessel_codes,
+                ):
                     continue
 
                 x, y = _projected_xy_from_fields(
@@ -1844,6 +1894,7 @@ def parse_p111_file(path: Path, vessel_id: str | None = None) -> list[PositionRe
                 )
                 if not (x == x and y == y):
                     continue
+                _note_vessel_id(point_num, device_id)
                 records.append(
                     PositionRecord(
                         file_name=file_name,
@@ -1876,6 +1927,8 @@ def parse_p111_file(path: Path, vessel_id: str | None = None) -> list[PositionRe
                         if current_line_name != "N/A":
                             legacy.line_name = current_line_name
                     records.append(legacy)
+                    if legacy.vessel_id and legacy.point_num > 0:
+                        _note_vessel_id(legacy.point_num, legacy.vessel_id)
 
     flush_firing()
     return records

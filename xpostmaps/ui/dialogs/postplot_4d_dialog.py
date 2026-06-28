@@ -32,6 +32,7 @@ from xpostmaps.core.postplot_4d_diff import (
     CrsMismatchError,
     Postplot4DDiffRow,
     calculate_match_diff_rows,
+    enrich_diff_rows_from_positions,
     resolve_diff_map_epsg,
     source_has_streamers,
 )
@@ -503,11 +504,12 @@ class Postplot4DDialog:
         def load_saved_diffs(match_row: Postplot4DMatchRow) -> list[Postplot4DDiffRow]:
             if database is None or not project_name.strip():
                 return []
-            return database.load_postplot_4d_diffs(
+            rows = database.load_postplot_4d_diffs(
                 project_name.strip(),
                 match_row.baseline_kind,
                 match_row.sequence_id,
             )
+            return enrich_diff_rows_from_positions(rows, positions(), match_row)
 
         def calculate_and_persist_diffs(
             match_row: Postplot4DMatchRow,
@@ -520,6 +522,7 @@ class Postplot4DDialog:
                 database=database,
                 project_name=project_name,
             )
+            rows = enrich_diff_rows_from_positions(rows, positions(), match_row)
             persist_diff_rows(match_row, rows)
             return rows
 
@@ -550,6 +553,8 @@ class Postplot4DDialog:
                 [
                     source_h1,
                     source_h2,
+                    "Vessel ID",
+                    "Firing Source ID",
                     "Crossline (m)",
                     "Inline (m)",
                     "Radial (m)",
@@ -617,6 +622,8 @@ class Postplot4DDialog:
                         [
                             source_a,
                             source_b,
+                            diff_row.vessel_id,
+                            diff_row.firing_source_id,
                             _format_offset(diff_row.crossline_m),
                             _format_offset(diff_row.inline_m),
                             _format_offset(diff_row.radial_m),
