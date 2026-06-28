@@ -263,6 +263,8 @@ class Brutal4030DiffStatCoordToggleTest(unittest.TestCase):
 
     def test_4030_saved_navplan_diff_rows_en_lat_toggle_is_exact(self) -> None:
         rows = _load_saved_diff_rows(self.db, "4030_4D", ("navplan",))
+        if not rows:
+            self.skipTest("no saved navplan diffs in 4030_4D.db")
         _verify_diff_rows(
             rows,
             self.fmt,
@@ -319,3 +321,37 @@ class Brutal4030DiffStatCoordToggleTest(unittest.TestCase):
             self.assertAlmostEqual(live.source_x, saved.source_x, places=3)
             self.assertAlmostEqual(live.source_y, saved.source_y, places=3)
         _verify_diff_rows(live_rows, self.fmt, label="4030 live recalc sample")
+
+    def test_4030_recalc_stored_geographic_metadata_matches_map_datum(self) -> None:
+        _, map_data = self.db.load_project("4030_4D", with_positions=True)
+        assert map_data is not None
+        rows = _load_recalc_diff_rows(
+            self.db,
+            "4030_4D",
+            map_data,
+            self.settings,
+            ("navplan", "preplot"),
+        )
+        failures: list[str] = []
+        for diff_row in rows:
+            for label, x, y, lat_t, lon_t in (
+                ("baseline", diff_row.baseline_x, diff_row.baseline_y, diff_row.baseline_latitude, diff_row.baseline_longitude),
+                ("source", diff_row.source_x, diff_row.source_y, diff_row.source_latitude, diff_row.source_longitude),
+            ):
+                try:
+                    stored_lat = float(lat_t)
+                    stored_lon = float(lon_t)
+                except ValueError:
+                    failures.append(f"SP{diff_row.shotpoint} {label}: non-decimal {lat_t!r}/{lon_t!r}")
+                    continue
+                lon, lat = self.fmt.geographic_from_projected(x, y)
+                if abs(stored_lat - lat) > 1e-4 or abs(stored_lon - lon) > 1e-4:
+                    failures.append(
+                        f"SP{diff_row.shotpoint} {label}: stored ({stored_lat},{stored_lon}) "
+                        f"!= map ({lat:.6f},{lon:.6f})"
+                    )
+                if len(failures) >= 20:
+                    break
+            if len(failures) >= 20:
+                break
+        assert failures == [], "4030 stored geographic metadata mismatches:\n" + "\n".join(failures)

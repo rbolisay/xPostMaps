@@ -1415,6 +1415,62 @@ def _map_geographic_lat_lon(xs: list[float], ys: list[float], map_epsg: str) -> 
     )
 
 
+def _sync_baseline_geographic(
+    baseline: dict[BaselineKey, BaselineShotpoint],
+    map_epsg: str,
+) -> dict[BaselineKey, BaselineShotpoint]:
+    """Set baseline lat/long strings from projected EN in the map CRS geodetic datum."""
+    code = normalize_epsg(map_epsg)
+    if not code or not baseline:
+        return baseline
+    keys = list(baseline)
+    lats, lons = _map_geographic_lat_lon(
+        [baseline[key].x for key in keys],
+        [baseline[key].y for key in keys],
+        code,
+    )
+    if len(lats) != len(keys):
+        return baseline
+    return {
+        key: BaselineShotpoint(
+            shotpoint=baseline[key].shotpoint,
+            x=baseline[key].x,
+            y=baseline[key].y,
+            latitude=lats[index],
+            longitude=lons[index],
+            source_id=baseline[key].source_id,
+            source_index=baseline[key].source_index,
+        )
+        for index, key in enumerate(keys)
+    }
+
+
+def _sync_source_geographic(
+    sources: dict[int, PositionRecord],
+    map_epsg: str,
+) -> dict[int, PositionRecord]:
+    """Set firing-source lat/long strings from projected EN in the map CRS geodetic datum."""
+    code = normalize_epsg(map_epsg)
+    if not code or not sources:
+        return sources
+    shotpoints = sorted(sources)
+    lats, lons = _map_geographic_lat_lon(
+        [sources[sp].x for sp in shotpoints],
+        [sources[sp].y for sp in shotpoints],
+        code,
+    )
+    if len(lats) != len(shotpoints):
+        return sources
+    return {
+        sp: replace(
+            sources[sp],
+            latitude=lats[index],
+            longitude=lons[index],
+        )
+        for index, sp in enumerate(shotpoints)
+    }
+
+
 def _reproject_baseline(
     baseline: dict[BaselineKey, BaselineShotpoint],
     src_epsg: str,
@@ -1802,6 +1858,8 @@ def calculate_match_diff_rows(
                 project_name=project_name,
             )
         )
+    baseline = _sync_baseline_geographic(baseline, map_epsg)
+    sources = _sync_source_geographic(sources, map_epsg)
     return compute_postplot_4d_diff_rows(
         baseline,
         sources,

@@ -25,7 +25,7 @@ from PySide6.QtWidgets import (
 )
 
 from xpostmaps.core.coord_format import GeoDisplayFormatter, format_geo_from_projected
-from xpostmaps.core.crs_utils import normalize_epsg
+from xpostmaps.core.crs_utils import geographic_epsg_from_map, normalize_epsg
 from xpostmaps.core.database import Database
 from xpostmaps.core.models import MapData, PositionRecord, ProjectSettings
 from xpostmaps.core.postplot_4d_diff import (
@@ -394,20 +394,32 @@ class Postplot4DDialog:
         def _baseline_file_for_match(match_row: Postplot4DMatchRow) -> Path | None:
             return _resolve_existing_file(match_row.baseline_file_name)
 
+        def _four_d_stat_crs_label(map_epsg: str, coord_mode: CoordMode) -> str:
+            code = normalize_epsg(map_epsg)
+            if not code:
+                return "unknown CRS"
+            if coord_mode == "lat":
+                geo = geographic_epsg_from_map(code)
+                return f"EPSG:{geo}" if geo else "unknown CRS"
+            return f"EPSG:{code}"
+
         def _crs_note_for_match(match_row: Postplot4DMatchRow | None) -> str:
-            diff_crs = str(state.get("map_epsg", "") or "")
-            diff_label = f"EPSG {diff_crs}" if diff_crs else "unknown CRS"
+            map_epsg = normalize_epsg(str(state.get("map_epsg", "") or ""))
+            coord_mode = state.get("coord_mode", "en")
+            assert coord_mode in ("en", "lat")
+            map_label = f"EPSG:{map_epsg}" if map_epsg else "unknown CRS"
+            stat_label = _four_d_stat_crs_label(map_epsg, coord_mode)  # type: ignore[arg-type]
+            crs_header = f"Map CRS {map_label}  |  4D Stat CRS {stat_label}"
             if match_row is None:
-                baseline_label = "select a 4D Stat row to see exact baseline file CRS"
-                source_label = "select a 4D Stat row to see exact P111/P190 CRS"
-            else:
-                baseline_name = "Preplot" if match_row.baseline_kind == "preplot" else "Navplan"
-                baseline_label = f"{baseline_name} {_crs_display(_baseline_file_for_match(match_row))}"
-                source_label = f"P111/P190 {_crs_display(_source_file_for_match(match_row))}"
-            return (
-                f"CRS in use: 4D/map {diff_label}  |  "
-                f"{baseline_label}  |  {source_label}"
-            )
+                return (
+                    f"{crs_header}  |  "
+                    "select a 4D Stat row to see exact baseline file CRS  |  "
+                    "select a 4D Stat row to see exact P111/P190 CRS"
+                )
+            baseline_name = "Preplot" if match_row.baseline_kind == "preplot" else "Navplan"
+            baseline_label = f"{baseline_name} {_crs_display(_baseline_file_for_match(match_row))}"
+            source_label = f"P111/P190 {_crs_display(_source_file_for_match(match_row))}"
+            return f"{crs_header}  |  {baseline_label}  |  {source_label}"
 
         def _cached_file_mtime(active_db: Database | None, file_ref: str) -> float | None:
             # Read the file mtime recorded in the DB at import time instead of
@@ -832,8 +844,9 @@ class Postplot4DDialog:
             elapsed: float,
             cancelled: bool,
         ) -> None:
-            nonlocal bulk_recalc_worker, diff_rows
+            nonlocal bulk_recalc_worker, bulk_recalc_launch_pending, diff_rows
             bulk_recalc_worker = None
+            bulk_recalc_launch_pending = False
             _reset_bulk_recalc_button()
             if recalculated == 0 and failed == 0 and not cancelled:
                 if skipped:
@@ -893,6 +906,13 @@ class Postplot4DDialog:
                 if work_db is not None:
                     work_db.close()
 
+        def _on_bulk_worker_thread_finished() -> None:
+            nonlocal bulk_recalc_worker, bulk_recalc_launch_pending
+            if bulk_recalc_btn.text() == _BULK_CANCEL_LABEL:
+                _reset_bulk_recalc_button()
+            bulk_recalc_worker = None
+            bulk_recalc_launch_pending = False
+
         def _launch_bulk_recalc_worker() -> None:
             nonlocal bulk_recalc_launch_pending, bulk_recalc_worker
             if not bulk_recalc_launch_pending:
@@ -910,8 +930,10 @@ class Postplot4DDialog:
                 project_name=project_name,
                 parent=host_dialog or parent,
             )
-            bulk_recalc_worker.progress.connect(_on_bulk_recalc_progress)
-            bulk_recalc_worker.finished_batch.connect(_on_bulk_recalc_finished)
+            queued = Qt.ConnectionType.QueuedConnection
+            bulk_recalc_worker.progress.connect(_on_bulk_recalc_progress, queued)
+            bulk_recalc_worker.finished_batch.connect(_on_bulk_recalc_finished, queued)
+            bulk_recalc_worker.finished.connect(_on_bulk_worker_thread_finished, queued)
             bulk_recalc_worker.start()
 
         def _on_bulk_recalc_clicked() -> None:
@@ -1014,6 +1036,11 @@ class Postplot4DDialog:
             state["coord_mode"] = "lat" if state["coord_mode"] == "en" else "en"
             coord_toggle.setText(_coord_toggle_label(state["coord_mode"]))  # type: ignore[arg-type]
             refresh_diff_table()
+            active_match = state["active_match"]
+            if diff_crs_note is not None and isinstance(active_match, Postplot4DMatchRow):
+                diff_crs_note.setText(_crs_note_for_match(active_match))
+            if crs_note is not None and stack.currentIndex() == 0:
+                crs_note.setText(_crs_note_for_match(None))
             if "Calculated at" not in diff_summary.text():
                 _set_diff_summary(
                     diff_summary,
