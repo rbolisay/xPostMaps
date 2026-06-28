@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from xpostmaps.core.models import MapData, PositionRecord, ProjectSettings, RecordType
+from xpostmaps.core.postplot_4d_diff_worker import Single4DStatCalcWorker
 from xpostmaps.core.postplot_4d_diff_worker import diff_stat_worker_count
 from xpostmaps.core.postplot_4d_diff_worker import DiffStatRecalcWorker
 from xpostmaps.core.postplot_4d_matching import Postplot4DMatchRow
@@ -74,3 +75,26 @@ def test_worker_filters_positions_by_sequence_group() -> None:
     )
 
     assert worker._positions_for_match(match) == [positions[0]]
+
+
+def test_single_4d_stat_worker_exposes_completion_signals() -> None:
+    worker = Single4DStatCalcWorker(
+        lambda: MapData(),
+        ProjectSettings(),
+        lambda: [],
+        Postplot4DMatchRow(
+            baseline_name="LINE01",
+            baseline_kind="preplot",
+            line_name="LINE01",
+            subline="",
+            sequence_no="0001",
+            first_sp=1001,
+            last_sp=1001,
+            line_direction="",
+            sequence_id="line.p190|0001|LINE01|source",
+        ),
+    )
+    assert worker.progress is not None
+    assert worker.finished_ok is not None
+    assert worker.finished_failed is not None
+    assert worker.finished_cancelled is not None

@@ -1233,7 +1233,7 @@ class LayerStylesDialog:
 
                     cond_table = QTableWidget(0, 4)
                     cond_table.setHorizontalHeaderLabels(
-                        ["Diff Stat", "Range Value (Abs)", "Color", "Disable"]
+                        ["4D Stat", "Range Value (Abs)", "Color", "Disable"]
                     )
                     _configure_legend_table(cond_table)
 

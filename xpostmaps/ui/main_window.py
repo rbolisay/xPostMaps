@@ -1133,7 +1133,7 @@ class MainWindow(QMainWindow):
             parent=self,
         )
         self._left.set_progress(0, True)
-        self._left.set_status("Preparing Diff Stat feather/index cache…")
+        self._left.set_status("Preparing 4D Stat feather/index cache…")
         self._postplot_cache_worker.progress.connect(self._on_postplot_4d_cache_warm_progress)
         self._postplot_cache_worker.finished_ok.connect(
             self._on_postplot_4d_cache_warm_finished
@@ -1151,7 +1151,7 @@ class MainWindow(QMainWindow):
             return
         pct = int(100 * done / max(total, 1))
         self._left.set_progress(pct, True)
-        self._left.set_status(f"Preparing Diff Stat cache {done}/{total}: {detail}")
+        self._left.set_status(f"Preparing 4D Stat cache {done}/{total}: {detail}")
 
     def _postplot_4d_cache_needs_warm(self) -> bool:
         project_name = self._settings.name.strip()
@@ -1208,9 +1208,9 @@ class MainWindow(QMainWindow):
         if self._parsing:
             return
         self._left.set_progress(0, False)
-        self._left.set_status(f"Diff Stat cache preparation failed: {message}")
+        self._left.set_status(f"4D Stat cache preparation failed: {message}")
         self.statusBar().showMessage(
-            f"Diff Stat cache preparation failed: {message}",
+            f"4D Stat cache preparation failed: {message}",
             8000,
         )
 
@@ -1224,7 +1224,7 @@ class MainWindow(QMainWindow):
         if self._parsing:
             return
         message = (
-            f"Diff Stat cache ready: {preplot_lines} preplot line(s), "
+            f"4D Stat cache ready: {preplot_lines} preplot line(s), "
             f"{feather_files} feather file(s) ({elapsed:.1f} s)"
         )
         self._left.set_status(message)

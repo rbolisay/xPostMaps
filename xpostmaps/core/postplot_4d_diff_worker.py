@@ -47,6 +47,104 @@ class DiffStatRecalcTaskResult:
     error: str = ""
 
 
+class Single4DStatCalcWorker(QThread):
+    """Calculate saved 4D Stat rows for one matched sequence."""
+
+    progress = Signal(str)
+    finished_ok = Signal(object, float)
+    finished_failed = Signal(str)
+    finished_cancelled = Signal()
+
+    def __init__(
+        self,
+        map_data_provider: Callable[[], MapData | None],
+        settings: ProjectSettings,
+        positions_provider: Callable[[], list[PositionRecord]],
+        match_row: Postplot4DMatchRow,
+        *,
+        load_source_positions_from_db: bool = False,
+        db_path: Path | None = None,
+        project_name: str = "",
+        parent=None,
+    ) -> None:
+        super().__init__(parent)
+        self._map_data_provider = map_data_provider
+        self._settings = settings
+        self._positions_provider = positions_provider
+        self._match_row = match_row
+        self._load_source_positions_from_db = load_source_positions_from_db
+        self._db_path = db_path
+        self._project_name = project_name.strip()
+        self._cancel_event = threading.Event()
+
+    def cancel(self) -> None:
+        self._cancel_event.set()
+        self.requestInterruption()
+
+    def _cancelled(self) -> bool:
+        return self._cancel_event.is_set() or self.isInterruptionRequested()
+
+    def run(self) -> None:
+        started = time.perf_counter()
+        db: Database | None = None
+        try:
+            reset_postplot_4d_path_caches()
+            map_data = self._map_data_provider()
+            if self._cancelled():
+                self.finished_cancelled.emit()
+                return
+
+            self.progress.emit("Loading source positions…")
+            if self._db_path is not None:
+                db = Database(self._db_path)
+                try:
+                    db._conn.execute("PRAGMA busy_timeout=30000")
+                except Exception:  # noqa: BLE001
+                    pass
+
+            if self._load_source_positions_from_db and db is not None and self._project_name:
+                source_positions = db.load_source_positions_for_sequence_ids(
+                    self._project_name,
+                    [self._match_row.sequence_id],
+                )
+            else:
+                source_positions = list(self._positions_provider())
+
+            if self._cancelled():
+                self.finished_cancelled.emit()
+                return
+
+            label = f"{self._match_row.baseline_name} -> {self._match_row.line_name}"
+            self.progress.emit(f"Calculating 4D Stat for {label}…")
+            rows = calculate_match_diff_rows(
+                map_data,
+                self._settings,
+                source_positions,
+                self._match_row,
+                database=db,
+                project_name=self._project_name,
+            )
+            if self._cancelled():
+                self.finished_cancelled.emit()
+                return
+
+            if db is not None and self._project_name:
+                db.save_postplot_4d_diffs(
+                    self._project_name,
+                    self._match_row.baseline_kind,
+                    self._match_row.baseline_name,
+                    self._match_row.sequence_id,
+                    rows,
+                )
+
+            self.finished_ok.emit(rows, time.perf_counter() - started)
+        except Exception as exc:  # noqa: BLE001
+            self.finished_failed.emit(str(exc))
+        finally:
+            if db is not None:
+                db.close()
+
+
 class DiffStatRecalcWorker(QThread):
     progress = Signal(int, int, str)
     finished_batch = Signal(int, int, int, float, bool)
@@ -205,7 +303,7 @@ class DiffStatRecalcWorker(QThread):
             self._map_data = self._map_data_provider()
 
             if self._prepare_tasks is not None:
-                self.progress.emit(0, 0, "Checking for stale Diff Stat rows…")
+                self.progress.emit(0, 0, "Checking for stale 4D Stat rows…")
                 pending, skipped = self._prepare_tasks(self._cancelled)
             else:
                 pending = self._match_rows
@@ -220,7 +318,7 @@ class DiffStatRecalcWorker(QThread):
                 return
 
             if self._load_source_positions_per_match and self._db_path is not None:
-                self.progress.emit(0, len(pending), "Starting Diff Stat workers…")
+                self.progress.emit(0, len(pending), "Starting 4D Stat workers…")
                 self._positions = []
                 self._source_positions_by_group = {}
             else:

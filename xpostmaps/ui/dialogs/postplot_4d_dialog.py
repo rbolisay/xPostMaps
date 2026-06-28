@@ -35,7 +35,7 @@ from xpostmaps.core.postplot_4d_diff import (
     resolve_diff_map_epsg,
     source_has_streamers,
 )
-from xpostmaps.core.postplot_4d_diff_worker import DiffStatRecalcWorker
+from xpostmaps.core.postplot_4d_diff_worker import DiffStatRecalcWorker, Single4DStatCalcWorker
 from xpostmaps.core.postplot_4d_matching import (
     BaselineKind,
     Postplot4DMatchRow,
@@ -158,7 +158,7 @@ def _autosize_dialog_width(
     dialog.resize(target, dialog.height())
 
 
-_BULK_RECALC_LABEL = "Recalculate Diff Stat"
+_BULK_RECALC_LABEL = "Calculate 4D Stat"
 _BULK_CANCEL_LABEL = "Cancel Recalc"
 
 _DIFF_SUMMARY_STYLE = "color: #8b949e; font-size: 11px;"
@@ -237,8 +237,8 @@ def _sort_match_rows(
 
 def _diff_title(match_row: Postplot4DMatchRow) -> str:
     if match_row.subline:
-        return f"{match_row.line_name}.{match_row.subline} Diff Stat Table"
-    return f"{match_row.line_name} Diff Stat Table"
+        return f"{match_row.line_name}.{match_row.subline} 4D Stat Table"
+    return f"{match_row.line_name} 4D Stat Table"
 
 
 def _baseline_coord_headers(baseline_kind: BaselineKind, coord_mode: CoordMode) -> tuple[str, str]:
@@ -292,7 +292,7 @@ class Postplot4DDialog:
         crs_cache: dict[str, str] = {}
         diff_rows: list[Postplot4DDiffRow] = []
         bulk_recalc_worker: DiffStatRecalcWorker | None = None
-        single_recalc_worker: DiffStatRecalcWorker | None = None
+        single_recalc_worker: Single4DStatCalcWorker | None = None
         bulk_recalc_launch_pending = False
         host_dialog: SingleInstanceDialog | None = None
         crs_note: QLabel | None = None
@@ -398,14 +398,14 @@ class Postplot4DDialog:
             diff_crs = str(state.get("map_epsg", "") or "")
             diff_label = f"EPSG {diff_crs}" if diff_crs else "unknown CRS"
             if match_row is None:
-                baseline_label = "select a Diff Stat row to see exact baseline file CRS"
-                source_label = "select a Diff Stat row to see exact P111/P190 CRS"
+                baseline_label = "select a 4D Stat row to see exact baseline file CRS"
+                source_label = "select a 4D Stat row to see exact P111/P190 CRS"
             else:
                 baseline_name = "Preplot" if match_row.baseline_kind == "preplot" else "Navplan"
                 baseline_label = f"{baseline_name} {_crs_display(_baseline_file_for_match(match_row))}"
                 source_label = f"P111/P190 {_crs_display(_source_file_for_match(match_row))}"
             return (
-                f"CRS in use: Diff/map {diff_label}  |  "
+                f"CRS in use: 4D/map {diff_label}  |  "
                 f"{baseline_label}  |  {source_label}"
             )
 
@@ -488,20 +488,18 @@ class Postplot4DDialog:
                 project_name=project_name,
             )
 
-        def load_or_calculate_diffs(
+        def load_saved_diffs(match_row: Postplot4DMatchRow) -> list[Postplot4DDiffRow]:
+            if database is None or not project_name.strip():
+                return []
+            return database.load_postplot_4d_diffs(
+                project_name.strip(),
+                match_row.baseline_kind,
+                match_row.sequence_id,
+            )
+
+        def calculate_and_persist_diffs(
             match_row: Postplot4DMatchRow,
-        ) -> tuple[list[Postplot4DDiffRow], str]:
-            if (
-                database is not None
-                and project_name.strip()
-            ):
-                stored = database.load_postplot_4d_diffs(
-                    project_name.strip(),
-                    match_row.baseline_kind,
-                    match_row.sequence_id,
-                )
-                if stored:
-                    return stored, "loaded"
+        ) -> list[Postplot4DDiffRow]:
             rows = calculate_match_diff_rows(
                 current_map_data(),
                 settings,
@@ -511,7 +509,7 @@ class Postplot4DDialog:
                 project_name=project_name,
             )
             persist_diff_rows(match_row, rows)
-            return rows, "calculated"
+            return rows
 
         def refresh_diff_table() -> None:
             match_row = state["active_match"]
@@ -626,7 +624,12 @@ class Postplot4DDialog:
             nonlocal diff_rows
             state["active_match"] = match_row
             try:
-                diff_rows, source = load_or_calculate_diffs(match_row)
+                if database is not None and project_name.strip():
+                    diff_rows = load_saved_diffs(match_row)
+                    source = "loaded" if diff_rows else "missing"
+                else:
+                    diff_rows = calculate_and_persist_diffs(match_row)
+                    source = "calculated"
             except CrsMismatchError as exc:
                 diff_rows = []
                 diff_title.setText(_diff_title(match_row))
@@ -635,7 +638,7 @@ class Postplot4DDialog:
                 refresh_diff_table()
                 _set_diff_summary(
                     diff_summary,
-                    f"Diff Stat blocked — CRS not verified: {exc}",
+                    f"4D Stat blocked — CRS not verified: {exc}",
                     tone="busy",
                 )
                 if host_dialog is not None:
@@ -651,6 +654,8 @@ class Postplot4DDialog:
                     f"{len(diff_rows)} shotpoint difference(s) · "
                     "Loaded from saved project data"
                 )
+            elif source == "missing":
+                summary = "No saved 4D Stat data. Use Calculate 4D Stat to compute."
             else:
                 summary = (
                     f"{len(diff_rows)} shotpoint difference(s) · "
@@ -673,102 +678,84 @@ class Postplot4DDialog:
                 return "saved to project"
             return "not saved (no project database)"
 
+        def _single_recalc_running() -> bool:
+            return (
+                single_recalc_worker is not None
+                and single_recalc_worker.isRunning()
+            )
+
+        def _reset_single_recalc_button() -> None:
+            recalc_btn.setText(_BULK_RECALC_LABEL)
+            recalc_btn.setEnabled(True)
+            coord_toggle.setEnabled(True)
+
+        def _cancel_single_recalc_if_running() -> None:
+            if single_recalc_worker is not None and single_recalc_worker.isRunning():
+                single_recalc_worker.cancel()
+
         def recalculate_diffs() -> None:
             nonlocal single_recalc_worker
             match_row = state["active_match"]
             if not isinstance(match_row, Postplot4DMatchRow):
                 return
-            if single_recalc_worker is not None and single_recalc_worker.isRunning():
-                return
-            if database is None or not project_name.strip():
-                # No DB project is available to hand work to a background worker;
-                # keep the old direct path for unsaved/ad-hoc projects.
-                nonlocal diff_rows
-                recalc_btn.setEnabled(False)
-                coord_toggle.setEnabled(False)
-                _set_diff_summary(diff_summary, "Recalculating differences…", tone="busy")
-                recalc_btn.setText("Recalculating…")
-                QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
-                QApplication.processEvents()
-                started = time.perf_counter()
-                try:
-                    diff_rows = calculate_match_diff_rows(
-                        current_map_data(),
-                        settings,
-                        positions(),
-                        match_row,
-                        database=database,
-                        project_name=project_name,
-                    )
-                    persist_diff_rows(match_row, diff_rows)
-                    refresh_diff_table()
-                    elapsed = time.perf_counter() - started
-                    stamp = datetime.now().strftime("%H:%M:%S")
-                    summary = (
-                        f"{len(diff_rows)} shotpoint difference(s) · "
-                        f"Recalculated at {stamp} ({elapsed:.1f} s, {_persist_note()})"
-                    )
-                    _set_diff_summary(diff_summary, summary, tone="done")
-                    if parent is not None:
-                        _show_host_status(
-                            parent,
-                            f"Diff stat recalculated: {len(diff_rows)} shotpoint(s) in {elapsed:.1f} s",
-                        )
-                except Exception as exc:  # noqa: BLE001
-                    _set_diff_summary(diff_summary, f"Recalculate failed: {exc}", tone="busy")
-                    if parent is not None:
-                        _show_host_status(parent, f"Diff stat recalculate failed: {exc}", 8000)
-                finally:
-                    recalc_btn.setEnabled(True)
-                    coord_toggle.setEnabled(True)
-                    recalc_btn.setText("Recalculate Diffs")
-                    QApplication.restoreOverrideCursor()
+            if _single_recalc_running():
+                single_recalc_worker.cancel()
+                _set_diff_summary(
+                    diff_summary,
+                    "Cancelling 4D Stat calculation…",
+                    tone="busy",
+                )
                 return
 
-            recalc_btn.setEnabled(False)
+            recalc_btn.setText(_BULK_CANCEL_LABEL)
             coord_toggle.setEnabled(False)
-            _set_diff_summary(diff_summary, "Recalculating differences…", tone="busy")
-            recalc_btn.setText("Recalculating…")
-            started = time.perf_counter()
+            _set_diff_summary(diff_summary, "Calculating 4D Stat…", tone="busy")
 
-            def _on_single_finished(
-                recalculated: int,
-                skipped: int,
-                failed: int,
-                elapsed: float,
-                cancelled: bool,
-            ) -> None:
+            def _on_single_progress(detail: str) -> None:
+                _set_diff_summary(
+                    diff_summary,
+                    f"Calculating 4D Stat… {detail}",
+                    tone="busy",
+                )
+
+            def _on_single_cancelled() -> None:
+                nonlocal single_recalc_worker
+                single_recalc_worker = None
+                _reset_single_recalc_button()
+                _set_diff_summary(
+                    diff_summary,
+                    "4D Stat calculation cancelled.",
+                    tone="normal",
+                )
+
+            def _on_single_failed(message: str) -> None:
+                nonlocal single_recalc_worker
+                single_recalc_worker = None
+                _reset_single_recalc_button()
+                _set_diff_summary(
+                    diff_summary,
+                    f"4D Stat calculation failed: {message}",
+                    tone="busy",
+                )
+
+            def _on_single_ok(rows: object, elapsed: float) -> None:
                 nonlocal diff_rows, single_recalc_worker
                 single_recalc_worker = None
-                recalc_btn.setEnabled(True)
-                coord_toggle.setEnabled(True)
-                recalc_btn.setText("Recalculate Diffs")
-                if cancelled:
-                    _set_diff_summary(diff_summary, "Recalculate cancelled.", tone="normal")
-                    return
-                if failed:
-                    _set_diff_summary(diff_summary, "Recalculate failed.", tone="busy")
-                    return
-                stored = database.load_postplot_4d_diffs(
-                    project_name.strip(),
-                    match_row.baseline_kind,
-                    match_row.sequence_id,
-                )
-                diff_rows = stored
+                _reset_single_recalc_button()
+                diff_rows = list(rows)  # type: ignore[arg-type]
                 refresh_diff_table()
-                elapsed = time.perf_counter() - started
                 stamp = datetime.now().strftime("%H:%M:%S")
                 summary = (
                     f"{len(diff_rows)} shotpoint difference(s) · "
-                    f"Recalculated at {stamp} ({elapsed:.1f} s, {_persist_note()})"
+                    f"Calculated at {stamp} ({elapsed:.1f} s, {_persist_note()})"
                 )
                 _set_diff_summary(diff_summary, summary, tone="done")
                 status = (
-                    f"Diff stat recalculated: {len(diff_rows)} shotpoint(s) in {elapsed:.1f} s"
+                    f"4D Stat calculated: {len(diff_rows)} shotpoint(s) in {elapsed:.1f} s"
                 )
                 if parent is not None:
                     _show_host_status(parent, status)
-                if not cancelled and on_diffs_saved is not None:
+                if on_diffs_saved is not None:
                     on_diffs_saved()
                 QTimer.singleShot(
                     5000,
@@ -779,24 +766,23 @@ class Postplot4DDialog:
                     ),
                 )
 
-            single_recalc_worker = DiffStatRecalcWorker(
+            db_path = database.db_path if database is not None else None
+            single_recalc_worker = Single4DStatCalcWorker(
                 current_map_data,
                 settings,
                 positions,
-                match_rows=[match_row],
-                load_source_positions_per_match=True,
-                db_path=database.db_path,
-                project_name=project_name.strip(),
+                match_row,
+                load_source_positions_from_db=database is not None
+                and bool(project_name.strip()),
+                db_path=db_path,
+                project_name=project_name.strip() if project_name else "",
                 parent=host_dialog or parent,
             )
-            single_recalc_worker.progress.connect(
-                lambda completed, total, detail: _set_diff_summary(
-                    diff_summary,
-                    f"Recalculating differences… {completed}/{total}: {detail}",
-                    tone="busy",
-                )
-            )
-            single_recalc_worker.finished_batch.connect(_on_single_finished)
+            queued = Qt.ConnectionType.QueuedConnection
+            single_recalc_worker.progress.connect(_on_single_progress, queued)
+            single_recalc_worker.finished_ok.connect(_on_single_ok, queued)
+            single_recalc_worker.finished_failed.connect(_on_single_failed, queued)
+            single_recalc_worker.finished_cancelled.connect(_on_single_cancelled, queued)
             single_recalc_worker.start()
 
         def _bulk_recalc_running() -> bool:
@@ -813,6 +799,7 @@ class Postplot4DDialog:
         def _cancel_bulk_recalc_if_running() -> None:
             if bulk_recalc_worker is not None and bulk_recalc_worker.isRunning():
                 bulk_recalc_worker.cancel()
+            _cancel_single_recalc_if_running()
 
         def _format_bulk_recalc_message(
             recalculated: int,
@@ -822,7 +809,7 @@ class Postplot4DDialog:
             *,
             cancelled: bool,
         ) -> str:
-            prefix = "Diff Stat update cancelled" if cancelled else "Diff Stat update complete"
+            prefix = "4D Stat update cancelled" if cancelled else "4D Stat update complete"
             message = (
                 f"{prefix}: {recalculated} recalculated, {skipped} unchanged"
                 + (f", {failed} failed" if failed else "")
@@ -835,7 +822,7 @@ class Postplot4DDialog:
                 summary.setText(detail)
                 return
             summary.setText(
-                f"Recalculating Diff Stat {completed}/{total}: {detail}"
+                f"Calculating 4D Stat {completed}/{total}: {detail}"
             )
 
         def _on_bulk_recalc_finished(
@@ -850,9 +837,9 @@ class Postplot4DDialog:
             _reset_bulk_recalc_button()
             if recalculated == 0 and failed == 0 and not cancelled:
                 if skipped:
-                    message = f"All {skipped} Diff Stat row(s) are up to date."
+                    message = f"All {skipped} 4D Stat row(s) are up to date."
                 else:
-                    message = "No matched rows available for Diff Stat recalculation."
+                    message = "No matched rows available for 4D Stat calculation."
             else:
                 message = _format_bulk_recalc_message(
                     recalculated,
@@ -933,16 +920,16 @@ class Postplot4DDialog:
                 if bulk_recalc_worker is not None:
                     bulk_recalc_worker.cancel()
                 bulk_recalc_launch_pending = False
-                summary.setText("Cancelling Diff Stat recalculation…")
+                summary.setText("Cancelling 4D Stat calculation…")
                 if bulk_recalc_worker is None:
                     _reset_bulk_recalc_button()
-                    summary.setText("Diff Stat recalculation cancelled.")
+                    summary.setText("4D Stat calculation cancelled.")
                 return
 
             bulk_recalc_launch_pending = True
             bulk_recalc_btn.setText(_BULK_CANCEL_LABEL)
-            _set_diff_summary(diff_summary, "Recalculating Diff Stat…", tone="busy")
-            summary.setText("Checking for stale Diff Stat rows…")
+            _set_diff_summary(diff_summary, "Calculating 4D Stat…", tone="busy")
+            summary.setText("Checking for stale 4D Stat rows…")
             QTimer.singleShot(0, _launch_bulk_recalc_worker)
 
         def clear_saved_diffs() -> None:
@@ -950,14 +937,14 @@ class Postplot4DDialog:
             active_baseline = state["baseline"]
             assert active_baseline in ("navplan", "preplot")
             if database is None or not project_name.strip():
-                summary.setText("No project database available to clear Diff Stat rows.")
+                summary.setText("No project database available to clear 4D Stat rows.")
                 return
             size_before_mb = database.file_size_bytes() / (1024 * 1024)
             reply = QMessageBox.warning(
                 host_dialog or parent,
-                "Clear Diff Stat",
+                "Clear 4D Stat",
                 (
-                    f"This will permanently delete only saved Diff Stat calculation rows "
+                    f"This will permanently delete only saved 4D Stat calculation rows "
                     f"for the {active_baseline} baseline.\n\n"
                     "Parsed/imported preplot, navplan, P111/P190 positions and feather "
                     "cache rows will be kept so recalculation stays fast.\n"
@@ -974,17 +961,17 @@ class Postplot4DDialog:
                 project_name.strip(),
                 active_baseline,
             )
-            if isinstance(state["active_match"], Postplot4DMatchRow):
-                diff_rows = []
-                if stack.currentIndex() == 1:
-                    refresh_diff_table()
-                    _set_diff_summary(diff_summary, "Saved Diff Stat rows cleared.", tone="done")
+            diff_rows = []
+            if stack.currentIndex() == 1:
+                show_main_view()
+            if on_diffs_saved is not None:
+                on_diffs_saved()
             if diff_rows_deleted == 0:
                 compact_reply = QMessageBox.question(
                     host_dialog or parent,
                     "Compact Database",
                     (
-                        "No saved Diff Stat rows were found to delete.\n\n"
+                        "No saved 4D Stat rows were found to delete.\n\n"
                         f"The project file is still {size_before_mb:.0f} MB. "
                         "Compact it now to reclaim space left by earlier deletes?"
                     ),
@@ -993,7 +980,7 @@ class Postplot4DDialog:
                 )
                 if compact_reply != QMessageBox.StandardButton.Yes:
                     summary.setText(
-                        f"No saved Diff Stat rows found for project "
+                        f"No saved 4D Stat rows found for project "
                         f"{project_name.strip()!r}."
                     )
                     return
@@ -1012,16 +999,14 @@ class Postplot4DDialog:
                     QApplication.restoreOverrideCursor()
             size_after_mb = size_after_bytes / (1024 * 1024)
             summary.setText(
-                f"Cleared {diff_rows_deleted:,} Diff Stat row(s) for "
+                f"Cleared {diff_rows_deleted:,} 4D Stat row(s) for "
                 f"{active_baseline} baseline. Kept imported parse caches. "
                 f"Database compacted from {size_before_mb:.0f} MB to {size_after_mb:.0f} MB."
             )
-            if on_diffs_saved is not None:
-                on_diffs_saved()
             if parent is not None:
                 _show_host_status(
                     parent,
-                    f"Diff Stat cleared; database compacted to {size_after_mb:.0f} MB",
+                    f"4D Stat cleared; database compacted to {size_after_mb:.0f} MB",
                 )
             QTimer.singleShot(6000, refresh_table)
 
@@ -1029,7 +1014,7 @@ class Postplot4DDialog:
             state["coord_mode"] = "lat" if state["coord_mode"] == "en" else "en"
             coord_toggle.setText(_coord_toggle_label(state["coord_mode"]))  # type: ignore[arg-type]
             refresh_diff_table()
-            if "Recalculated at" not in diff_summary.text():
+            if "Calculated at" not in diff_summary.text():
                 _set_diff_summary(
                     diff_summary,
                     f"{len(diff_rows)} shotpoint difference(s)",
@@ -1060,7 +1045,7 @@ class Postplot4DDialog:
                     "Line FSP",
                     "Line LSP",
                     "Line Direction",
-                    "Diff Stat",
+                    "4D Stat",
                 ]
             )
             header.setSortIndicatorShown(True)
@@ -1083,7 +1068,7 @@ class Postplot4DDialog:
                         item = QTableWidgetItem(value)
                         item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsEditable)
                         table.setItem(row_idx, col, item)
-                    diff_btn = QPushButton("Diff Stat")
+                    diff_btn = QPushButton("4D Stat")
                     diff_btn.setObjectName("tableCellBtn")
                     diff_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
                     diff_btn.setMinimumSize(82, 28)
@@ -1176,7 +1161,7 @@ class Postplot4DDialog:
             bulk_recalc_btn.setMinimumSize(170, 32)
             bulk_recalc_btn.clicked.connect(_on_bulk_recalc_clicked)
             baseline_row.addWidget(bulk_recalc_btn)
-            clear_diff_btn = QPushButton("Clear Diff Stat")
+            clear_diff_btn = QPushButton("Clear 4D Stat")
             clear_diff_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
             clear_diff_btn.setMinimumSize(130, 32)
             clear_diff_btn.clicked.connect(clear_saved_diffs)
@@ -1214,9 +1199,9 @@ class Postplot4DDialog:
             coord_toggle.setFocusPolicy(Qt.FocusPolicy.NoFocus)
             coord_toggle.setMinimumSize(140, 32)
             coord_toggle.clicked.connect(toggle_coord_mode)
-            recalc_btn = QPushButton("Recalculate Diffs")
+            recalc_btn = QPushButton(_BULK_RECALC_LABEL)
             recalc_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-            recalc_btn.setMinimumSize(140, 32)
+            recalc_btn.setMinimumSize(170, 32)
             recalc_btn.clicked.connect(recalculate_diffs)
             back_btn = QPushButton("Back")
             back_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
