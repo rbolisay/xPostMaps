@@ -86,6 +86,9 @@ class PdfExportOptions:
     scale_percent: int = 100
     line_detail_percent: int = 100
     export_layered_pdf: bool = False
+    export_shapefiles: bool = False
+    export_kml: bool = False
+    export_dxf: bool = False
 
 
 @dataclass(frozen=True)

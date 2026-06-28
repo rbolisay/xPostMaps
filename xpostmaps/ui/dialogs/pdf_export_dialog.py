@@ -28,6 +28,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from xpostmaps.core.layer_file_export_worker import LayerFileExportWorker
 from xpostmaps.core.local_settings import load_pdf_output_directory, save_pdf_output_directory
 from xpostmaps.core.models import MapData, PostmapInfo, ProjectSettings
 from xpostmaps.core.pdf_export import (
@@ -176,6 +177,18 @@ class PdfExportDialog:
             export_layered.setChecked(True)
             left_form.addRow("", export_layered)
 
+            export_shapefiles = QCheckBox("Export to Shape Files (Map CRS)")
+            export_shapefiles.setChecked(False)
+            left_form.addRow("", export_shapefiles)
+
+            export_kml = QCheckBox("Export to KML Files (WGS84)")
+            export_kml.setChecked(False)
+            left_form.addRow("", export_kml)
+
+            export_dxf = QCheckBox("Export to DXF Files (Map CRS)")
+            export_dxf.setChecked(False)
+            left_form.addRow("", export_dxf)
+
             hint = QLabel(
                 "Postplot linework is written as true PDF vectors — zoom stays sharp, "
                 "not pixelated. Set Map detail to 100 to keep full geometry (matches "
@@ -183,7 +196,9 @@ class PdfExportDialog:
                 "The right pane is re-rendered for crisp text. "
                 "Turn off high-quality layout for a faster screen-capture PDF. "
                 "Export Layered PDF writes each Layer Styles row as a separate "
-                "Acrobat layer (requires high-quality layout)."
+                "Acrobat layer (requires high-quality layout). "
+                "Shapefile, KML, and DXF options write one file per Layer Styles "
+                "row (lines as polylines, areas as polygons)."
             )
             hint.setWordWrap(True)
             hint.setStyleSheet("color: #8b949e; font-size: 11px;")
@@ -228,6 +243,7 @@ class PdfExportDialog:
             preview_timer.setInterval(200)
 
             export_worker: PdfExportWorker | None = None
+            layer_worker: LayerFileExportWorker | None = None
             progress: QProgressDialog | None = None
 
             def resolved_margin_mm() -> float:
@@ -251,6 +267,10 @@ class PdfExportDialog:
                 detail_slider.setEnabled(enabled)
                 detail_value.setEnabled(enabled)
                 export_layered.setEnabled(enabled)
+                layer_files_enabled = enabled and map_data is not None
+                export_shapefiles.setEnabled(layer_files_enabled)
+                export_kml.setEnabled(layer_files_enabled)
+                export_dxf.setEnabled(layer_files_enabled)
 
             def sync_layered_controls() -> None:
                 if export_layered.isChecked() and not vector_mode.isChecked():
@@ -273,6 +293,9 @@ class PdfExportDialog:
                     scale_percent=scale_percent,
                     line_detail_percent=detail_slider.value(),
                     export_layered_pdf=export_layered.isChecked(),
+                    export_shapefiles=export_shapefiles.isChecked(),
+                    export_kml=export_kml.isChecked(),
+                    export_dxf=export_dxf.isChecked(),
                 )
 
             def _with_map_visible(action, *, hide_dialog: bool = True):
@@ -347,11 +370,61 @@ class PdfExportDialog:
                 else:
                     schedule_preview()
 
+            def _start_layer_export_then_finish(
+                opts: PdfExportOptions,
+                out_path: Path,
+            ) -> None:
+                """Export shapefiles/KML off the UI thread, then finish."""
+                nonlocal layer_worker
+                if not (opts.export_shapefiles or opts.export_kml or opts.export_dxf):
+                    _finish_export(out_path, opts, dpi_note="")
+                    return
+                if map_data is None:
+                    _fail_export(
+                        "Load project map data before exporting shapefiles or KML."
+                    )
+                    return
+
+                if progress is not None:
+                    progress.setLabelText("Writing layer files…")
+                    QApplication.processEvents()
+
+                worker = LayerFileExportWorker(
+                    opts,
+                    out_path.stem,
+                    settings.legend_config,
+                    map_data,
+                    parent=dialog,
+                )
+                layer_worker = worker
+
+                def on_progress(index: int, total: int, label: str) -> None:
+                    if progress is not None:
+                        progress.setLabelText(
+                            f"Writing layer files… ({index}/{total})\n{label}"
+                        )
+
+                def on_ok(notes: list) -> None:
+                    nonlocal layer_worker
+                    layer_worker = None
+                    _finish_export(out_path, opts, dpi_note="", layer_notes=list(notes))
+
+                def on_failed(message: str) -> None:
+                    nonlocal layer_worker
+                    layer_worker = None
+                    _fail_export(message)
+
+                worker.progress.connect(on_progress)
+                worker.finished_ok.connect(on_ok)
+                worker.failed.connect(on_failed)
+                worker.start()
+
             def _finish_export(
                 out_path: Path,
                 opts: PdfExportOptions,
                 *,
                 dpi_note: str,
+                layer_notes: list[str] | None = None,
             ) -> None:
                 nonlocal export_worker, progress
                 export_worker = None
@@ -361,6 +434,8 @@ class PdfExportDialog:
                 _set_export_busy(False)
                 save_pdf_output_directory(opts.output_dir)
                 msg = f"Saved:\n{out_path}"
+                if layer_notes:
+                    msg = f"{msg}\n\n" + "\n".join(layer_notes)
                 if dpi_note:
                     msg = f"{dpi_note}\n\n{msg}"
                 QMessageBox.information(dialog, "Export to PDF", msg)
@@ -377,7 +452,7 @@ class PdfExportDialog:
                 QMessageBox.critical(
                     dialog,
                     "Export to PDF",
-                    f"Could not write PDF:\n{message}",
+                    f"Could not complete export:\n{message}",
                 )
 
             def _capture_with_map_visible(
@@ -395,6 +470,8 @@ class PdfExportDialog:
             def do_export() -> None:
                 nonlocal export_worker, progress
                 if export_worker is not None and export_worker.isRunning():
+                    return
+                if layer_worker is not None and layer_worker.isRunning():
                     return
                 opts = current_options()
                 if not opts.output_dir.is_dir():
@@ -457,7 +534,7 @@ class PdfExportDialog:
                     except Exception as exc:  # noqa: BLE001
                         _fail_export(str(exc))
                         return
-                    _finish_export(out_path, opts, dpi_note="")
+                    _start_layer_export_then_finish(opts, out_path)
                     return
 
                 _set_export_busy(True)
@@ -490,7 +567,7 @@ class PdfExportDialog:
                 export_worker = worker
 
                 def on_ok(saved_path: str) -> None:
-                    _finish_export(Path(saved_path), opts, dpi_note="")
+                    _start_layer_export_then_finish(opts, Path(saved_path))
 
                 def on_failed(message: str) -> None:
                     _fail_export(message)
