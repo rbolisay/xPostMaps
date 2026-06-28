@@ -152,6 +152,17 @@ class Postplot4DDiffRow:
     firing_source_id: str = ""
 
 
+def feather_diff_deg(
+    *,
+    line_feather_deg: float | None,
+    navplan_feather_deg: float | None,
+) -> float | None:
+    """Difference between line and navplan feather (line minus navplan, degrees)."""
+    if line_feather_deg is None or navplan_feather_deg is None:
+        return None
+    return line_feather_deg - navplan_feather_deg
+
+
 def _parse_azimuth_degrees(line_direction: str) -> float | None:
     text = (line_direction or "").strip().replace("°", "")
     if not text:

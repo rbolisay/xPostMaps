@@ -7,6 +7,7 @@ from PySide6.QtWidgets import QWidget
 # Outer dialog margins + title bar (approximate client chrome).
 _DIALOG_CHROME_WIDTH = 48
 _DIALOG_CHROME_HEIGHT = 88
+_POSTPLOT_4D_HEIGHT_SCALE = 0.85
 
 
 def map_sheet_dialog_size(parent: QWidget | None) -> tuple[int, int]:
@@ -26,3 +27,9 @@ def map_sheet_dialog_size(parent: QWidget | None) -> tuple[int, int]:
         max(640, sheet_w + _DIALOG_CHROME_WIDTH),
         max(480, sheet_h + _DIALOG_CHROME_HEIGHT),
     )
+
+
+def postplot_4d_dialog_size(parent: QWidget | None) -> tuple[int, int]:
+    """Postplot 4D / 4D Stat Plot window size — map sheet width, 15% shorter height."""
+    width, height = map_sheet_dialog_size(parent)
+    return width, max(480, int(height * _POSTPLOT_4D_HEIGHT_SCALE))

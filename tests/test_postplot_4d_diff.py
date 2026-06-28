@@ -607,6 +607,14 @@ def test_diff_rows_include_optional_feather_values() -> None:
     assert rows[0].line_feather_deg == -2.5
 
 
+def test_feather_diff_is_line_minus_navplan() -> None:
+    from xpostmaps.core.postplot_4d_diff import feather_diff_deg
+
+    assert feather_diff_deg(line_feather_deg=-2.5, navplan_feather_deg=1.25) == -3.75
+    assert feather_diff_deg(line_feather_deg=None, navplan_feather_deg=1.25) is None
+    assert feather_diff_deg(line_feather_deg=-2.5, navplan_feather_deg=None) is None
+
+
 def test_4030_generated_preplot_position_matches_interval_and_rotation() -> None:
     preplot = Path("4D/4030/Preplot/4030_Mariner4D_Preplots_v2.190")
     result = parse_preplot_file(preplot)

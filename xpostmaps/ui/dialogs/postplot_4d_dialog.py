@@ -33,6 +33,7 @@ from xpostmaps.core.postplot_4d_diff import (
     Postplot4DDiffRow,
     calculate_match_diff_rows,
     enrich_diff_rows_from_positions,
+    feather_diff_deg,
     resolve_diff_map_epsg,
     source_has_streamers,
 )
@@ -43,7 +44,7 @@ from xpostmaps.core.postplot_4d_matching import (
     build_postplot_4d_rows,
 )
 from xpostmaps.parsers.metadata_parser import parse_file_metadata
-from xpostmaps.ui.dialog_size_utils import map_sheet_dialog_size
+from xpostmaps.ui.dialog_size_utils import postplot_4d_dialog_size
 from xpostmaps.ui.dialogs.postplot_4d_plot_pdf_dialog import Postplot4DStatPlotPdfDialog
 from xpostmaps.ui.dialogs.base_dialog import SingleInstanceDialog
 from xpostmaps.ui.postplot_4d_stat_plot import Postplot4DStatPlotView
@@ -541,10 +542,13 @@ class Postplot4DDialog:
             # navplan baseline. Line Feather is the firing-source streamer
             # feather: show it whenever streamers were detected in the P111/P190
             # (line feather values present), even for a preplot baseline.
+            # Feather Diff (line minus navplan) requires navplan baseline and streamers.
+            streamers_detected = _source_has_streamers_for_match(match_row)
             show_navplan_feather = match_row.baseline_kind == "navplan"
             show_line_feather = any(
                 diff_row.line_feather_deg is not None for diff_row in diff_rows
-            ) or _source_has_streamers_for_match(match_row)
+            ) or streamers_detected
+            show_feather_diff = show_navplan_feather and streamers_detected
             column_labels = [
                 "Shotpoint No.",
                 baseline_h1,
@@ -565,6 +569,8 @@ class Postplot4DDialog:
             )
             if show_line_feather:
                 column_labels.append("Line Feather")
+            if show_feather_diff:
+                column_labels.append("Feather Diff")
             header = diff_table.horizontalHeader()
             header.blockSignals(True)
             header.setSectionResizeMode(QHeaderView.ResizeMode.Fixed)
@@ -634,6 +640,15 @@ class Postplot4DDialog:
                     )
                     if show_line_feather:
                         values.append(_format_feather(diff_row.line_feather_deg))
+                    if show_feather_diff:
+                        values.append(
+                            _format_feather(
+                                feather_diff_deg(
+                                    line_feather_deg=diff_row.line_feather_deg,
+                                    navplan_feather_deg=diff_row.navplan_feather_deg,
+                                )
+                            )
+                        )
                     for col, value in enumerate(values):
                         _set_diff_table_item(diff_table, row_idx, col, value)
             finally:
@@ -713,7 +728,8 @@ class Postplot4DDialog:
                     )
                 else:
                     host_dialog.setWindowTitle(f"{match_row.line_name} 4D Stat Plot")
-                host_dialog.showMaximized()
+                plot_w, plot_h = postplot_4d_dialog_size(parent)
+                host_dialog.resize(plot_w, plot_h)
             stack.setCurrentIndex(2)
             QTimer.singleShot(0, plot_view.refresh)
             QTimer.singleShot(100, plot_view.refresh)
@@ -1373,7 +1389,7 @@ class Postplot4DDialog:
         diff_table_panel = QWidget()
         diff_toolbar = QHBoxLayout()
 
-        plot_w, plot_h = map_sheet_dialog_size(parent)
+        plot_w, plot_h = postplot_4d_dialog_size(parent)
 
         return SingleInstanceDialog.show_dialog(
             cls.KEY,
