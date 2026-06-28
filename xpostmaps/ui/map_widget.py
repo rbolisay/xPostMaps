@@ -85,6 +85,7 @@ from xpostmaps.core.map_grid_interval import (
     MapScaleHarmonization,
     compute_map_scale_harmonization,
     ticks_for_interval,
+    zebra_segment_bounds_px,
 )
 from xpostmaps.utils.vector_export import (
     VectorExportContext,
@@ -348,18 +349,29 @@ class MapFrameOverlay(QWidget):
             self._plot_item.getAxis("left"), y0, y1, height
         )
 
+        fixed = self._fixed_tick_interval_m
+        if fixed is not None and fixed > 0:
+            x_bounds = zebra_segment_bounds_px(x0, x1, left, right, fixed)
+            y_bounds = zebra_segment_bounds_px(y0, y1, top, bottom, fixed)
+        else:
+            def px(value: float) -> float:
+                return left + (value - x0) / (x1 - x0) * width
+
+            def py(value: float) -> float:
+                return bottom - (value - y0) / (y1 - y0) * height
+
+            x_bounds = [left]
+            x_bounds += sorted(p for v in x_ticks if left < (p := px(v)) < right)
+            x_bounds.append(right)
+            y_bounds = [top]
+            y_bounds += sorted(p for v in y_ticks if top < (p := py(v)) < bottom)
+            y_bounds.append(bottom)
+
         def px(value: float) -> float:
             return left + (value - x0) / (x1 - x0) * width
 
         def py(value: float) -> float:
             return bottom - (value - y0) / (y1 - y0) * height
-
-        x_bounds = [left]
-        x_bounds += sorted(p for v in x_ticks if left < (p := px(v)) < right)
-        x_bounds.append(right)
-        y_bounds = [top]
-        y_bounds += sorted(p for v in y_ticks if top < (p := py(v)) < bottom)
-        y_bounds.append(bottom)
 
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing, False)

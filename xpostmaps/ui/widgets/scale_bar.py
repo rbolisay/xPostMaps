@@ -5,7 +5,7 @@ from __future__ import annotations
 from PySide6.QtGui import QColor, QFont, QPainter, QPen
 from PySide6.QtWidgets import QSizePolicy, QWidget
 
-from xpostmaps.core.map_grid_interval import SCALE_BAR_SEGMENTS
+from xpostmaps.core.map_grid_interval import SCALE_BAR_SEGMENTS, format_scale_distance_label
 from xpostmaps.ui.theme import BG_PRINT, TEXT_PRINT, TEXT_PRIMARY
 
 _MARGIN = 8
@@ -59,8 +59,8 @@ class ScaleBarWidget(QWidget):
         mid_km = self._km / 2
         for label, frac in (
             ("0", 0.0),
-            (self._distance_label(mid_km), 0.5),
-            (self._distance_label(self._km), 1.0),
+            (format_scale_distance_label(mid_km), 0.5),
+            (format_scale_distance_label(self._km), 1.0),
         ):
             x = x0 + bar_w * frac
             tw = painter.fontMetrics().horizontalAdvance(label)
@@ -75,16 +75,3 @@ class ScaleBarWidget(QWidget):
         painter.setPen(QPen(ink, 1))
         painter.drawRect(int(x0), bar_y, int(bar_w), bar_h)
         painter.end()
-
-    @staticmethod
-    def _distance_label(km: float) -> str:
-        if km >= 1:
-            if km >= 10:
-                return f"{km:.0f} km"
-            text = f"{km:.1f}".rstrip("0").rstrip(".")
-            return f"{text} km"
-        meters = km * 1000
-        if meters >= 10:
-            return f"{meters:.0f} m"
-        text = f"{meters:.1f}".rstrip("0").rstrip(".")
-        return f"{text} m"
