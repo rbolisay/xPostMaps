@@ -1051,8 +1051,15 @@ class Database:
         self,
         name: str,
         sequence_ids: list[str],
+        record_types: tuple[RecordType, ...] = (RecordType.SOURCE,),
     ) -> list[PositionRecord]:
-        """Fetch SOURCE records only for the requested sequence groups."""
+        """Fetch records of the requested types for the given sequence groups.
+
+        Defaults to SOURCE-only (used by the diff calculators). Pass additional
+        types (e.g. VESSEL) to back-fill IDs without loading every project
+        position — a targeted query is orders of magnitude cheaper than reading
+        all nav positions on large surveys.
+        """
         project_id = self.get_project_id(name)
         if project_id is None:
             return []
@@ -1066,6 +1073,8 @@ class Database:
         if not groups:
             return []
 
+        type_values = [rtype.value for rtype in record_types] or [RecordType.SOURCE.value]
+        type_placeholders = ",".join("?" for _ in type_values)
         records: list[PositionRecord] = []
         sorted_groups = sorted(groups)
         chunk_size = 250
@@ -1075,7 +1084,7 @@ class Database:
                 "(file_name=? AND sequence_no=? AND line_name=?)"
                 for _file_name, _sequence_no, _line_name in chunk
             )
-            params: list[object] = [project_id, RecordType.SOURCE.value]
+            params: list[object] = [project_id, *type_values]
             for file_name, sequence_no, line_name in chunk:
                 params.extend([file_name, sequence_no, line_name])
             rows = self._conn.execute(
@@ -1084,7 +1093,7 @@ class Database:
                        subline, point_num, x, y, depth, latitude, longitude,
                        vessel_id, source_id
                 FROM positions
-                WHERE project_id=? AND record_type=? AND ({clauses})
+                WHERE project_id=? AND record_type IN ({type_placeholders}) AND ({clauses})
                 ORDER BY id
                 """,
                 params,

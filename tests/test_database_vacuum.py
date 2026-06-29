@@ -151,3 +151,15 @@ def test_load_source_positions_for_sequence_ids_only_returns_requested_sources(
     assert rows[0].record_type == RecordType.SOURCE
     assert rows[0].file_name == "line.p190"
     assert rows[0].point_num == 1001
+
+    # Requesting VESSEL too returns the matching SOURCE + VESSEL for that group
+    # only (used by the 4D Stat dialog to back-fill IDs without loading all
+    # project positions).
+    both = db.load_source_positions_for_sequence_ids(
+        project_name,
+        ["line.p190|0001|LINE01|source"],
+        record_types=(RecordType.SOURCE, RecordType.VESSEL),
+    )
+    types = sorted(record.record_type for record in both)
+    assert types == [RecordType.SOURCE, RecordType.VESSEL]
+    assert all(record.file_name == "line.p190" for record in both)

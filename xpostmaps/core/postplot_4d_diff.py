@@ -697,10 +697,42 @@ def enrich_diff_rows_from_positions(
     match_row: Postplot4DMatchRow,
 ) -> list[Postplot4DDiffRow]:
     """Fill missing vessel / firing-source IDs on saved diff rows from nav positions."""
-    if not rows or not positions:
+    if not rows:
         return rows
-    sources = source_shotpoints_for_match(positions, match_row)
-    vessels = vessel_shotpoints_for_match(positions, match_row)
+    # Fast path: every saved row already carries both IDs (diffs calculated
+    # after the per-shotpoint ID feature), so no nav-position scan is needed.
+    if all(row.vessel_id and row.firing_source_id for row in rows):
+        return rows
+    if not positions or not match_row.sequence_id:
+        return rows
+    # Single combined pass over nav positions (was two full O(N) scans). On a
+    # 1.5M-record project this halves the per-click enrichment cost.
+    target_group = sequence_group_id(match_row.sequence_id)
+    subline = match_row.subline
+    sources: dict[int, PositionRecord] = {}
+    vessels: dict[int, str] = {}
+    for record in positions:
+        record_type = record.record_type
+        if record_type is RecordType.SOURCE:
+            if record.point_num <= 0:
+                continue
+            if make_sequence_group_id(
+                record.file_name, record.sequence_no, record.line_name
+            ) != target_group:
+                continue
+            if subline and record.subline and record.subline != subline:
+                continue
+            sources[record.point_num] = record
+        elif record_type is RecordType.VESSEL:
+            if record.point_num <= 0 or not record.vessel_id:
+                continue
+            if make_sequence_group_id(
+                record.file_name, record.sequence_no, record.line_name
+            ) != target_group:
+                continue
+            if subline and record.subline and record.subline != subline:
+                continue
+            vessels[record.point_num] = record.vessel_id
     enriched: list[Postplot4DDiffRow] = []
     changed = False
     for row in rows:

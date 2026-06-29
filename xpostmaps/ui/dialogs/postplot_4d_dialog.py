@@ -27,7 +27,7 @@ from PySide6.QtWidgets import (
 from xpostmaps.core.coord_format import GeoDisplayFormatter, format_geo_from_projected
 from xpostmaps.core.crs_utils import geographic_epsg_from_map, normalize_epsg
 from xpostmaps.core.database import Database
-from xpostmaps.core.models import MapData, PositionRecord, ProjectSettings
+from xpostmaps.core.models import MapData, PositionRecord, ProjectSettings, RecordType
 from xpostmaps.core.postplot_4d_diff import (
     CrsMismatchError,
     Postplot4DDiffRow,
@@ -295,6 +295,9 @@ class Postplot4DDialog:
         }
         row_cache: dict[BaselineKind, list[Postplot4DMatchRow]] = {}
         crs_cache: dict[str, str] = {}
+        # Sequences whose saved diffs we already tried to ID-enrich this session,
+        # so re-clicking a row never rescans the (1.5M-record) nav positions again.
+        enriched_sequences: set[str] = set()
         diff_rows: list[Postplot4DDiffRow] = []
         bulk_recalc_worker: DiffStatRecalcWorker | None = None
         single_recalc_worker: Single4DStatCalcWorker | None = None
@@ -513,7 +516,29 @@ class Postplot4DDialog:
                 match_row.baseline_kind,
                 match_row.sequence_id,
             )
-            return enrich_diff_rows_from_positions(rows, positions(), match_row)
+            # Saved diffs are a fast (~6 ms) DB read. Only scan nav positions to
+            # backfill Vessel / Firing-Source IDs when a row is actually missing
+            # one, and only once per sequence per session — otherwise every click
+            # would re-scan the whole project's positions (slow on large surveys).
+            if not rows:
+                return rows
+            if all(row.vessel_id and row.firing_source_id for row in rows):
+                return rows
+            if match_row.sequence_id in enriched_sequences:
+                return rows
+            # Targeted load: only this sequence's SOURCE/VESSEL records, not the
+            # whole project's positions (which can be millions of rows).
+            enrich_positions = database.load_source_positions_for_sequence_ids(
+                project_name.strip(),
+                [match_row.sequence_id],
+                record_types=(RecordType.SOURCE, RecordType.VESSEL),
+            )
+            enriched = enrich_diff_rows_from_positions(rows, enrich_positions, match_row)
+            enriched_sequences.add(match_row.sequence_id)
+            # Persist the backfilled IDs so future loads stay pure DB reads.
+            if enriched is not rows:
+                persist_diff_rows(match_row, enriched, notify=False)
+            return enriched
 
         def calculate_and_persist_diffs(
             match_row: Postplot4DMatchRow,
