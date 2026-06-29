@@ -254,18 +254,8 @@ class Postplot4DStatPlotView(QWidget):
         toolbar.addStretch()
         toolbar.addWidget(self._subline_nav, alignment=top)
         toolbar.addStretch()
-        back_col = QVBoxLayout()
-        back_col.setContentsMargins(0, 0, 0, 0)
-        back_col.setSpacing(2)
-        back_col.addWidget(back_btn, alignment=Qt.AlignmentFlag.AlignRight)
-        self._acceptance = QLabel("Acceptance: \u2014")
-        self._acceptance.setAlignment(
-            Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
-        )
-        back_col.addWidget(self._acceptance, alignment=Qt.AlignmentFlag.AlignRight)
-        toolbar.addLayout(back_col)
+        toolbar.addWidget(back_btn, alignment=top)
         root.addLayout(toolbar)
-        self._update_acceptance(None)
 
         self._title = QLabel("")
         self._title.setStyleSheet("font-weight: 600; color: #e6edf3;")
@@ -354,8 +344,9 @@ class Postplot4DStatPlotView(QWidget):
         self._main_splitter.setChildrenCollapsible(False)
         self._main_splitter.addWidget(self._tabs)
         self._main_splitter.addWidget(self._bottom_tabs)
-        self._main_splitter.setStretchFactor(0, 3)
-        self._main_splitter.setStretchFactor(1, 2)
+        # ~72% plot / ~28% bottom (+20% plot area vs the former 60/40 split).
+        self._main_splitter.setStretchFactor(0, 18)
+        self._main_splitter.setStretchFactor(1, 7)
         root.addWidget(self._main_splitter, stretch=1)
 
         self._apply_saved_plot_view_settings()
@@ -372,9 +363,9 @@ class Postplot4DStatPlotView(QWidget):
         total = self._main_splitter.height()
         if total < 120:
             return
-        # ~40% for Survey Specs / Plot Settings — plot area ~10% shorter than before.
-        bottom = min(max(int(total * 0.40), 280), 420)
-        self._main_splitter.setSizes([max(total - bottom, 180), bottom])
+        # Bottom panel ~28% of splitter height (was ~40%).
+        bottom = min(max(int(total * 0.28), 224), 336)
+        self._main_splitter.setSizes([max(total - bottom, 216), bottom])
         self._splitter_sized = True
 
     def _reset_splitter_sizes(self) -> None:
@@ -641,7 +632,6 @@ class Postplot4DStatPlotView(QWidget):
         if not self._sets:
             self._survey_panel.set_sequences(sequence_nos, self._survey_panel.excluded_shotpoints())
             self._survey_panel.set_evaluation(None, sequence_nos)
-            self._update_acceptance(None)
             return
         excluded = self._survey_panel.excluded_shotpoints()
         evaluation = evaluate_survey_specs(
@@ -650,28 +640,6 @@ class Postplot4DStatPlotView(QWidget):
             excluded_by_sequence=excluded,
         )
         self._survey_panel.set_evaluation(evaluation, sequence_nos)
-        self._update_acceptance(evaluation)
-
-    def _update_acceptance(self, evaluation: SurveyEvaluation | None) -> None:
-        if evaluation is None or evaluation.spec_count == 0:
-            self._acceptance.setText("Acceptance: \u2014")
-            self._acceptance.setStyleSheet("color: #8b949e; font-size: 12px;")
-            return
-        if evaluation.accepted and evaluation.has_warning:
-            self._acceptance.setText("Acceptance: PASS (warn)")
-            self._acceptance.setStyleSheet(
-                "color: #d29922; font-size: 13px; font-weight: 700;"
-            )
-        elif evaluation.accepted:
-            self._acceptance.setText("Acceptance: PASS")
-            self._acceptance.setStyleSheet(
-                "color: #3fb950; font-size: 13px; font-weight: 700;"
-            )
-        else:
-            self._acceptance.setText("Acceptance: FAIL")
-            self._acceptance.setStyleSheet(
-                "color: #f85149; font-size: 13px; font-weight: 700;"
-            )
 
     def survey_evaluation(self) -> SurveyEvaluation | None:
         """Current survey acceptance evaluation (None when no data)."""
