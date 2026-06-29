@@ -9,7 +9,12 @@ from PySide6.QtGui import QPen
 from xpostmaps.core.models import LineStyle
 from xpostmaps.ui.map_batch import concat_polylines, normalize_line_style
 from xpostmaps.ui.map_gl_overlay import MapGlLineOverlay
-from xpostmaps.utils.spatial_clip import clip_arrays_to_bbox, polyline_runs
+from xpostmaps.utils.spatial_clip import (
+    SCREEN_OVERVIEW_BUDGET,
+    clip_arrays_to_bbox,
+    polyline_runs,
+    screen_line_geometry,
+)
 from xpostmaps.utils.vector_export import (
     VectorExportContext,
     merge_line_parts,
@@ -67,7 +72,9 @@ class ResidentGlLineLayer:
         plot_items: list[pg.GraphicsItem],
     ) -> None:
         self._layer_id = ResidentGlLineLayer._next_layer_id
-        ResidentGlLineLayer._next_layer_id += 1
+        # Second overlay id holds the decimated overview LOD, toggled during motion.
+        self._overview_layer_id = ResidentGlLineLayer._next_layer_id + 1
+        ResidentGlLineLayer._next_layer_id += 2
         self._parts = parts
         self._color_parts = color_parts
         self._map_layer = map_layer
@@ -88,6 +95,8 @@ class ResidentGlLineLayer:
         self._settle_cpu_items: list[pg.PlotCurveItem] = []
         self._export_mode = False
         self._visible = True
+        self._motion_active = False
+        self._has_overview = False
         rgba = pen.color()
         self._gl_color = (
             rgba.redF(),
@@ -244,13 +253,70 @@ class ResidentGlLineLayer:
             (rgba.red(), rgba.green(), rgba.blue(), rgba.alpha()),
         )
 
+    @staticmethod
+    def _expand_segment_pairs(
+        px: np.ndarray,
+        py: np.ndarray,
+    ) -> tuple[np.ndarray, np.ndarray] | None:
+        """Polyline -> GL_LINES vertex pairs, dropping pairs that touch NaN gaps."""
+        if px.size < 2:
+            return None
+        finite = (
+            np.isfinite(px[:-1])
+            & np.isfinite(py[:-1])
+            & np.isfinite(px[1:])
+            & np.isfinite(py[1:])
+        )
+        if not np.any(finite):
+            return None
+        x0 = px[:-1][finite]
+        x1 = px[1:][finite]
+        y0 = py[:-1][finite]
+        y1 = py[1:][finite]
+        xp = np.empty(x0.size * 2, dtype=np.float64)
+        xp[0::2] = x0
+        xp[1::2] = x1
+        yp = np.empty(y0.size * 2, dtype=np.float64)
+        yp[0::2] = y0
+        yp[1::2] = y1
+        return xp, yp
+
+    def _run_segments(
+        self,
+        px: np.ndarray,
+        py: np.ndarray,
+        colors: np.ndarray | None,
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray | None] | None:
+        """Expand one polyline into GL_LINES vertex pairs (optionally colored)."""
+        if self._baked_dash:
+            return self._dash_segments(px, py, colors)
+        if colors is not None and colors.shape[0] == px.size:
+            xp, yp, cp = self._segment_gl_geometry(px, py, colors)
+            if xp.size == 0:
+                return None
+            return xp, yp, cp
+        pairs = self._expand_segment_pairs(px, py)
+        if pairs is None:
+            return None
+        return pairs[0], pairs[1], None
+
     def upload_pending_batch(self) -> bool:
-        """Upload the next batch of line strips to GL. Returns True if more remain."""
+        """Upload ALL line runs as a single ``GLLinePlotItem`` (one draw call).
+
+        pyqtgraph repaints each GL item with a fixed per-item Python/GL cost
+        every frame, so one item per survey segment makes pan/zoom scale with
+        the *number of segments* rather than the GPU's vertex throughput.
+        Merging every run into one ``mode="lines"`` item (GL_LINES vertex pairs)
+        collapses thousands of per-frame paint calls to one; per-vertex colors
+        keep conditional layers identical without splitting into many strips.
+        """
         if not self._pending_runs:
             return False
-        batch = self._pending_runs[:_GL_UPLOADS_PER_TICK]
-        del self._pending_runs[: len(batch)]
-        for run_index in batch:
+        x_chunks: list[np.ndarray] = []
+        y_chunks: list[np.ndarray] = []
+        want_colors = self._color_parts is not None
+        color_chunks: list[np.ndarray] = []
+        for run_index in self._pending_runs:
             if run_index in self._uploaded_runs:
                 continue
             px, py = self._parts[run_index]
@@ -259,26 +325,68 @@ class ResidentGlLineLayer:
             if px.size < 2:
                 continue
             colors = None
-            if self._color_parts is not None and run_index < len(self._color_parts):
-                colors = np.asarray(self._color_parts[run_index], dtype=np.float32)
-            if colors is not None:
-                # Conditional colors render exactly like default lines: split the
-                # polyline into contiguous same-color segments and upload each as
-                # a uniform-color line_strip. No per-vertex color buffer and no
-                # doubled "lines" geometry, so pan/zoom stays transform-only at
-                # the same GPU cost as a plain colored line.
-                colored_runs = self._colored_runs(px, py, colors)
-                if not colored_runs:
-                    colored_runs = [(px, py, self._gl_color)]
-                for rx, ry, color in colored_runs:
-                    key = self._next_gl_run_key
-                    self._next_gl_run_key += 1
-                    self._upload_uniform_run(key, rx, ry, color)
-            else:
-                self._upload_uniform_run(run_index, px, py, self._gl_color)
-            self._uploaded_runs.add(run_index)
-        self._gl_overlay.set_layer_visible(self._layer_id, self._visible and not self._export_mode)
-        return bool(self._pending_runs)
+            if want_colors and self._color_parts is not None and run_index < len(
+                self._color_parts
+            ):
+                candidate = np.asarray(self._color_parts[run_index], dtype=np.float32)
+                if candidate.shape[0] == px.size:
+                    colors = candidate
+            seg = self._run_segments(px, py, colors)
+            if seg is None:
+                continue
+            xp, yp, cp = seg
+            x_chunks.append(xp)
+            y_chunks.append(yp)
+            if want_colors:
+                if cp is None or cp.shape[0] != xp.size:
+                    cp = np.empty((xp.size, 4), dtype=np.float32)
+                    cp[:] = self._gl_color
+                color_chunks.append(cp)
+        self._uploaded_runs.update(self._pending_runs)
+        self._pending_runs.clear()
+        if not x_chunks:
+            return False
+        merged_x = np.concatenate(x_chunks)
+        merged_y = np.concatenate(y_chunks)
+        color_arg: tuple[float, float, float, float] | np.ndarray = self._gl_color
+        if want_colors and color_chunks:
+            merged_colors = np.concatenate(color_chunks, axis=0)
+            if merged_colors.shape[0] == merged_x.size:
+                color_arg = merged_colors
+        self._gl_overlay.add_line_run(
+            self._layer_id,
+            0,
+            merged_x,
+            merged_y,
+            color=color_arg,
+            width=self._gl_width,
+            mode="lines",
+        )
+        # Decimated drag preview (same 40K RDP overview LOD the CPU curve used),
+        # uploaded once as a uniform-color GL_LINES item so motion stays
+        # transform-only instead of redrawing full detail every frame.
+        if self._index_x.size > SCREEN_OVERVIEW_BUDGET:
+            ov_x, ov_y = screen_line_geometry(
+                self._index_x, self._index_y, budget=SCREEN_OVERVIEW_BUDGET
+            )
+            if ov_x.size and ov_x.size < self._index_x.size:
+                pairs = self._expand_segment_pairs(
+                    np.asarray(ov_x, dtype=np.float64),
+                    np.asarray(ov_y, dtype=np.float64),
+                )
+                if pairs is not None:
+                    self._gl_overlay.add_line_run(
+                        self._overview_layer_id,
+                        0,
+                        pairs[0],
+                        pairs[1],
+                        color=self._gl_color,
+                        width=self._gl_width,
+                        mode="lines",
+                    )
+                    self._has_overview = True
+        self._apply_visibility()
+        return False
 
     def _upload_uniform_run(
         self,
@@ -309,10 +417,24 @@ class ResidentGlLineLayer:
             mode=mode,
         )
 
+    def _apply_visibility(self) -> None:
+        """Pick full-detail vs decimated overview item based on motion state."""
+        if self._export_mode or self._settle_cpu_items:
+            return
+        show_overview = self._visible and self._motion_active and self._has_overview
+        show_full = self._visible and not show_overview
+        self._gl_overlay.set_layer_visible(self._layer_id, show_full)
+        if self._has_overview:
+            self._gl_overlay.set_layer_visible(self._overview_layer_id, show_overview)
+
     def set_gl_visible(self, visible: bool) -> None:
         self._visible = visible
-        if not self._export_mode and not self._settle_cpu_items:
-            self._gl_overlay.set_layer_visible(self._layer_id, visible)
+        self._apply_visibility()
+
+    def set_motion_overview(self, active: bool) -> None:
+        """Swap to the decimated GL preview while dragging (transform-only)."""
+        self._motion_active = active
+        self._apply_visibility()
 
     def apply_settled_detail(
         self,
@@ -336,6 +458,8 @@ class ResidentGlLineLayer:
         pad_y = max((by1 - by0) * 0.02, 1.0)
         view_bbox = (bx0 - pad_x, bx1 + pad_x, by0 - pad_y, by1 + pad_y)
         self._gl_overlay.set_layer_visible(self._layer_id, False)
+        if self._has_overview:
+            self._gl_overlay.set_layer_visible(self._overview_layer_id, False)
         for run_index, (px, py) in enumerate(self._parts):
             px = np.asarray(px, dtype=np.float64)
             py = np.asarray(py, dtype=np.float64)
@@ -381,8 +505,7 @@ class ResidentGlLineLayer:
             if item in self._plot_items:
                 self._plot_items.remove(item)
         self._settle_cpu_items.clear()
-        if not self._export_mode:
-            self._gl_overlay.set_layer_visible(self._layer_id, self._visible)
+        self._apply_visibility()
 
     def _pdf_line_pen(self, pen_scale: float) -> QPen:
         """Screen-matched cosmetic width for vector PDF device coordinates."""
@@ -402,6 +525,8 @@ class ResidentGlLineLayer:
         self.clear_settled_detail()
         self._export_mode = True
         self._gl_overlay.set_layer_visible(self._layer_id, False)
+        if self._has_overview:
+            self._gl_overlay.set_layer_visible(self._overview_layer_id, False)
         self._clear_cpu_items()
         line_pen = self._export_pen
         if vector_ctx is not None:
@@ -469,7 +594,7 @@ class ResidentGlLineLayer:
     def end_export(self) -> None:
         self._export_mode = False
         self._clear_cpu_items()
-        self._gl_overlay.set_layer_visible(self._layer_id, self._visible)
+        self._apply_visibility()
 
     def _clear_cpu_items(self) -> None:
         for item in self._cpu_items:
@@ -501,6 +626,7 @@ class ResidentGlLineLayer:
     def clear(self) -> None:
         self.clear_settled_detail()
         self._gl_overlay.clear_layer(self._layer_id)
+        self._gl_overlay.clear_layer(self._overview_layer_id)
         self._clear_cpu_items()
         self._pending_runs.clear()
         self._uploaded_runs.clear()

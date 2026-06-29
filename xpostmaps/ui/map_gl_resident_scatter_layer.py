@@ -7,7 +7,11 @@ import pyqtgraph as pg
 
 from xpostmaps.ui.map_batch import shotpoint_marker_coords
 from xpostmaps.ui.map_vector_dots import VectorDotsItem
-from xpostmaps.utils.spatial_clip import clip_arrays_to_bbox
+from xpostmaps.utils.spatial_clip import (
+    SCREEN_OVERVIEW_BUDGET,
+    clip_arrays_to_bbox,
+    screen_scatter_geometry,
+)
 from xpostmaps.utils.vector_export import VectorExportContext, prepare_vector_scatter_geometry
 
 
@@ -35,7 +39,10 @@ class ResidentGlScatterLayer:
         plot_items: list[pg.GraphicsItem],
     ) -> None:
         self._layer_id = ResidentGlScatterLayer._next_layer_id
-        ResidentGlScatterLayer._next_layer_id += 1
+        # Second overlay id holds the decimated overview LOD so its visibility can
+        # be toggled independently of the full-detail item.
+        self._overview_layer_id = ResidentGlScatterLayer._next_layer_id + 1
+        ResidentGlScatterLayer._next_layer_id += 2
         self._parts = parts
         self._color_parts = color_parts
         self._map_layer = map_layer
@@ -49,6 +56,8 @@ class ResidentGlScatterLayer:
         self._cpu_items: list[pg.GraphicsItem] = []
         self._export_mode = False
         self._visible = True
+        self._motion_active = False
+        self._has_overview = False
         self._gl_color = (
             rgba[0] / 255.0,
             rgba[1] / 255.0,
@@ -84,11 +93,21 @@ class ResidentGlScatterLayer:
         return xs, ys, self._rgba
 
     def upload_pending_batch(self) -> bool:
+        """Upload ALL shotpoints as a single GL scatter item (one draw call).
+
+        pyqtgraph pays a fixed Python/GL cost per ``GLScatterPlotItem`` *every
+        frame*; with one item per survey run that overhead (not the vertex
+        count) dominates pan/zoom on dense surveys. Merging every run into one
+        item collapses thousands of per-frame paint calls down to one while the
+        uploaded vertex count — and therefore GPU memory — stays identical.
+        """
         if not self._pending_runs:
             return False
-        batch = self._pending_runs[:_GL_UPLOADS_PER_TICK]
-        del self._pending_runs[: len(batch)]
-        for run_index in batch:
+        marker_x_chunks: list[np.ndarray] = []
+        marker_y_chunks: list[np.ndarray] = []
+        want_colors = self._color_parts is not None
+        color_chunks: list[np.ndarray] = []
+        for run_index in self._pending_runs:
             if run_index in self._uploaded_runs:
                 continue
             px, py = self._parts[run_index]
@@ -97,31 +116,74 @@ class ResidentGlScatterLayer:
             marker_x, marker_y = shotpoint_marker_coords([(px, py)])
             if marker_x.size < 1:
                 continue
-            color_arg: tuple[float, float, float, float] | np.ndarray = self._gl_color
-            if self._color_parts is not None and run_index < len(self._color_parts):
-                colors = np.asarray(self._color_parts[run_index], dtype=np.float32)
-                finite = np.isfinite(px) & np.isfinite(py)
-                if colors.shape[0] == px.size:
-                    color_arg = np.ascontiguousarray(colors[finite], dtype=np.float32)
+            marker_x_chunks.append(marker_x)
+            marker_y_chunks.append(marker_y)
+            if want_colors:
+                run_colors: np.ndarray | None = None
+                if self._color_parts is not None and run_index < len(self._color_parts):
+                    colors = np.asarray(self._color_parts[run_index], dtype=np.float32)
+                    finite = np.isfinite(px) & np.isfinite(py)
+                    if colors.shape[0] == px.size:
+                        run_colors = np.ascontiguousarray(colors[finite], dtype=np.float32)
+                if run_colors is None or run_colors.shape[0] != marker_x.size:
+                    run_colors = np.empty((marker_x.size, 4), dtype=np.float32)
+                    run_colors[:] = self._gl_color
+                color_chunks.append(run_colors)
+        self._uploaded_runs.update(self._pending_runs)
+        self._pending_runs.clear()
+        if not marker_x_chunks:
+            return False
+        merged_x = np.concatenate(marker_x_chunks)
+        merged_y = np.concatenate(marker_y_chunks)
+        color_arg: tuple[float, float, float, float] | np.ndarray = self._gl_color
+        if want_colors and color_chunks:
+            merged_colors = np.concatenate(color_chunks, axis=0)
+            if merged_colors.shape[0] == merged_x.size:
+                color_arg = merged_colors
+        self._gl_overlay.add_scatter_run(
+            self._layer_id,
+            0,
+            merged_x,
+            merged_y,
+            color=color_arg,
+            size=self._screen_size,
+        )
+        # Decimated drag preview (same 40K uniform-pick LOD the CPU overview used),
+        # uploaded once as its own GPU-resident item so motion stays transform-only.
+        overview_x, overview_y = screen_scatter_geometry(
+            merged_x, merged_y, budget=SCREEN_OVERVIEW_BUDGET
+        )
+        if overview_x.size and overview_x.size < merged_x.size:
             self._gl_overlay.add_scatter_run(
-                self._layer_id,
-                run_index,
-                marker_x,
-                marker_y,
-                color=color_arg,
+                self._overview_layer_id,
+                0,
+                overview_x,
+                overview_y,
+                color=self._gl_color,
                 size=self._screen_size,
             )
-            self._uploaded_runs.add(run_index)
-        self._gl_overlay.set_scatter_layer_visible(
-            self._layer_id,
-            self._visible and not self._export_mode,
-        )
-        return bool(self._pending_runs)
+            self._has_overview = True
+        self._apply_visibility()
+        return False
+
+    def _apply_visibility(self) -> None:
+        """Pick full-detail vs decimated overview item based on motion state."""
+        if self._export_mode:
+            return
+        show_overview = self._visible and self._motion_active and self._has_overview
+        show_full = self._visible and not show_overview
+        self._gl_overlay.set_scatter_layer_visible(self._layer_id, show_full)
+        if self._has_overview:
+            self._gl_overlay.set_scatter_layer_visible(self._overview_layer_id, show_overview)
 
     def set_gl_visible(self, visible: bool) -> None:
         self._visible = visible
-        if not self._export_mode:
-            self._gl_overlay.set_scatter_layer_visible(self._layer_id, visible)
+        self._apply_visibility()
+
+    def set_motion_overview(self, active: bool) -> None:
+        """Swap to the decimated GL preview while dragging (transform-only)."""
+        self._motion_active = active
+        self._apply_visibility()
 
     def prepare_export(
         self,
@@ -134,6 +196,8 @@ class ResidentGlScatterLayer:
         """Swap GPU scatter for crisp vector circles sized to match the screen."""
         self._export_mode = True
         self._gl_overlay.set_scatter_layer_visible(self._layer_id, False)
+        if self._has_overview:
+            self._gl_overlay.set_scatter_layer_visible(self._overview_layer_id, False)
         self._clear_cpu_items()
         diameter_px = max(float(self._export_size) * _EXPORT_DOT_SIZE_SCALE, 1.25)
         if vector_ctx is not None:
@@ -180,7 +244,7 @@ class ResidentGlScatterLayer:
     def end_export(self) -> None:
         self._export_mode = False
         self._clear_cpu_items()
-        self._gl_overlay.set_scatter_layer_visible(self._layer_id, self._visible)
+        self._apply_visibility()
 
     def _clear_cpu_items(self) -> None:
         for item in self._cpu_items:
@@ -197,6 +261,7 @@ class ResidentGlScatterLayer:
 
     def clear(self) -> None:
         self._gl_overlay.clear_scatter_layer(self._layer_id)
+        self._gl_overlay.clear_scatter_layer(self._overview_layer_id)
         self._clear_cpu_items()
         self._pending_runs.clear()
         self._uploaded_runs.clear()

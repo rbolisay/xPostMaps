@@ -1490,6 +1490,10 @@ class PostplotMapWidget(QWidget):
         bbox: tuple[float, float, float, float],
     ) -> None:
         """Swap to full GPU detail after pan/zoom stops — pan itself stays transform-only."""
+        # Leave motion overview LOD before restoring full detail so set_gl_visible
+        # calls below show the full-resolution item, not the decimated preview.
+        for layer in self._all_gl_layers():
+            layer.set_motion_overview(False)
         self._update_overview_visibility(bbox)
         if not self._gl_overlay.available or not self._gl_layers_ready():
             self._frame.update()
@@ -1505,30 +1509,28 @@ class PostplotMapWidget(QWidget):
         self._frame.update()
 
     def _enter_gl_motion_mode(self) -> None:
-        """Fast placeholder while dragging; full GPU detail restores on settle."""
+        """Fast transform-only drag: swap to the decimated GL overview at wide zoom.
+
+        Each layer is one merged GL item (one draw call), plus a second resident
+        item holding the same 40K decimated LOD the CPU overview used. At overview
+        zoom we show that decimated GL item (few vertices, transform-only — no CPU
+        ``drawPixmapFragments`` and no full vertex load); zoomed in we keep full
+        detail. Full detail is restored on settle.
+        """
         if not self._gl_layers_ready():
             return
         self._hide_reference_layers()
         for layer in self._gl_line_layers:
             layer.clear_settled_detail()
         bbox = self._view_clip_bbox()
-        if bbox is not None and self._is_overview_zoom(bbox):
-            # Conditional (colored) layers follow the same path as default
-            # layers during overview motion: hide the full-detail GL geometry and
-            # show the cheap decimated overview preview instead.
-            for item in self._overview_cpu_items:
-                item.setVisible(True)
-            for layer in self._gl_line_layers:
-                layer.set_gl_visible(False)
-            for layer in self._gl_scatter_layers:
-                layer.set_gl_visible(False)
-            return
+        overview = bbox is not None and self._is_overview_zoom(bbox)
         self._gl_overlay.set_viewport_cull(False)
         for item in self._overview_cpu_items:
             item.setVisible(False)
-        for layer in self._gl_line_layers:
-            layer.set_gl_visible(True)
-        for layer in self._gl_scatter_layers:
+        for layer in self._all_gl_layers():
+            if self._is_reference_map_layer(layer.map_layer):
+                continue
+            layer.set_motion_overview(overview)
             layer.set_gl_visible(True)
 
     def _is_overview_zoom(
@@ -1624,6 +1626,10 @@ class PostplotMapWidget(QWidget):
         viewport = self._plot.viewport()
         if viewport is not None:
             viewport.update()
+        # Any path that ends interaction must leave the decimated motion overview
+        # so the full-resolution GL item (and PDF capture) is what's shown.
+        for layer in self._all_gl_layers():
+            layer.set_motion_overview(False)
         # Preplot is hidden during motion for speed; any path that ends interaction
         # (settle timer, export capture, clip refresh) must restore it. Without
         # this, stopping timers in ensure_settled_for_capture leaves preplot gone

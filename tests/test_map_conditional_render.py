@@ -126,7 +126,7 @@ class _FakeOverlay:
         pass
 
 
-def test_colored_lines_upload_as_uniform_color_strips(qapp) -> None:
+def test_colored_lines_upload_as_single_lines_item_with_vertex_colors(qapp) -> None:
     xs = np.array([1.0, 2.0, 3.0, 4.0, 5.0], dtype=np.float64)
     ys = np.array([10.0, 20.0, 30.0, 40.0, 50.0], dtype=np.float64)
     red = [1.0, 0.0, 0.0, 1.0]
@@ -149,26 +149,31 @@ def test_colored_lines_upload_as_uniform_color_strips(qapp) -> None:
 
     layer.upload_pending_batch()
 
-    # Two contiguous color runs -> two uniform-color line_strip uploads. No
-    # per-vertex color array and no doubled "lines" geometry: identical GL cost
-    # to a plain colored line.
-    assert len(overlay.runs) == 2
-    assert all(run["mode"] == "line_strip" for run in overlay.runs)
-    assert all(isinstance(run["color"], tuple) for run in overlay.runs)
-    assert overlay.runs[0]["color"] == pytest.approx(tuple(red))
-    assert overlay.runs[1]["color"] == pytest.approx(tuple(green))
-    # Boundary vertex is shared so the strips stay visually continuous.
-    assert overlay.runs[0]["rx"].tolist() == [1.0, 2.0, 3.0]
-    assert overlay.runs[1]["rx"].tolist() == [3.0, 4.0, 5.0]
+    # All runs merge into ONE GL "lines" item (one draw call) — the per-item
+    # paint cost, not vertex count, is what slowed pan/zoom. Conditional coloring
+    # is preserved with a per-vertex color buffer instead of many color strips.
+    assert len(overlay.runs) == 1
+    run = overlay.runs[0]
+    assert run["mode"] == "lines"
+    # 4 segments -> 8 GL_LINES vertices (consecutive vertex pairs).
+    assert run["rx"].tolist() == [1.0, 2.0, 2.0, 3.0, 3.0, 4.0, 4.0, 5.0]
+    colors_arg = np.asarray(run["color"], dtype=np.float32)
+    assert colors_arg.shape == (8, 4)
+    # Segment colors track the source edge color (first two segments red).
+    assert colors_arg[0].tolist() == red
+    assert colors_arg[3].tolist() == red
+    assert colors_arg[-1].tolist() == green
 
 
-def test_colored_resident_layers_follow_default_overview_motion(qapp) -> None:
+def test_resident_layers_swap_to_gl_overview_during_overview_motion(qapp) -> None:
     widget = PostplotMapWidget.__new__(PostplotMapWidget)
     layer_type = type(
         "Layer",
         (),
         {
+            "map_layer": "postplot",
             "set_gl_visible": lambda self, value: setattr(self, "visible", value),
+            "set_motion_overview": lambda self, value: setattr(self, "motion", value),
             "clear_settled_detail": lambda self: None,
         },
     )
@@ -179,6 +184,7 @@ def test_colored_resident_layers_follow_default_overview_motion(qapp) -> None:
     widget._gl_line_layers = [colored, plain]
     widget._gl_scatter_layers = []
     widget._overview_cpu_items = []
+    widget._gl_overlay = type("Overlay", (), {"set_viewport_cull": lambda self, v: None})()
     widget._gl_layers_ready = lambda: True
     widget._hide_reference_layers = lambda: None
     widget._view_clip_bbox = lambda: (0.0, 1.0, 0.0, 1.0)
@@ -186,10 +192,12 @@ def test_colored_resident_layers_follow_default_overview_motion(qapp) -> None:
 
     PostplotMapWidget._enter_gl_motion_mode(widget)
 
-    # Conditional colors are now treated exactly like default colors: both hide
-    # full-detail GL during overview motion and rely on the overview preview.
-    assert colored.visible is False
-    assert plain.visible is False
+    # At overview zoom each layer swaps to its decimated GL preview (one draw call,
+    # transform-only) and stays GL-visible — no CPU overview raster.
+    assert colored.visible is True
+    assert plain.visible is True
+    assert colored.motion is True
+    assert plain.motion is True
 
 
 def test_colored_dash_settle_groups_runs_for_real_dashed_segments(qapp) -> None:
