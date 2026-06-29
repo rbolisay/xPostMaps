@@ -689,7 +689,13 @@ class Postplot4DDialog:
                 diff_table.setUpdatesEnabled(True)
                 header.blockSignals(False)
             _finalize_diff_table_layout(diff_table)
-            _autosize_dialog_width(host_dialog, diff_table)
+            # Only fit the dialog width to the diff table while that page is
+            # actually visible. During plot navigation refresh_diff_table runs to
+            # keep the hidden table in sync; autosizing to its narrower content
+            # width here would shrink the window and then snap back when the plot
+            # reframes, causing a visible flicker.
+            if stack.currentIndex() == 1:
+                _autosize_dialog_width(host_dialog, diff_table)
 
         def _frame_and_center_dialog() -> None:
             if host_dialog is None:
@@ -965,6 +971,12 @@ class Postplot4DDialog:
             sets = _active_sets() or [
                 SequenceDiffSet(match_row=match_row, diff_rows=list(diff_rows))
             ]
+            # Re-frame/center only when first entering the plot view. While
+            # stepping between sequences/preplots the window is already on the
+            # plot page and correctly sized; resizing it again to the nominal
+            # plot size briefly shrinks it (the content min-width then snaps it
+            # back), which reads as a width flicker on every arrow press.
+            already_on_plot = stack.currentIndex() == 2
             plot_view.set_combined_data(
                 sets,
                 streamers_detected=_source_has_streamers_for_match(match_row),
@@ -980,7 +992,8 @@ class Postplot4DDialog:
                     )
                 else:
                     host_dialog.setWindowTitle(f"{match_row.line_name} 4D Stat Plot")
-                _frame_and_center_dialog()
+                if not already_on_plot:
+                    _frame_and_center_dialog()
             stack.setCurrentIndex(2)
             QTimer.singleShot(0, plot_view.refresh)
             QTimer.singleShot(100, plot_view.refresh)

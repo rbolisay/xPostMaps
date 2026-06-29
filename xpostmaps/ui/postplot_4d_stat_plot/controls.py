@@ -8,9 +8,11 @@ from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
     QDoubleSpinBox,
+    QFrame,
     QHBoxLayout,
     QLabel,
     QPushButton,
+    QScrollArea,
     QSizePolicy,
     QTableWidget,
     QTableWidgetItem,
@@ -32,6 +34,27 @@ from xpostmaps.ui.dialogs.legend_dialog import (
     _legend_section_toolbar_button,
 )
 from xpostmaps.ui.widgets.color_button import ColorButton
+
+
+def _fit_table_to_content(table: QTableWidget) -> None:
+    """Size a 4D Stat control table to its content.
+
+    Each column is sized to its header/cell content (Resize To Contents), and
+    the table widget width is then locked to the total so no column is ever
+    truncated. Horizontal overflow is handled by the surrounding scroll area
+    rather than an in-table scrollbar.
+    """
+    _fit_table_columns(table)
+    _fit_table_height(table)
+    total = sum(table.columnWidth(col) for col in range(table.columnCount()))
+    frame = table.frameWidth() * 2
+    vbar = 0
+    if table.verticalScrollBarPolicy() != Qt.ScrollBarPolicy.ScrollBarAlwaysOff:
+        vbar = table.verticalScrollBar().sizeHint().width()
+    table.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+    width = total + frame + vbar + 2
+    table.setMinimumWidth(width)
+    table.setMaximumWidth(width)
 
 
 class _StyleComboBox(QComboBox):
@@ -114,7 +137,7 @@ class SourceStyleTable(QWidget):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(4)
-        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        self.setSizePolicy(QSizePolicy.Policy.Maximum, QSizePolicy.Policy.Fixed)
         section = QLabel("Source Style")
         section.setObjectName("statPlotSection")
         layout.addWidget(section)
@@ -203,8 +226,7 @@ class SourceStyleTable(QWidget):
             self._table.setCellWidget(row_idx, 2, color_btn)
             self._table.setRowHeight(row_idx, 34)
         self._table.blockSignals(False)
-        _fit_table_columns(self._table)
-        _fit_table_height(self._table)
+        _fit_table_to_content(self._table)
         self.adjustSize()
 
     # ----- combined (multi-sequence) mode ---------------------------------
@@ -265,8 +287,7 @@ class SourceStyleTable(QWidget):
             bind()
             self._table.setRowHeight(row_idx, 34)
         self._table.blockSignals(False)
-        _fit_table_columns(self._table)
-        _fit_table_height(self._table)
+        _fit_table_to_content(self._table)
         self.adjustSize()
 
     # ----- shared widget builders -----------------------------------------
@@ -369,7 +390,7 @@ class BoundaryTable(QWidget):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(4)
-        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        self.setSizePolicy(QSizePolicy.Policy.Maximum, QSizePolicy.Policy.Fixed)
         boundary_title = QLabel("Boundary Limits")
         boundary_title.setObjectName("statPlotSection")
         layout.addWidget(boundary_title)
@@ -539,8 +560,7 @@ class BoundaryTable(QWidget):
             self._table.setCellWidget(row_idx, 4, color_btn)
             self._table.setRowHeight(row_idx, 34)
         self._table.blockSignals(False)
-        _fit_table_columns(self._table)
-        _fit_table_height(self._table)
+        _fit_table_to_content(self._table)
         self.adjustSize()
 
     def _on_metric(self, row_idx: int, value: float) -> None:
@@ -574,18 +594,44 @@ class PlotTabControls(QWidget):
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
-        tables_row = QHBoxLayout()
-        tables_row.setSpacing(12)
-        self._source_table = SourceStyleTable(parent=self)
+
+        # Each table sizes itself to its content width; place them side by side
+        # inside a horizontal scroll area so wide tables (e.g. a combined plot
+        # with one Source Color column per sequence) stay fully visible and
+        # scrollable instead of being squeezed/truncated.
+        inner = QWidget()
+        inner_row = QHBoxLayout(inner)
+        inner_row.setContentsMargins(0, 0, 0, 0)
+        inner_row.setSpacing(12)
+        self._source_table = SourceStyleTable(parent=inner)
         self._source_table.changed.connect(self.changed.emit)
-        tables_row.addWidget(self._source_table, stretch=1)
-        self._boundary_table = BoundaryTable(parent=self)
+        inner_row.addWidget(self._source_table)
+        self._boundary_table = BoundaryTable(parent=inner)
         self._boundary_table.changed.connect(self.changed.emit)
-        tables_row.addWidget(self._boundary_table, stretch=1)
-        layout.addLayout(tables_row)
+        inner_row.addWidget(self._boundary_table)
+        inner_row.addStretch(1)
+
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        scroll.setWidget(inner)
+        self._inner = inner
+        self._scroll = scroll
+        layout.addWidget(scroll)
+        self._sync_height()
+
+    def _sync_height(self) -> None:
+        """Fit the scroll area height to the taller table plus scrollbar room."""
+        content_h = self._inner.sizeHint().height()
+        content_h += self._scroll.horizontalScrollBar().sizeHint().height()
+        self._scroll.setMinimumHeight(content_h)
+        self._scroll.setMaximumHeight(content_h)
 
     def set_sources(self, rows: list[SourceStyleRow]) -> None:
         self._source_table.set_sources(rows)
+        self._sync_height()
 
     def set_source_matrix(
         self,
@@ -594,9 +640,11 @@ class PlotTabControls(QWidget):
         style_by_key: dict[str, SourceStyleRow],
     ) -> None:
         self._source_table.set_source_matrix(source_nos, sequence_nos, style_by_key)
+        self._sync_height()
 
     def set_boundaries(self, rows: list[BoundaryRow]) -> None:
         self._boundary_table.set_rows(rows)
+        self._sync_height()
 
     def source_styles(self) -> list[SourceStyleRow]:
         return self._source_table.rows()
