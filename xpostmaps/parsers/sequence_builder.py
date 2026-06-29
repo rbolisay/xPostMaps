@@ -23,6 +23,21 @@ def _direction_label(direction: int, line_direction: str) -> str:
     return "Up" if direction >= 0 else "Down"
 
 
+def _fsp_lsp_for_direction(pnums: np.ndarray, direction: int) -> tuple[int, int]:
+    """Return (first_sp, last_sp) honoring acquisition direction.
+
+    Uses the min/max extremes (robust to a stray first/last record) but orders
+    them by the majority-vote *direction* so descending lines report FSP > LSP.
+    """
+    if pnums.size == 0:
+        return 0, 0
+    lo = int(pnums.min())
+    hi = int(pnums.max())
+    if direction < 0:
+        return hi, lo
+    return lo, hi
+
+
 def build_sequences(records: list[PositionRecord]) -> list[LineSequence]:
     grouped: dict[tuple[str, str, str, RecordType], list[PositionRecord]] = defaultdict(list)
     for rec in records:
@@ -34,11 +49,16 @@ def build_sequences(records: list[PositionRecord]) -> list[LineSequence]:
 
     sequences: list[LineSequence] = []
     for (file_name, seq_no, line_name, rtype), group in grouped.items():
-        group.sort(key=lambda r: r.point_num)
-        pnums = [r.point_num for r in group]
-        direction = infer_line_direction(np.array(pnums, dtype=np.int64))
-        line_dir = group[0].line_direction or _direction_label(direction, "")
+        # Records arrive in acquisition (file) order. Infer direction from that
+        # order — NOT a pre-sorted copy — so FSP/LSP reflect how the line was
+        # actually shot. Lines acquired with descending shotpoint numbering must
+        # report FSP > LSP (e.g. FSP 1508 -> LSP 1489), not always ascending.
+        pnums = np.array([r.point_num for r in group], dtype=np.int64)
+        direction = infer_line_direction(pnums)
+        explicit_dir = next((r.line_direction for r in group if r.line_direction), "")
+        line_dir = explicit_dir or _direction_label(direction, "")
         subline = next((r.subline for r in group if r.subline), "")
+        first_sp, last_sp = _fsp_lsp_for_direction(pnums, direction)
         seq_id = make_sequence_id(file_name, seq_no, line_name, rtype)
         sequences.append(
             LineSequence(
@@ -48,8 +68,8 @@ def build_sequences(records: list[PositionRecord]) -> list[LineSequence]:
                 line_name=line_name,
                 subline=subline,
                 line_direction=line_dir,
-                first_sp=min(pnums),
-                last_sp=max(pnums),
+                first_sp=first_sp,
+                last_sp=last_sp,
                 record_type=rtype,
             )
         )
@@ -76,8 +96,12 @@ def build_display_sequences(records: list[PositionRecord]) -> list[LineSequence]
             )
         else:
             existing = merged[group_id]
-            existing.first_sp = min(existing.first_sp, seq.first_sp)
-            existing.last_sp = max(existing.last_sp, seq.last_sp)
+            # Merge the source/vessel extents while preserving acquisition
+            # direction: a descending line (FSP > LSP) must stay descending.
+            lo = min(existing.first_sp, existing.last_sp, seq.first_sp, seq.last_sp)
+            hi = max(existing.first_sp, existing.last_sp, seq.first_sp, seq.last_sp)
+            descending = existing.first_sp > existing.last_sp
+            existing.first_sp, existing.last_sp = (hi, lo) if descending else (lo, hi)
             if not existing.subline and seq.subline:
                 existing.subline = seq.subline
             if not existing.line_direction and seq.line_direction:
@@ -103,12 +127,17 @@ def records_to_segments(records: list[PositionRecord]) -> list[LineSegment]:
 
     segments: list[LineSegment] = []
     for (file_name, seq_no, line_name, rtype), bucket in grouped.items():
+        # bucket preserves acquisition (file) insertion order. Infer direction
+        # from that order before sorting, so down-lines stay down-lines.
+        acq_pnums = np.array([r.point_num for r in bucket.values()], dtype=np.int64)
+        direction = infer_line_direction(acq_pnums)
         group = sorted(bucket.values(), key=lambda r: r.point_num)
         xs = [r.x for r in group]
         ys = [r.y for r in group]
-        pnums = np.array([r.point_num for r in group], dtype=np.int64)
-        direction = infer_line_direction(pnums)
-        line_dir = group[0].line_direction or _direction_label(direction, "")
+        line_dir = (
+            next((r.line_direction for r in group if r.line_direction), "")
+            or _direction_label(direction, "")
+        )
         seq_id = make_sequence_id(file_name, seq_no, line_name, rtype)
         segments.append(
             LineSegment(

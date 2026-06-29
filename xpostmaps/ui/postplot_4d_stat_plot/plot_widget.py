@@ -284,6 +284,16 @@ class TimeSeriesPlotWidget(pg.PlotWidget):
         all_values: list[float] = []
         all_x: list[float] = []
 
+        # Series shotpoints are ordered FSP -> LSP. A descending line (FSP > LSP)
+        # must read left-to-right from FSP to LSP, so invert the x-axis instead of
+        # forcing the numeric ascending order pyqtgraph would otherwise impose.
+        descending = False
+        for series in series_list:
+            if len(series.shotpoints) >= 2:
+                descending = series.shotpoints[0] > series.shotpoints[-1]
+                break
+        self._viewbox.invertX(descending)
+
         for series in series_list:
             if not series.shotpoints:
                 continue
