@@ -107,6 +107,20 @@ def _plot_fill_ratio(image: QImage) -> float:
     return non_white / max(sampled, 1)
 
 
+def _boundary_pixels(image: QImage) -> int:
+    """Count blue (#3b82f6) boundary-line pixels in the plot body."""
+    w = image.width()
+    h = image.height()
+    top, bottom, left, right = _plot_content_bounds(image)
+    count = 0
+    for y in range(top, bottom, 2):
+        for x in range(left, right, 3):
+            color = image.pixelColor(x, y)
+            if color.blue() > 180 and color.red() < 120 and color.green() > 80:
+                count += 1
+    return count
+
+
 def _legend_present(image: QImage) -> bool:
     """Detect the legend band just below the plot's curve area (orientation-agnostic)."""
     w = image.width()
@@ -160,13 +174,17 @@ def main() -> int:
             page.save(str(png_path))
             fill = _plot_fill_ratio(page)
             legend = _legend_present(page)
+            boundaries = _boundary_pixels(page)
             print(
-                f"{label}: {page.width()}x{page.height()} fill={fill:.3f} legend={legend} -> {png_path}"
+                f"{label}: {page.width()}x{page.height()} fill={fill:.3f} "
+                f"legend={legend} boundary_px={boundaries} -> {png_path}"
             )
             if fill < 0.004:
                 failures.append(f"{label}: plot area too empty (fill={fill:.3f})")
             if not legend:
                 failures.append(f"{label}: legend not detected below plot")
+            if boundaries < 20:
+                failures.append(f"{label}: boundary lines missing (px={boundaries})")
             if landscape and page.width() <= page.height():
                 failures.append(f"{label}: landscape page not wider than tall")
             if not landscape and page.height() <= page.width():
@@ -175,6 +193,27 @@ def main() -> int:
             pdf_path = OUT_DIR / f"{label}.pdf"
             export_4d_stat_plot_pdf(view, pdf_path, options)
             print(f"  pdf: {pdf_path}")
+
+            # Hybrid export (like the map): the report header is VECTOR text;
+            # the plot body is a high-res raster. Confirm the header glyphs are
+            # real vector text and the body raster is present and high-res.
+            try:
+                import fitz
+
+                with fitz.open(str(pdf_path)) as doc:
+                    pg = doc[0]
+                    text = pg.get_text().strip()
+                    images = pg.get_images(full=True)
+                print(
+                    f"  hybrid-check: header_text_chars={len(text)} "
+                    f"raster_images={len(images)}"
+                )
+                if "EOL 4D Report" not in text:
+                    failures.append(f"{label}: vector header text missing")
+                if len(images) < 1:
+                    failures.append(f"{label}: plot body raster missing")
+            except ImportError:
+                print("  hybrid-check: PyMuPDF not installed (skipped)")
 
         if failures:
             print("BRUTAL 4D STAT PLOT PDF VISUAL: FAIL")

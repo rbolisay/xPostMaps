@@ -144,6 +144,30 @@ def test_capture_image_for_pdf_draws_bottom_legend(qapp) -> None:
     assert _non_white_fraction(bottom_band) > 0.02
 
 
+def test_capture_image_for_pdf_includes_boundary_lines(qapp) -> None:
+    match, rows = _sample_match_and_rows()
+    plot = TimeSeriesPlotWidget("crossline")
+    styles = default_source_styles(["G01"])
+    series = build_plot_series(rows, match, "crossline", "G01")
+    plot.render(
+        [series],
+        styles,
+        [BoundaryRow(abs_boundary=6.0)],
+        y_min=None,
+        y_max=None,
+        auto_y=True,
+    )
+    image = plot.capture_image(width=800, height=480, for_pdf=True, dpi=120)
+    # Default boundary colour is #3b82f6 (blue).
+    blues = 0
+    for x in range(100, 700, 3):
+        for y in range(50, 430, 2):
+            color = image.pixelColor(x, y)
+            if color.blue() > 180 and color.red() < 120 and color.green() > 80:
+                blues += 1
+    assert blues > 20
+
+
 def test_capture_image_for_pdf_draws_black_border(qapp) -> None:
     match, rows = _sample_match_and_rows()
     plot = TimeSeriesPlotWidget("crossline")

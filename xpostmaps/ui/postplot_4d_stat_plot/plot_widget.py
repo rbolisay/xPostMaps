@@ -54,6 +54,31 @@ def _configure_stat_pyqtgraph() -> None:
 _configure_stat_pyqtgraph()
 
 
+def _scale_pen(pen: QPen, factor: float) -> QPen:
+    """Clone *pen* and scale its width while preserving style and dash pattern.
+
+    Rebuilding via pg.mkPen(color, width, style=CustomDashLine) drops the dash
+    array, which makes custom-dashed pens (boundaries, dashed sources) render as
+    nothing at high export DPI. Cloning keeps the width-relative dash pattern.
+    """
+    scaled = QPen(pen)
+    scaled.setWidthF(max(1.0, pen.widthF() * factor))
+    scaled.setCosmetic(True)
+    return scaled
+
+
+def _boundary_y_extents(boundaries: list[BoundaryRow]) -> tuple[float | None, float | None]:
+    """Return min/max Y for configured boundary lines (±abs_boundary)."""
+    limits: list[float] = []
+    for boundary in boundaries:
+        limit = abs(float(boundary.abs_boundary))
+        if limit > 0:
+            limits.extend((limit, -limit))
+    if not limits:
+        return None, None
+    return min(limits), max(limits)
+
+
 def _configure_plot(plot: pg.PlotWidget, *, y_label: str) -> None:
     plot.setBackground(_PLOT_BG)
     plot.showGrid(x=False, y=False)
@@ -341,10 +366,14 @@ class TimeSeriesPlotWidget(pg.PlotWidget):
                 self._boundary_items.append(line)
 
         y_range: tuple[float, float] | None = None
+        b_y_min, b_y_max = _boundary_y_extents(boundaries)
         if auto_y:
             if all_values:
                 data_min = min(all_values)
                 data_max = max(all_values)
+                if b_y_min is not None and b_y_max is not None:
+                    data_min = min(data_min, b_y_min)
+                    data_max = max(data_max, b_y_max)
                 span = max(data_max - data_min, 1.0)
                 pad = span * 0.08
                 y_range = (data_min - pad, data_max + pad)
@@ -352,8 +381,12 @@ class TimeSeriesPlotWidget(pg.PlotWidget):
             else:
                 self.enableAutoRange(axis="y")
         elif y_min is not None and y_max is not None and y_min < y_max:
-            y_range = (y_min, y_max)
-            self.setYRange(y_min, y_max, padding=0.0)
+            lo, hi = y_min, y_max
+            if b_y_min is not None and b_y_max is not None:
+                lo = min(lo, b_y_min)
+                hi = max(hi, b_y_max)
+            y_range = (lo, hi)
+            self.setYRange(lo, hi, padding=0.0)
         else:
             self.enableAutoRange(axis="y")
 
@@ -429,13 +462,7 @@ class TimeSeriesPlotWidget(pg.PlotWidget):
             sym_size = curve.opts.get("symbolSize", 5) or 5
             sym_pen = curve.opts.get("symbolPen")
             curve_backup.append((curve, QPen(qpen), float(sym_size), sym_pen))
-            new_pen = pg.mkPen(
-                qpen.color(),
-                width=max(1.0, qpen.widthF() * scale * line_boost),
-                style=qpen.style(),
-                cosmetic=True,
-            )
-            curve.setPen(new_pen)
+            curve.setPen(_scale_pen(qpen, scale * line_boost))
             curve.setSymbolSize(max(2, int(round(float(sym_size) * scale))))
             if isinstance(sym_pen, QPen):
                 scaled_sym_pen = pg.mkPen(
@@ -451,14 +478,7 @@ class TimeSeriesPlotWidget(pg.PlotWidget):
             pen = line.pen
             qpen = QPen(pen) if isinstance(pen, QPen) else pg.mkPen(pen)
             boundary_backup.append((line, QPen(qpen)))
-            line.setPen(
-                pg.mkPen(
-                    qpen.color(),
-                    width=max(1.0, qpen.widthF() * scale * line_boost),
-                    style=qpen.style(),
-                    cosmetic=True,
-                )
-            )
+            line.setPen(_scale_pen(qpen, scale * line_boost))
         backup["boundaries"] = boundary_backup
 
         axis_backup: dict[str, object] = {}
@@ -513,6 +533,34 @@ class TimeSeriesPlotWidget(pg.PlotWidget):
         self.setLabel("left", PLOT_KIND_UNITS[self._kind], color=_PLOT_FG)
         self._pdf_style_backup = None
 
+    def _paint_pdf_boundaries(self, painter: QPainter) -> None:
+        """Paint horizontal boundary lines; InfiniteLine is skipped by scene.render()."""
+        if not self._boundary_items:
+            return
+        vb = self._viewbox
+        (x_range, y_range) = vb.viewRange()
+        x0, x1 = float(x_range[0]), float(x_range[1])
+        y_lo, y_hi = float(y_range[0]), float(y_range[1])
+        painter.save()
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        for line in self._boundary_items:
+            y_val = float(line.value())
+            if y_val < y_lo or y_val > y_hi:
+                continue
+            p0 = vb.mapViewToScene(pg.Point(x0, y_val))
+            p1 = vb.mapViewToScene(pg.Point(x1, y_val))
+            qpen = line.pen
+            if not isinstance(qpen, QPen):
+                qpen = pg.mkPen(qpen)
+            painter.setPen(QPen(qpen))
+            painter.drawLine(
+                int(round(p0.x())),
+                int(round(p0.y())),
+                int(round(p1.x())),
+                int(round(p1.y())),
+            )
+        painter.restore()
+
     def _render_plot_body_for_pdf(self, *, width: int, height: int, dpi: int) -> QImage:
         """Render the plot at the exact target pixel size so it fills the frame
         on every page (no crop, no letterbox) with DPI-scaled lines and text.
@@ -552,6 +600,7 @@ class TimeSeriesPlotWidget(pg.PlotWidget):
                     QRectF(0, 0, width, height),
                     QRectF(0, 0, width, height),
                 )
+            self._paint_pdf_boundaries(painter)
         finally:
             painter.end()
 
@@ -572,7 +621,10 @@ class TimeSeriesPlotWidget(pg.PlotWidget):
         if not entries:
             return
         scale = self._pdf_scale(dpi)
-        font = QFont("Segoe UI", max(7, int(round(8 * scale))))
+        # Pixel-size (not point-size) so the legend keeps the same physical size
+        # on a true PDF paint device as it does on a raster QImage.
+        font = QFont("Segoe UI")
+        font.setPixelSize(max(7, int(round(8 * scale))))
         painter.setFont(font)
         metrics = painter.fontMetrics()
         swatch_len = max(12, int(round(16 * scale)))

@@ -248,6 +248,97 @@ def _page_layout_pixels(
     return page_w, page_h, content_left, content_top, content_width
 
 
+@dataclass(frozen=True)
+class _PlotPageGeometry:
+    page_w: int
+    page_h: int
+    content_left: int
+    content_top: int
+    content_width: int
+    header_height: int
+    plot_width: int
+    plot_height: int
+
+
+def _plot_page_geometry(
+    options: Postplot4DStatPlotPdfOptions,
+    dpi: int,
+) -> _PlotPageGeometry:
+    """Shared page/plot pixel geometry for both raster preview and vector export."""
+    page_w, page_h, content_left, content_top, content_width = _page_layout_pixels(
+        options, dpi=dpi
+    )
+    header_height = _page_header_height(dpi)
+
+    # Keep the plot's width:height aspect identical to landscape in every
+    # orientation; in portrait the plot is simply scaled down (anchored under
+    # the header) instead of being stretched to fill the tall page.
+    margin_px = int(options.margin_mm / 25.4 * dpi)
+    land_rect = page_layout_for(options.paper, True).paintRectPixels(dpi)
+    land_plot_w = max(land_rect.width() - 2 * margin_px, 1)
+    land_plot_h = max(land_rect.height() - 2 * margin_px - header_height, 1)
+    landscape_aspect = land_plot_w / land_plot_h
+
+    available_height = max(page_h - 2 * content_top - header_height, 1)
+    plot_width = content_width
+    plot_height = min(available_height, max(1, int(round(plot_width / landscape_aspect))))
+    return _PlotPageGeometry(
+        page_w=page_w,
+        page_h=page_h,
+        content_left=content_left,
+        content_top=content_top,
+        content_width=content_width,
+        header_height=header_height,
+        plot_width=plot_width,
+        plot_height=plot_height,
+    )
+
+
+def _render_canvas_for_spec(
+    view: Postplot4DStatPlotView,
+    spec: PlotPageSpec,
+    diff_rows,
+    match_row,
+    *,
+    y_min,
+    y_max,
+    auto_y,
+):
+    """Render the canvas for one page spec; return (canvas, has_data)."""
+    canvas = view.canvas_for_kind(spec.kind)
+    if canvas is None:
+        return None, False
+    styles = view.source_styles_for_kind(spec.kind)
+    boundaries = view.boundaries_for_kind(spec.kind)
+    series_list = [
+        build_plot_series(diff_rows, match_row, spec.kind, src)
+        for src in spec.export_sources
+    ]
+    series_list = [item for item in series_list if item.shotpoints]
+    if not series_list:
+        return canvas, False
+
+    render_sources = spec.export_sources if spec.combine else [spec.export_sources[0]]
+    canvas.set_combine_sources(spec.combine)
+    canvas.render(
+        [
+            build_plot_series(diff_rows, match_row, spec.kind, src)
+            for src in render_sources
+        ],
+        styles,
+        boundaries,
+        y_min=y_min,
+        y_max=y_max,
+        auto_y=auto_y,
+    )
+    if not spec.combine and spec.export_sources:
+        select_tab = getattr(canvas, "select_source_tab", None)
+        if callable(select_tab):
+            select_tab(spec.export_sources[0])
+    QApplication.processEvents()
+    return canvas, True
+
+
 def compose_4d_stat_plot_pages(
     view: Postplot4DStatPlotView,
     options: Postplot4DStatPlotPdfOptions,
@@ -271,72 +362,25 @@ def compose_4d_stat_plot_pages(
     line_label = f"Line: {line_title(match_row)}"
     logo_file = resolve_logo_path(logo_path)
 
-    page_w, page_h, content_left, content_top, content_width = _page_layout_pixels(
-        options,
-        dpi=render_dpi,
-    )
-    header_height = _page_header_height(render_dpi)
-
-    # Keep the plot's width:height aspect identical to landscape in every
-    # orientation; in portrait the plot is simply scaled down (anchored under
-    # the header) instead of being stretched to fill the tall page.
-    margin_px = int(options.margin_mm / 25.4 * render_dpi)
-    land_rect = page_layout_for(options.paper, True).paintRectPixels(render_dpi)
-    land_plot_w = max(land_rect.width() - 2 * margin_px, 1)
-    land_plot_h = max(land_rect.height() - 2 * margin_px - header_height, 1)
-    landscape_aspect = land_plot_w / land_plot_h
-
-    available_height = max(page_h - 2 * content_top - header_height, 1)
-    plot_width = content_width
-    plot_height = min(available_height, max(1, int(round(plot_width / landscape_aspect))))
-
+    geom = _plot_page_geometry(options, render_dpi)
     pages: list[QImage] = []
 
     for spec in page_specs:
-        canvas = view.canvas_for_kind(spec.kind)
-        if canvas is None:
-            continue
-        styles = view.source_styles_for_kind(spec.kind)
-        boundaries = view.boundaries_for_kind(spec.kind)
-        series_list = [
-            build_plot_series(diff_rows, match_row, spec.kind, src)
-            for src in spec.export_sources
-        ]
-        series_list = [item for item in series_list if item.shotpoints]
-        if not series_list:
-            continue
-
-        render_sources = (
-            spec.export_sources if spec.combine else [spec.export_sources[0]]
+        canvas, has_data = _render_canvas_for_spec(
+            view, spec, diff_rows, match_row, y_min=y_min, y_max=y_max, auto_y=auto_y
         )
-        canvas.set_combine_sources(spec.combine)
-        canvas.render(
-            [
-                build_plot_series(diff_rows, match_row, spec.kind, src)
-                for src in render_sources
-            ],
-            styles,
-            boundaries,
-            y_min=y_min,
-            y_max=y_max,
-            auto_y=auto_y,
-        )
-        if not spec.combine and spec.export_sources:
-            select_tab = getattr(canvas, "select_source_tab", None)
-            if callable(select_tab):
-                select_tab(spec.export_sources[0])
-
-        QApplication.processEvents()
+        if not has_data or canvas is None:
+            continue
 
         time_series_text = time_series_description_for_page(spec, options)
         plot_image = canvas.capture_image(
-            width=plot_width,
-            height=plot_height,
+            width=geom.plot_width,
+            height=geom.plot_height,
             for_pdf=True,
             dpi=render_dpi,
         )
 
-        page = QImage(page_w, page_h, QImage.Format.Format_ARGB32)
+        page = QImage(geom.page_w, geom.page_h, QImage.Format.Format_ARGB32)
         page.fill(Qt.GlobalColor.white)
         painter = QPainter(page)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
@@ -344,17 +388,17 @@ def compose_4d_stat_plot_pages(
 
         _draw_page_header(
             painter,
-            content_left=content_left,
-            content_top=content_top,
-            content_width=content_width,
+            content_left=geom.content_left,
+            content_top=geom.content_top,
+            content_width=geom.content_width,
             dpi=render_dpi,
             report_title=options.report_title,
             line_label=line_label,
             time_series_label=time_series_text,
             logo_file=logo_file,
         )
-        plot_top = content_top + header_height
-        painter.drawImage(content_left, plot_top, plot_image)
+        plot_top = geom.content_top + geom.header_height
+        painter.drawImage(geom.content_left, plot_top, plot_image)
         painter.end()
         pages.append(page)
 
@@ -412,28 +456,88 @@ def export_4d_stat_plot_pdf(
     *,
     logo_path: str = "",
 ) -> None:
-    pages = compose_4d_stat_plot_pages(view, options, logo_path=logo_path)
-    if not pages:
-        raise ValueError("No plot pages to export.")
+    """Export the selected 4D Stat plots to a PDF.
+
+    Hybrid composition mirroring the map export: the report header (title, line
+    metadata, logo) is painted as true vector content directly onto the
+    ``QPdfWriter`` painter, while the pyqtgraph plot body is embedded as a
+    high-resolution (export-DPI) raster. pyqtgraph's axis tick layout does not
+    survive being painted straight onto a PDF paint device, so the plot itself
+    is rasterised at full export resolution exactly like the map's right pane.
+    """
+    match_row = view.match_row()
+    if match_row is None:
+        raise ValueError("No 4D Stat match row loaded for PDF export.")
+
+    page_specs = iter_4d_stat_plot_page_specs(view, options)
+    if not page_specs:
+        raise ValueError("Select at least one plot type to include in the PDF.")
+
+    export_dpi = options.dpi
+    diff_rows = view.diff_rows()
+    y_min, y_max = view.y_axis_range()
+    auto_y = view.y_axis_auto()
+    line_label = f"Line: {line_title(match_row)}"
+    logo_file = resolve_logo_path(logo_path)
+
+    geom = _plot_page_geometry(options, export_dpi)
 
     layout = page_layout_for(options.paper, options.landscape)
     writer = QPdfWriter(str(output_path))
-    export_dpi = options.dpi
     writer.setResolution(export_dpi)
     writer.setPageLayout(layout)
+    page_rect = layout.paintRectPixels(export_dpi)
+    origin_x = page_rect.x()
+    origin_y = page_rect.y()
 
     painter = QPainter(writer)
-    painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
+    painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
     painter.setRenderHint(QPainter.RenderHint.TextAntialiasing, True)
-    target = layout.paintRectPixels(export_dpi)
-    for index, page in enumerate(pages):
-        if index > 0:
-            writer.newPage()
-        if page.width() != target.width() or page.height() != target.height():
-            page = page.scaled(
-                target.size(),
-                Qt.AspectRatioMode.IgnoreAspectRatio,
-                Qt.TransformationMode.SmoothTransformation,
+    painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
+
+    rendered_any = False
+    try:
+        for spec in page_specs:
+            canvas, has_data = _render_canvas_for_spec(
+                view,
+                spec,
+                diff_rows,
+                match_row,
+                y_min=y_min,
+                y_max=y_max,
+                auto_y=auto_y,
             )
-        painter.drawImage(target.topLeft(), page)
-    painter.end()
+            if not has_data or canvas is None:
+                continue
+
+            if rendered_any:
+                writer.newPage()
+            rendered_any = True
+
+            painter.fillRect(page_rect, Qt.GlobalColor.white)
+            time_series_text = time_series_description_for_page(spec, options)
+            _draw_page_header(
+                painter,
+                content_left=origin_x + geom.content_left,
+                content_top=origin_y + geom.content_top,
+                content_width=geom.content_width,
+                dpi=export_dpi,
+                report_title=options.report_title,
+                line_label=line_label,
+                time_series_label=time_series_text,
+                logo_file=logo_file,
+            )
+            plot_image = canvas.capture_image(
+                width=geom.plot_width,
+                height=geom.plot_height,
+                for_pdf=True,
+                dpi=export_dpi,
+            )
+            plot_x = origin_x + geom.content_left
+            plot_y = origin_y + geom.content_top + geom.header_height
+            painter.drawImage(plot_x, plot_y, plot_image)
+    finally:
+        painter.end()
+
+    if not rendered_any:
+        raise ValueError("No plot pages to export.")
