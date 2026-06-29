@@ -3,9 +3,9 @@
 from __future__ import annotations
 
 from PySide6.QtCore import Qt, Signal
-from PySide6.QtGui import QBrush, QColor
 from PySide6.QtWidgets import (
     QComboBox,
+    QDoubleSpinBox,
     QHBoxLayout,
     QHeaderView,
     QLabel,
@@ -22,23 +22,32 @@ from xpostmaps.core.postplot_4d_survey_spec import (
     METRIC_LABELS,
     SEVERITY_LABELS,
     STAT_TYPE_LABELS,
+    FailedSpecDetail,
     Severity,
     StatType,
     SurveyEvaluation,
     SurveySpecRow,
+    failed_details_for_sequence,
     metric_kind_from_str,
     severity_from_str,
+    stat_uses_reference,
+    stat_uses_absolute,
     stat_type_from_str,
 )
 from xpostmaps.ui.dialogs.legend_dialog import (
     _configure_legend_table,
     _legend_section_toolbar_button,
+    _table_cell_button,
+)
+from xpostmaps.ui.postplot_4d_stat_plot.failed_shotpoints_dialog import (
+    FailedShotpointsDialog,
 )
 from xpostmaps.ui.postplot_4d_stat_plot.controls import (
     _checkbox_in,
     _fit_table_to_content,
     _make_absolute_checkbox,
     _make_boundary_value_spin,
+    _set_boundary_value_spin_enabled,
 )
 
 _COMBO_STYLE = (
@@ -66,6 +75,24 @@ _EXCLUDED_STYLE = (
 _PASS_STYLE = "color: #3fb950; font-weight: 700;"
 _FAIL_STYLE = "color: #f85149; font-weight: 700;"
 _WARN_STYLE = "color: #d29922; font-weight: 700;"
+
+# Survey Specs table: Statistic Limit caps the computed statistic; Metric Limit
+# is the per-shot metric threshold (failure stats only) beside 4D Metric.
+_COL_4D_STATISTIC = 0
+_COL_STATISTIC_LIMIT = 1
+_COL_4D_METRIC = 2
+_COL_METRIC_LIMIT = 3
+_COL_ABSOLUTE = 4
+_COL_SEVERITY = 5
+
+_SURVEY_SPEC_HEADERS = (
+    "4D Statistic",
+    "Statistic Limit",
+    "4D Metric",
+    "Metric Limit",
+    "Absolute",
+    "Severity",
+)
 
 
 def _make_combo(items: list[tuple[str, object]], current: object) -> QComboBox:
@@ -131,16 +158,7 @@ class SurveySpecsPanel(QWidget):
         _configure_legend_table(self._table)
         self._table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
         self._table.setSelectionMode(QTableWidget.SelectionMode.ExtendedSelection)
-        self._table.setHorizontalHeaderLabels(
-            [
-                "4D Metrics",
-                "Statistic",
-                "Reference Value",
-                "Statistic Value",
-                "Absolute",
-                "Severity",
-            ]
-        )
+        self._table.setHorizontalHeaderLabels(list(_SURVEY_SPEC_HEADERS))
         left_layout.addWidget(self._table)
         root.addWidget(left, alignment=Qt.AlignmentFlag.AlignTop)
 
@@ -219,13 +237,42 @@ class SurveySpecsPanel(QWidget):
         if not self._rebuilding:
             self.changed.emit()
 
+    def _statistic_from_combo(self, stat_combo: QComboBox | None) -> StatType:
+        if not isinstance(stat_combo, QComboBox):
+            return StatType.MAX_VALUE
+        statistic_raw = stat_combo.currentData()
+        if isinstance(statistic_raw, StatType):
+            return statistic_raw
+        return stat_type_from_str(str(statistic_raw or StatType.MAX_VALUE.value))
+
+    def _update_metric_limit_for_row(self, row_idx: int) -> None:
+        stat_combo = self._table.cellWidget(row_idx, _COL_4D_STATISTIC)
+        reference_spin = self._table.cellWidget(row_idx, _COL_METRIC_LIMIT)
+        if not isinstance(reference_spin, QDoubleSpinBox):
+            return
+        enabled = stat_uses_reference(self._statistic_from_combo(stat_combo))
+        _set_boundary_value_spin_enabled(reference_spin, enabled)
+
+    def _update_absolute_for_row(self, row_idx: int) -> None:
+        stat_combo = self._table.cellWidget(row_idx, _COL_4D_STATISTIC)
+        abs_box = _checkbox_in(self._table.cellWidget(row_idx, _COL_ABSOLUTE))
+        if abs_box is None:
+            return
+        enabled = stat_uses_absolute(self._statistic_from_combo(stat_combo))
+        abs_box.setEnabled(enabled)
+
+    def _on_statistic_changed(self, row_idx: int) -> None:
+        self._update_metric_limit_for_row(row_idx)
+        self._update_absolute_for_row(row_idx)
+        self._emit_changed()
+
     def _row_from_widgets(self, row_idx: int) -> SurveySpecRow:
-        metric_combo = self._table.cellWidget(row_idx, 0)
-        stat_combo = self._table.cellWidget(row_idx, 1)
-        reference_spin = self._table.cellWidget(row_idx, 2)
-        stat_spin = self._table.cellWidget(row_idx, 3)
-        abs_box = _checkbox_in(self._table.cellWidget(row_idx, 4))
-        severity_combo = self._table.cellWidget(row_idx, 5)
+        stat_combo = self._table.cellWidget(row_idx, _COL_4D_STATISTIC)
+        stat_spin = self._table.cellWidget(row_idx, _COL_STATISTIC_LIMIT)
+        metric_combo = self._table.cellWidget(row_idx, _COL_4D_METRIC)
+        reference_spin = self._table.cellWidget(row_idx, _COL_METRIC_LIMIT)
+        abs_box = _checkbox_in(self._table.cellWidget(row_idx, _COL_ABSOLUTE))
+        severity_combo = self._table.cellWidget(row_idx, _COL_SEVERITY)
         metric_raw = (
             metric_combo.currentData()
             if isinstance(metric_combo, QComboBox)
@@ -273,40 +320,44 @@ class SurveySpecsPanel(QWidget):
         self._table.blockSignals(True)
         self._table.setRowCount(len(self._rows))
         for row_idx, row in enumerate(self._rows):
+            stat_combo = _make_combo(
+                [(STAT_TYPE_LABELS[stat], stat) for stat in StatType],
+                row.statistic,
+            )
+            stat_combo.currentIndexChanged.connect(
+                lambda *_args, idx=row_idx: self._on_statistic_changed(idx)
+            )
+            self._table.setCellWidget(row_idx, _COL_4D_STATISTIC, stat_combo)
+
+            stat_spin = _make_boundary_value_spin(row.stat_value)
+            stat_spin.valueChanged.connect(lambda *_: self._emit_changed())
+            self._table.setCellWidget(row_idx, _COL_STATISTIC_LIMIT, stat_spin)
+
             metric_combo = _make_combo(
                 [(METRIC_LABELS[kind], kind) for kind in METRIC_KINDS],
                 row.metric,
             )
             metric_combo.currentIndexChanged.connect(lambda *_: self._emit_changed())
-            self._table.setCellWidget(row_idx, 0, metric_combo)
-
-            stat_combo = _make_combo(
-                [(STAT_TYPE_LABELS[stat], stat) for stat in StatType],
-                row.statistic,
-            )
-            stat_combo.currentIndexChanged.connect(lambda *_: self._emit_changed())
-            self._table.setCellWidget(row_idx, 1, stat_combo)
+            self._table.setCellWidget(row_idx, _COL_4D_METRIC, metric_combo)
 
             reference_spin = _make_boundary_value_spin(row.reference_value)
             reference_spin.valueChanged.connect(lambda *_: self._emit_changed())
-            self._table.setCellWidget(row_idx, 2, reference_spin)
-
-            stat_spin = _make_boundary_value_spin(row.stat_value)
-            stat_spin.valueChanged.connect(lambda *_: self._emit_changed())
-            self._table.setCellWidget(row_idx, 3, stat_spin)
+            self._table.setCellWidget(row_idx, _COL_METRIC_LIMIT, reference_spin)
+            self._update_metric_limit_for_row(row_idx)
 
             abs_container = _make_absolute_checkbox(row.absolute)
             abs_box = _checkbox_in(abs_container)
             if abs_box is not None:
                 abs_box.toggled.connect(lambda *_: self._emit_changed())
-            self._table.setCellWidget(row_idx, 4, abs_container)
+            self._table.setCellWidget(row_idx, _COL_ABSOLUTE, abs_container)
+            self._update_absolute_for_row(row_idx)
 
             severity_combo = _make_combo(
                 [(SEVERITY_LABELS[sev], sev) for sev in Severity],
                 row.severity,
             )
             severity_combo.currentIndexChanged.connect(lambda *_: self._emit_changed())
-            self._table.setCellWidget(row_idx, 5, severity_combo)
+            self._table.setCellWidget(row_idx, _COL_SEVERITY, severity_combo)
             self._table.setRowHeight(row_idx, 34)
         self._table.blockSignals(False)
         self._rebuilding = False
@@ -315,15 +366,20 @@ class SurveySpecsPanel(QWidget):
 
 
 class _ResultSummary(QWidget):
-    """Per-sequence acceptance summary beside the spec table."""
+    """Combined sequence results beside the spec table."""
 
     changed = Signal()
+
+    _COL_SEQUENCE = 0
+    _COL_EXCLUDED = 1
+    _COL_FAILED = 2
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
         self.setSizePolicy(QSizePolicy.Policy.Maximum, QSizePolicy.Policy.Fixed)
         self._sequence_nos: list[str] = []
         self._excluded_by_sequence: dict[str, str] = {}
+        self._failed_details: list[FailedSpecDetail] = []
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -340,7 +396,7 @@ class _ResultSummary(QWidget):
         self._table = QTableWidget(0, 3)
         _configure_legend_table(self._table)
         self._table.setHorizontalHeaderLabels(
-            ["Sequence No.", "Acceptance", "Excluded Shotpoints"]
+            ["Sequence No.", "Excluded Shotpoints", "Failed Shotpoints"]
         )
         self._table.horizontalHeader().setSectionResizeMode(
             QHeaderView.ResizeMode.ResizeToContents
@@ -355,12 +411,12 @@ class _ResultSummary(QWidget):
     ) -> None:
         self._sequence_nos = list(sequence_nos)
         self._excluded_by_sequence = dict(excluded_by_sequence)
-        self._rebuild_rows(result_by_sequence={})
+        self._rebuild_rows()
 
     def excluded_shotpoints(self) -> dict[str, str]:
         mapping: dict[str, str] = {}
         for row_idx, sequence_no in enumerate(self._sequence_nos):
-            edit = self._table.cellWidget(row_idx, 2)
+            edit = self._table.cellWidget(row_idx, self._COL_EXCLUDED)
             if isinstance(edit, QLineEdit):
                 mapping[sequence_no] = edit.text().strip()
             else:
@@ -372,57 +428,79 @@ class _ResultSummary(QWidget):
         evaluation: SurveyEvaluation | None,
         sequence_nos: list[str],
     ) -> None:
+        self._sequence_nos = list(sequence_nos)
         if not sequence_nos:
+            self._failed_details = []
             self._overall.setText("Acceptance: —")
             self._overall.setStyleSheet("color: #8b949e; font-size: 12px;")
             self._table.setRowCount(0)
             return
 
         if evaluation is None or evaluation.spec_count == 0:
+            self._failed_details = []
             self._overall.setText("Acceptance: — (no specs)")
             self._overall.setStyleSheet("color: #8b949e; font-size: 12px;")
-            self._rebuild_rows(result_by_sequence={})
+            self._rebuild_rows()
             return
 
-        accepted = evaluation.accepted
-        self._overall.setText(f"Acceptance: {'PASS' if accepted else 'FAIL'}")
-        self._overall.setStyleSheet(
-            f"font-size: 13px; {_PASS_STYLE if accepted else _FAIL_STYLE}"
+        self._failed_details = list(evaluation.failed_details)
+        if evaluation.accepted and evaluation.has_warning:
+            self._overall.setText("Acceptance: PASS (warn)")
+            self._overall.setStyleSheet(f"font-size: 13px; {_WARN_STYLE}")
+        elif evaluation.accepted:
+            self._overall.setText("Acceptance: PASS")
+            self._overall.setStyleSheet(f"font-size: 13px; {_PASS_STYLE}")
+        else:
+            self._overall.setText("Acceptance: FAIL")
+            self._overall.setStyleSheet(f"font-size: 13px; {_FAIL_STYLE}")
+        self._rebuild_rows()
+
+    def _failed_button_label(self, sequence_no: str) -> str:
+        count = len(failed_details_for_sequence(self._failed_details, sequence_no))
+        if count == 0:
+            return "View"
+        return f"View ({count})"
+
+    def _open_failed_shotpoints(self, sequence_no: str) -> None:
+        entries = failed_details_for_sequence(self._failed_details, sequence_no)
+        if not entries and self._failed_details:
+            entries = list(self._failed_details)
+        FailedShotpointsDialog.show(
+            self.window(),
+            entries,
+            sequence_no=sequence_no,
         )
 
-        result_by_sequence: dict[str, tuple[str, str]] = {}
-        for seq in evaluation.sequences:
-            if seq.passed and not seq.has_warning:
-                result_by_sequence[seq.sequence_no] = ("PASS", "#3fb950")
-            elif seq.passed and seq.has_warning:
-                result_by_sequence[seq.sequence_no] = ("PASS (warn)", "#d29922")
-            else:
-                result_by_sequence[seq.sequence_no] = ("FAIL", "#f85149")
-        self._rebuild_rows(result_by_sequence=result_by_sequence)
-
-    def _rebuild_rows(self, *, result_by_sequence: dict[str, tuple[str, str]]) -> None:
+    def _rebuild_rows(self) -> None:
         self._table.blockSignals(True)
         self._table.setRowCount(len(self._sequence_nos))
         for row_idx, sequence_no in enumerate(self._sequence_nos):
             seq_item = QTableWidgetItem(sequence_no or "—")
             seq_item.setFlags(seq_item.flags() & ~Qt.ItemFlag.ItemIsEditable)
-            self._table.setItem(row_idx, 0, seq_item)
-
-            result = result_by_sequence.get(sequence_no)
-            if result is None:
-                result_text, result_color = "—", "#8b949e"
-            else:
-                result_text, result_color = result
-            result_item = QTableWidgetItem(result_text)
-            result_item.setFlags(result_item.flags() & ~Qt.ItemFlag.ItemIsEditable)
-            result_item.setForeground(QBrush(QColor(result_color)))
-            self._table.setItem(row_idx, 1, result_item)
+            self._table.setItem(row_idx, self._COL_SEQUENCE, seq_item)
 
             excluded_edit = _make_excluded_edit(
                 self._excluded_by_sequence.get(sequence_no, "")
             )
             excluded_edit.textChanged.connect(self._on_excluded_changed)
-            self._table.setCellWidget(row_idx, 2, excluded_edit)
+            self._table.setCellWidget(row_idx, self._COL_EXCLUDED, excluded_edit)
+
+            failed_btn = _table_cell_button(self._failed_button_label(sequence_no))
+            has_failures = bool(
+                failed_details_for_sequence(self._failed_details, sequence_no)
+            )
+            failed_btn.setEnabled(has_failures)
+            failed_btn.clicked.connect(
+                lambda *_args, seq=sequence_no: self._open_failed_shotpoints(seq)
+            )
+            failed_container = QWidget()
+            failed_layout = QHBoxLayout(failed_container)
+            failed_layout.setContentsMargins(0, 0, 0, 0)
+            failed_layout.setSpacing(0)
+            failed_layout.addStretch()
+            failed_layout.addWidget(failed_btn)
+            failed_layout.addStretch()
+            self._table.setCellWidget(row_idx, self._COL_FAILED, failed_container)
             self._table.setRowHeight(row_idx, 34)
         self._table.blockSignals(False)
         _fit_table_to_content(self._table)

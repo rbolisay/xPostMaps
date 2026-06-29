@@ -595,7 +595,12 @@ class Postplot4DStatPlotView(QWidget):
             self._acceptance.setText("Acceptance: \u2014")
             self._acceptance.setStyleSheet("color: #8b949e; font-size: 12px;")
             return
-        if evaluation.accepted:
+        if evaluation.accepted and evaluation.has_warning:
+            self._acceptance.setText("Acceptance: PASS (warn)")
+            self._acceptance.setStyleSheet(
+                "color: #d29922; font-size: 13px; font-weight: 700;"
+            )
+        elif evaluation.accepted:
             self._acceptance.setText("Acceptance: PASS")
             self._acceptance.setStyleSheet(
                 "color: #3fb950; font-size: 13px; font-weight: 700;"

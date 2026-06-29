@@ -74,6 +74,29 @@ class _StyleComboBox(QComboBox):
         return LayerStylesDialog._index_from_style(style)
 
 
+_BOUNDARY_VALUE_SPIN_STYLE = (
+    "QDoubleSpinBox {"
+    "background: #1e293b;"
+    "color: #e6edf3;"
+    "border: 1px solid rgba(255, 255, 255, 0.12);"
+    "border-radius: 6px;"
+    "padding: 2px 8px;"
+    "font-size: 12px;"
+    "}"
+)
+
+_BOUNDARY_VALUE_SPIN_DISABLED_STYLE = (
+    "QDoubleSpinBox {"
+    "background: #151b26;"
+    "color: #6e7681;"
+    "border: 1px solid rgba(255, 255, 255, 0.06);"
+    "border-radius: 6px;"
+    "padding: 2px 8px;"
+    "font-size: 12px;"
+    "}"
+)
+
+
 def _make_boundary_value_spin(value: float) -> QDoubleSpinBox:
     """Compact numeric input for boundary limit/reference cells.
 
@@ -87,17 +110,15 @@ def _make_boundary_value_spin(value: float) -> QDoubleSpinBox:
     spin.setValue(value)
     spin.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
     spin.setFixedHeight(26)
-    spin.setStyleSheet(
-        "QDoubleSpinBox {"
-        "background: #1e293b;"
-        "color: #e6edf3;"
-        "border: 1px solid rgba(255, 255, 255, 0.12);"
-        "border-radius: 6px;"
-        "padding: 2px 8px;"
-        "font-size: 12px;"
-        "}"
-    )
+    spin.setStyleSheet(_BOUNDARY_VALUE_SPIN_STYLE)
     return spin
+
+
+def _set_boundary_value_spin_enabled(spin: QDoubleSpinBox, enabled: bool) -> None:
+    spin.setEnabled(enabled)
+    spin.setStyleSheet(
+        _BOUNDARY_VALUE_SPIN_STYLE if enabled else _BOUNDARY_VALUE_SPIN_DISABLED_STYLE
+    )
 
 
 def _make_absolute_checkbox(checked: bool) -> QWidget:

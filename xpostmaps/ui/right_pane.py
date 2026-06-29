@@ -16,12 +16,13 @@ from xpostmaps.core.area_utils import resolve_area_polygon
 from xpostmaps.core.crs_utils import WGS84_EPSG, normalize_epsg, transform_coordinates
 from xpostmaps.core.models import GeoBounds, MapData, PostmapInfo, ProjectSettings, SurveyBounds
 from xpostmaps.core.polygon_import_service import non_imported_polygon_entries
+from xpostmaps.ui.adaptive_layout import RIGHT_PANE_BASE
 from xpostmaps.ui.minimap_widget import MinimapWidget
-
-_MINIMAP_HEIGHT = MinimapWidget._HEIGHT
 from xpostmaps.ui.postmap_card import PostmapInfoCard
 from xpostmaps.ui.print_panel import PrintPanel
 from xpostmaps.ui.theme import BG_PRINT, TEXT_PRINT
+
+_MINIMAP_HEIGHT = MinimapWidget._HEIGHT
 
 
 class RightPane(PrintPanel):
@@ -29,7 +30,7 @@ class RightPane(PrintPanel):
 
     # Panel is 20% wider than the original 360 px and its text scales to match,
     # applied in both the live GUI and the PDF export.
-    _BASE_WIDTH = 432
+    _BASE_WIDTH = RIGHT_PANE_BASE
     _TEXT_SCALE = 1.2
     # The PDF pane is wider than the on-screen panel so two-column metadata and
     # legend text do not clip when painted directly into vector PDFs.
@@ -37,6 +38,10 @@ class RightPane(PrintPanel):
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
+        self._interactive_width = self._BASE_WIDTH
+        self._interactive_minimap_height = _MINIMAP_HEIGHT
+        self._interactive_logo_height = 56
+        self._interactive_text_scale = self._TEXT_SCALE
         self.setFixedWidth(self._BASE_WIDTH)
         self._logo_path = ""
         self.setStyleSheet(f"background: {BG_PRINT}; color: {TEXT_PRINT};")
@@ -45,6 +50,25 @@ class RightPane(PrintPanel):
         self._harm_bar_width_px = 0.0
         self._build_ui()
         self._card.set_text_scale(self._TEXT_SCALE)
+
+    def apply_interactive_layout(
+        self,
+        *,
+        width: int | None,
+        minimap_height: int,
+        text_scale: float,
+        logo_height: int,
+    ) -> None:
+        """Resize the live pane; PDF export keeps ``_BASE_WIDTH * _EXPORT_WIDTH_SCALE``."""
+        if width is not None:
+            self._interactive_width = width
+            self.setFixedWidth(width)
+        self._interactive_minimap_height = minimap_height
+        self._interactive_logo_height = logo_height
+        self._interactive_text_scale = text_scale
+        self._minimap.setFixedHeight(minimap_height)
+        self._logo_label.setFixedHeight(logo_height)
+        self._card.set_text_scale(text_scale)
 
     def _build_ui(self) -> None:
         layout = self.content_layout
@@ -389,5 +413,7 @@ class RightPane(PrintPanel):
         self._card_scroll.setMinimumHeight(0)
         self._card_scroll.setMaximumHeight(_MAX_WIDGET_SIZE)
         self._minimap.set_export_mode(False)
-        self._minimap.setFixedHeight(_MINIMAP_HEIGHT)
-        self.setFixedWidth(self._BASE_WIDTH)
+        self._minimap.setFixedHeight(self._interactive_minimap_height)
+        self._logo_label.setFixedHeight(self._interactive_logo_height)
+        self._card.set_text_scale(self._interactive_text_scale)
+        self.setFixedWidth(self._interactive_width)

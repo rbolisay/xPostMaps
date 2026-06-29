@@ -18,6 +18,7 @@ from xpostmaps.core.postplot_4d_plot_data import (
     SequenceDiffSet,
     build_plot_series,
     ordered_sequence_sets,
+    primary_sequence_set,
     unique_sources_from_diff_rows,
 )
 
@@ -47,10 +48,10 @@ class Severity(str, Enum):
 
 
 STAT_TYPE_LABELS: dict[StatType, str] = {
-    StatType.AVERAGE: "Average",
+    StatType.AVERAGE: "Average for Whole Line",
     StatType.MAX_PCT_FAILURE: "Max Percentage of Failure",
     StatType.MAX_CONSECUTIVE_FAILED: "Max Consecutive Failed Shotpoint",
-    StatType.MAX_VALUE: "Max Value",
+    StatType.MAX_VALUE: "Absolute Max",
 }
 
 SEVERITY_LABELS: dict[Severity, str] = {
@@ -58,13 +59,24 @@ SEVERITY_LABELS: dict[Severity, str] = {
     Severity.ERROR: "Error",
 }
 
-# Statistics that compare per-shotpoint values against the Reference Value to
-# decide which shotpoints "fail"; only these use the Reference Value column.
+# Statistics that compare per-shotpoint values against the Metric Limit to
+# decide which shotpoints "fail"; only these use the Metric Limit column.
+# Failure uses |value| > limit regardless of the Absolute column.
 _REFERENCE_STATS = (StatType.MAX_PCT_FAILURE, StatType.MAX_CONSECUTIVE_FAILED)
 
 
 def stat_uses_reference(statistic: StatType) -> bool:
     return statistic in _REFERENCE_STATS
+
+
+def stat_uses_absolute(statistic: StatType) -> bool:
+    """Only Average and Absolute Max use the Absolute column."""
+    return statistic in (StatType.AVERAGE, StatType.MAX_VALUE)
+
+
+def _shot_exceeds_metric_limit(value: float, limit: float) -> bool:
+    """True when |value| exceeds the per-shot metric tolerance (Metric Limit)."""
+    return abs(value) > abs(float(limit))
 
 
 def stat_type_from_str(text: str) -> StatType:
@@ -144,15 +156,42 @@ class SequenceEvaluation:
 class SurveyEvaluation:
     sequences: list[SequenceEvaluation] = field(default_factory=list)
     spec_count: int = 0
+    failed_details: list["FailedSpecDetail"] = field(default_factory=list)
 
     @property
     def accepted(self) -> bool:
-        """PASS unless any sequence fails an Error-severity spec."""
-        return all(seq.passed for seq in self.sequences)
+        """PASS unless any combined Error-severity spec fails."""
+        return not any(
+            (not result.passed)
+            and result.applicable
+            and result.spec.severity == Severity.ERROR
+            for result in self.combined_results
+        )
 
     @property
     def has_warning(self) -> bool:
-        return any(seq.has_warning for seq in self.sequences)
+        return any(
+            (not result.passed)
+            and result.applicable
+            and result.spec.severity == Severity.WARNING
+            for result in self.combined_results
+        )
+
+    @property
+    def combined_results(self) -> list[SpecResult]:
+        if not self.sequences:
+            return []
+        return self.sequences[0].results
+
+
+@dataclass
+class FailedSpecDetail:
+    """One failed survey-spec row with shotpoints attributed to a sequence."""
+
+    sequence_no: str
+    shotpoints_text: str
+    statistic_text: str
+    applies_to_all_sequences: bool = False
 
 
 def _apply_absolute(values: list[float], absolute: bool) -> list[float]:
@@ -161,13 +200,38 @@ def _apply_absolute(values: list[float], absolute: bool) -> list[float]:
     return [abs(value) for value in values]
 
 
-def _max_consecutive(flags: list[bool]) -> int:
-    best = run = 0
-    for flag in flags:
-        run = run + 1 if flag else 0
-        if run > best:
-            best = run
-    return best
+def _max_consecutive_failed_shotpoints(
+    diff_set: SequenceDiffSet,
+    kind: PlotKind,
+    reference_value: float,
+    excluded_shotpoints: set[int] | None = None,
+) -> float | None:
+    """Longest run of failed shotpoints along acquisition order, per source."""
+    excluded = excluded_shotpoints or set()
+    best = 0
+    any_data = False
+    for source_no in unique_sources_from_diff_rows(diff_set.diff_rows):
+        built = build_plot_series(
+            diff_set.diff_rows,
+            diff_set.match_row,
+            kind,
+            source_no,
+        )
+        if not built.shotpoints:
+            continue
+        any_data = True
+        run = 0
+        for shotpoint, value in zip(built.shotpoints, built.values, strict=False):
+            if shotpoint in excluded:
+                run = 0
+                continue
+            if _shot_exceeds_metric_limit(value, reference_value):
+                run += 1
+                if run > best:
+                    best = run
+            else:
+                run = 0
+    return float(best) if any_data else None
 
 
 def _ordered_series_for_sequence(
@@ -214,16 +278,31 @@ def _compute_statistic(
     if spec.statistic == StatType.MAX_VALUE:
         return max(adjusted_flat)
     if spec.statistic == StatType.MAX_PCT_FAILURE:
-        fails = sum(1 for value in adjusted_flat if value > spec.reference_value)
-        return 100.0 * fails / len(adjusted_flat)
-    if spec.statistic == StatType.MAX_CONSECUTIVE_FAILED:
-        best = 0
-        for series in per_source_values:
-            adjusted = _apply_absolute(series, spec.absolute)
-            flags = [value > spec.reference_value for value in adjusted]
-            best = max(best, _max_consecutive(flags))
-        return float(best)
+        fails = sum(
+            1 for value in flat if _shot_exceeds_metric_limit(value, spec.reference_value)
+        )
+        return 100.0 * fails / len(flat)
     return None
+
+
+def _compute_statistic_with_exclusions(
+    diff_set: SequenceDiffSet,
+    spec: SurveySpecRow,
+    excluded_shotpoints: set[int] | None = None,
+) -> float | None:
+    if spec.statistic == StatType.MAX_CONSECUTIVE_FAILED:
+        return _max_consecutive_failed_shotpoints(
+            diff_set,
+            spec.metric,
+            spec.reference_value,
+            excluded_shotpoints,
+        )
+    per_source = _ordered_series_for_sequence(
+        diff_set,
+        spec.metric,
+        excluded_shotpoints=excluded_shotpoints,
+    )
+    return _compute_statistic(per_source, spec)
 
 
 def evaluate_spec_for_sequence(
@@ -237,7 +316,11 @@ def evaluate_spec_for_sequence(
         excluded_shotpoints=excluded_shotpoints,
     )
     sample_count = sum(len(series) for series in per_source)
-    computed = _compute_statistic(per_source, spec)
+    computed = _compute_statistic_with_exclusions(
+        diff_set,
+        spec,
+        excluded_shotpoints=excluded_shotpoints,
+    )
     sequence_no = diff_set.match_row.sequence_no
     if computed is None:
         return SpecResult(
@@ -264,23 +347,299 @@ def evaluate_survey_specs(
     specs: list[SurveySpecRow],
     excluded_by_sequence: dict[str, str] | None = None,
 ) -> SurveyEvaluation:
-    """Evaluate every spec row against every sequence in *sets*."""
+    """Evaluate every spec row against all sequences combined as one test."""
     excluded_map = excluded_by_sequence or {}
-    sequences: list[SequenceEvaluation] = []
+    if not sets or not specs:
+        return SurveyEvaluation(spec_count=len(specs))
+
+    ordered = ordered_sequence_sets(sets)
+    sequence_label = _combined_sequence_label(ordered)
+    results: list[SpecResult] = []
+    failed_details: list[FailedSpecDetail] = []
+
+    for spec in specs:
+        result, details = evaluate_spec_combined(ordered, spec, excluded_map)
+        results.append(result)
+        if not result.passed and result.applicable:
+            failed_details.extend(details)
+
+    return SurveyEvaluation(
+        sequences=[
+            SequenceEvaluation(
+                sequence_no=sequence_label,
+                results=results,
+            )
+        ],
+        spec_count=len(specs),
+        failed_details=failed_details,
+    )
+
+
+def _combined_sequence_label(sets: list[SequenceDiffSet]) -> str:
+    numbers = [item.match_row.sequence_no for item in sets if item.match_row.sequence_no]
+    return ", ".join(numbers) if numbers else "—"
+
+
+def _all_source_series(
+    sets: list[SequenceDiffSet],
+    kind: PlotKind,
+    excluded_map: dict[str, str],
+) -> list[tuple[str, list[int], list[float]]]:
+    """Per-source shotpoint series: (sequence_no, shotpoints, values)."""
+    if not sets:
+        return []
+    direction_row = primary_sequence_set(sets).match_row
+    series: list[tuple[str, list[int], list[float]]] = []
     for diff_set in ordered_sequence_sets(sets):
         sequence_no = diff_set.match_row.sequence_no
         excluded = parse_excluded_shotpoints(excluded_map.get(sequence_no, ""))
-        results = [
-            evaluate_spec_for_sequence(diff_set, spec, excluded_shotpoints=excluded)
-            for spec in specs
-        ]
-        sequences.append(
-            SequenceEvaluation(
-                sequence_no=sequence_no,
-                results=results,
+        for source_no in unique_sources_from_diff_rows(diff_set.diff_rows):
+            built = build_plot_series(
+                diff_set.diff_rows,
+                direction_row,
+                kind,
+                source_no,
             )
+            shotpoints: list[int] = []
+            values: list[float] = []
+            for shotpoint, value in zip(built.shotpoints, built.values, strict=False):
+                if shotpoint in excluded:
+                    continue
+                shotpoints.append(shotpoint)
+                values.append(float(value))
+            if shotpoints:
+                series.append((sequence_no, shotpoints, values))
+    return series
+
+
+def _pooled_values(
+    sets: list[SequenceDiffSet],
+    kind: PlotKind,
+    excluded_map: dict[str, str],
+) -> list[tuple[str, int, float]]:
+    """Flat list of (sequence_no, shotpoint, value) across all sources."""
+    pooled: list[tuple[str, int, float]] = []
+    for sequence_no, shotpoints, values in _all_source_series(sets, kind, excluded_map):
+        for shotpoint, value in zip(shotpoints, values, strict=False):
+            pooled.append((sequence_no, shotpoint, value))
+    return pooled
+
+
+def _longest_failed_streak(
+    shotpoints: list[int],
+    values: list[float],
+    metric_limit: float,
+) -> list[int]:
+    best: list[int] = []
+    current: list[int] = []
+    for shotpoint, value in zip(shotpoints, values, strict=False):
+        if _shot_exceeds_metric_limit(value, metric_limit):
+            current.append(shotpoint)
+            if len(current) > len(best):
+                best = list(current)
+        else:
+            current = []
+    return best
+
+
+def format_shotpoint_ranges(shotpoints: list[int]) -> str:
+    """Format shotpoints as comma-separated values and ranges (e.g. 1001, 1003, 1010-1020)."""
+    unique = sorted(set(shotpoints))
+    if not unique:
+        return "—"
+    parts: list[str] = []
+    start = end = unique[0]
+    for shotpoint in unique[1:]:
+        if shotpoint == end + 1:
+            end = shotpoint
+            continue
+        parts.append(str(start) if start == end else f"{start}-{end}")
+        start = end = shotpoint
+    parts.append(str(start) if start == end else f"{start}-{end}")
+    return ", ".join(parts)
+
+
+def format_limit_value(spec: SurveySpecRow) -> str:
+    if spec.statistic == StatType.MAX_PCT_FAILURE:
+        return f"{spec.stat_value:g}%"
+    if spec.statistic == StatType.MAX_CONSECUTIVE_FAILED:
+        return f"{int(round(spec.stat_value))}"
+    return f"{spec.stat_value:g}"
+
+
+def format_failure_reason(spec: SurveySpecRow, computed: float) -> str:
+    stat_label = STAT_TYPE_LABELS[spec.statistic]
+    metric_label = METRIC_LABELS[spec.metric]
+    computed_text = format_statistic(spec.statistic, computed)
+    limit_text = format_limit_value(spec)
+    if spec.statistic == StatType.MAX_PCT_FAILURE:
+        return (
+            f"{computed_text} exceeded limit {limit_text}: "
+            f"{stat_label} / {metric_label}"
         )
-    return SurveyEvaluation(sequences=sequences, spec_count=len(specs))
+    if spec.statistic == StatType.MAX_CONSECUTIVE_FAILED:
+        return (
+            f"{computed_text} consecutive failed shotpoints (limit {limit_text}): "
+            f"{stat_label} / {metric_label}"
+        )
+    if spec.statistic == StatType.AVERAGE:
+        return (
+            f"Average {computed_text} exceeded limit {limit_text}: "
+            f"{stat_label} / {metric_label}"
+        )
+    return (
+        f"Max {computed_text} exceeded limit {limit_text}: "
+        f"{stat_label} / {metric_label}"
+    )
+
+
+def _details_for_failed_spec(
+    sets: list[SequenceDiffSet],
+    spec: SurveySpecRow,
+    excluded_map: dict[str, str],
+    computed: float,
+) -> list[FailedSpecDetail]:
+    reason = format_failure_reason(spec, computed)
+    sequence_nos = [
+        item.match_row.sequence_no
+        for item in ordered_sequence_sets(sets)
+        if item.match_row.sequence_no
+    ]
+    combined_label = _combined_sequence_label(sets)
+
+    if spec.statistic in _REFERENCE_STATS:
+        by_sequence: dict[str, list[int]] = {seq: [] for seq in sequence_nos}
+        if spec.statistic == StatType.MAX_CONSECUTIVE_FAILED:
+            worst: list[int] = []
+            worst_sequence = sequence_nos[0] if sequence_nos else "—"
+            for sequence_no, shotpoints, values in _all_source_series(
+                sets, spec.metric, excluded_map
+            ):
+                streak = _longest_failed_streak(shotpoints, values, spec.reference_value)
+                if len(streak) > len(worst):
+                    worst = streak
+                    worst_sequence = sequence_no
+            if worst:
+                by_sequence[worst_sequence] = worst
+        else:
+            for sequence_no, shotpoint, value in _pooled_values(
+                sets, spec.metric, excluded_map
+            ):
+                if _shot_exceeds_metric_limit(value, spec.reference_value):
+                    by_sequence.setdefault(sequence_no, []).append(shotpoint)
+
+        details: list[FailedSpecDetail] = []
+        for sequence_no in sequence_nos:
+            shotpoints = by_sequence.get(sequence_no, [])
+            if not shotpoints:
+                continue
+            details.append(
+                FailedSpecDetail(
+                    sequence_no=sequence_no,
+                    shotpoints_text=format_shotpoint_ranges(shotpoints),
+                    statistic_text=reason,
+                )
+            )
+        return details
+
+    return [
+        FailedSpecDetail(
+            sequence_no=combined_label,
+            shotpoints_text="—",
+            statistic_text=reason,
+            applies_to_all_sequences=True,
+        )
+    ]
+
+
+def evaluate_spec_combined(
+    sets: list[SequenceDiffSet],
+    spec: SurveySpecRow,
+    excluded_map: dict[str, str],
+) -> tuple[SpecResult, list[FailedSpecDetail]]:
+    """Evaluate one spec against all sequences combined."""
+    sequence_label = _combined_sequence_label(sets)
+    pooled = _pooled_values(sets, spec.metric, excluded_map)
+    sample_count = len(pooled)
+    if not pooled:
+        return (
+            SpecResult(
+                spec=spec,
+                sequence_no=sequence_label,
+                computed=None,
+                passed=True,
+                applicable=False,
+                sample_count=0,
+            ),
+            [],
+        )
+
+    values = [value for _, _, value in pooled]
+    computed: float | None
+    if spec.statistic == StatType.AVERAGE:
+        adjusted = _apply_absolute(values, spec.absolute)
+        computed = sum(adjusted) / len(adjusted)
+    elif spec.statistic == StatType.MAX_VALUE:
+        adjusted = _apply_absolute(values, spec.absolute)
+        computed = max(adjusted)
+    elif spec.statistic == StatType.MAX_PCT_FAILURE:
+        fails = sum(
+            1 for value in values if _shot_exceeds_metric_limit(value, spec.reference_value)
+        )
+        computed = 100.0 * fails / len(values)
+    elif spec.statistic == StatType.MAX_CONSECUTIVE_FAILED:
+        best = 0
+        for _, shotpoints, series_values in _all_source_series(
+            sets, spec.metric, excluded_map
+        ):
+            streak = _longest_failed_streak(
+                shotpoints, series_values, spec.reference_value
+            )
+            best = max(best, len(streak))
+        computed = float(best)
+    else:
+        computed = None
+
+    if computed is None:
+        return (
+            SpecResult(
+                spec=spec,
+                sequence_no=sequence_label,
+                computed=None,
+                passed=True,
+                applicable=False,
+                sample_count=sample_count,
+            ),
+            [],
+        )
+
+    passed = computed <= spec.stat_value
+    details: list[FailedSpecDetail] = []
+    if not passed:
+        details = _details_for_failed_spec(sets, spec, excluded_map, computed)
+    return (
+        SpecResult(
+            spec=spec,
+            sequence_no=sequence_label,
+            computed=computed,
+            passed=passed,
+            applicable=True,
+            sample_count=sample_count,
+        ),
+        details,
+    )
+
+
+def failed_details_for_sequence(
+    details: list[FailedSpecDetail],
+    sequence_no: str,
+) -> list[FailedSpecDetail]:
+    """Return failure rows visible for one sequence in the results table."""
+    return [
+        detail
+        for detail in details
+        if detail.applies_to_all_sequences or detail.sequence_no == sequence_no
+    ]
 
 
 def format_statistic(statistic: StatType, value: float | None) -> str:

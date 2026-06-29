@@ -31,6 +31,43 @@ MINIMAP_LAND = "#c8d3a6"
 MINIMAP_COAST = "#6b5344"
 GRID_PRINT_ALPHA = 0.45
 
+_UI_SCALE_MIN = 0.78
+_UI_SCALE_MAX = 1.0
+
+
+def _ui_px(value: float, ui_scale: float) -> int:
+    scale = max(_UI_SCALE_MIN, min(_UI_SCALE_MAX, ui_scale))
+    return max(1, int(round(value * scale)))
+
+
+def density_overrides(ui_scale: float = 1.0) -> str:
+    """Extra stylesheet for compact screens; does not affect print/export widgets."""
+    if abs(ui_scale - 1.0) < 0.005:
+        return ""
+    px = lambda value: _ui_px(value, ui_scale)
+    return f"""
+    QWidget {{
+        font-size: {px(13)}px;
+    }}
+    QLineEdit, QComboBox, QSpinBox, QDoubleSpinBox {{
+        padding: {px(8)}px {px(12)}px;
+        border-radius: {px(8)}px;
+    }}
+    QPushButton {{
+        padding: {px(8)}px {px(14)}px;
+        border-radius: {px(8)}px;
+    }}
+    QPushButton#dirBtn {{
+        padding: {px(10)}px {px(14)}px;
+    }}
+    QPushButton#primaryBtn {{
+        padding: {px(8)}px {px(16)}px;
+    }}
+    QLabel {{
+        font-size: {px(13)}px;
+    }}
+    """
+
 
 def app_stylesheet() -> str:
     return f"""

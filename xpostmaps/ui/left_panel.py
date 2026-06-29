@@ -12,6 +12,7 @@ from PySide6.QtWidgets import (
     QLineEdit,
     QProgressBar,
     QPushButton,
+    QScrollArea,
     QSizePolicy,
     QVBoxLayout,
     QWidget,
@@ -55,15 +56,21 @@ class _BrandLogoHeader(QWidget):
         super().__init__(parent)
         self._source = _trim_logo_pixmap(logo_path)
         self._logo = QPixmap()
+        self._ui_scale = 1.0
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        self._sync_logo_size()
+
+    def set_ui_scale(self, ui_scale: float) -> None:
+        self._ui_scale = max(0.78, min(1.0, ui_scale))
         self._sync_logo_size()
 
     def _sync_logo_size(self) -> None:
         if self._source.isNull():
             self.setFixedHeight(48)
             return
+        target_w = max(int(round(self._LOGO_TARGET_WIDTH * self._ui_scale)), 120)
         self._logo = self._source.scaledToWidth(
-            self._LOGO_TARGET_WIDTH,
+            target_w,
             Qt.TransformationMode.SmoothTransformation,
         )
         self.setFixedHeight(self._logo.height() + self._VERT_PAD * 2)
@@ -113,8 +120,8 @@ class LeftPanel(GlassPanel):
         layout = self.content_layout
         layout.setContentsMargins(0, 16, 0, 16)
 
-        header = _BrandLogoHeader(str(APP_LOGO_PATH))
-        layout.addWidget(header)
+        self._header = _BrandLogoHeader(str(APP_LOGO_PATH))
+        layout.addWidget(self._header)
 
         sub = QLabel(APP_SUBTITLE)
         sub.setAlignment(Qt.AlignmentFlag.AlignHCenter)
@@ -123,11 +130,23 @@ class LeftPanel(GlassPanel):
         )
         layout.addWidget(sub)
 
+        self._scroll = QScrollArea()
+        self._scroll.setObjectName("leftPanelScroll")
+        self._scroll.setWidgetResizable(True)
+        self._scroll.setFrameShape(QScrollArea.Shape.NoFrame)
+        self._scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self._scroll.setStyleSheet(
+            "QScrollArea#leftPanelScroll { background: transparent; border: none; }"
+        )
+
         body = QWidget()
+        body.setObjectName("leftPanelBody")
+        body.setStyleSheet("#leftPanelBody { background: transparent; }")
         body_layout = QVBoxLayout(body)
         body_layout.setContentsMargins(16, 0, 16, 0)
         body_layout.setSpacing(12)
-        layout.addWidget(body, stretch=1)
+        self._scroll.setWidget(body)
+        layout.addWidget(self._scroll, stretch=1)
 
         proj_title = QLabel("Project")
         proj_title.setObjectName("sectionTitle")
@@ -268,6 +287,20 @@ class LeftPanel(GlassPanel):
         tips.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignBottom)
         tips.setStyleSheet("color: #6e7681; font-size: 10px; padding-top: 8px;")
         body_layout.addWidget(tips)
+
+    def apply_interactive_layout(self, ui_scale: float) -> None:
+        self._header.set_ui_scale(ui_scale)
+
+    def refresh_button_styles(self) -> None:
+        self._refresh_button_style(self._save_btn)
+        for button in self._active_buttons.values():
+            self._refresh_button_style(button)
+
+    @staticmethod
+    def _refresh_button_style(button: QPushButton) -> None:
+        button.style().unpolish(button)
+        button.style().polish(button)
+        button.update()
 
     def set_project_name(self, name: str) -> None:
         self._project_input.blockSignals(True)

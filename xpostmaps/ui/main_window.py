@@ -14,6 +14,7 @@ from PySide6.QtWidgets import (
     QLabel,
     QMainWindow,
     QMessageBox,
+    QSplitter,
     QStatusBar,
     QVBoxLayout,
     QWidget,
@@ -67,10 +68,18 @@ from xpostmaps.ui.dialogs.postmap_info_dialog import PostmapInfoDialog
 from xpostmaps.ui.dialogs.postplot_4d_dialog import Postplot4DDialog
 from xpostmaps.ui.dialogs.preplot_navplan_dialog import PreplotNavplanDialog
 from xpostmaps.ui.dialogs.project_browser_dialog import ProjectBrowserDialog
+from xpostmaps.ui.adaptive_layout import (
+    MAX_LEFT_WIDTH,
+    MIN_MAP_WIDTH,
+    MIN_WINDOW_HEIGHT,
+    MIN_WINDOW_WIDTH,
+    compute_panel_layout,
+    splitter_sizes,
+)
 from xpostmaps.ui.left_panel import LeftPanel
 from xpostmaps.ui.map_widget import PostplotMapWidget
 from xpostmaps.ui.right_pane import RightPane
-from xpostmaps.ui.theme import BG_DARK, app_stylesheet, themed_open_file
+from xpostmaps.ui.theme import BG_DARK, app_stylesheet, density_overrides, themed_open_file
 
 
 class MainWindow(QMainWindow):
@@ -109,7 +118,15 @@ class MainWindow(QMainWindow):
         )
 
         self.setWindowTitle(APP_WINDOW_TITLE)
+        self.setMinimumSize(MIN_WINDOW_WIDTH, MIN_WINDOW_HEIGHT)
         self.resize(1600, 900)
+        self._ui_scale = 1.0
+        self._user_splitter_adjusted = False
+        self._last_auto_layout_width = 0
+        self._layout_timer = QTimer(self)
+        self._layout_timer.setSingleShot(True)
+        self._layout_timer.setInterval(120)
+        self._layout_timer.timeout.connect(self._apply_adaptive_layout)
         self.setStyleSheet(app_stylesheet())
 
         central = QWidget()
@@ -120,27 +137,31 @@ class MainWindow(QMainWindow):
         root.setContentsMargins(12, 12, 12, 6)
         root.setSpacing(4)
 
-        content = QHBoxLayout()
-        content.setContentsMargins(0, 0, 0, 0)
-        content.setSpacing(12)
+        self._splitter = QSplitter(Qt.Orientation.Horizontal)
+        self._splitter.setHandleWidth(6)
+        self._splitter.setChildrenCollapsible(True)
+        self._splitter.splitterMoved.connect(self._on_splitter_moved)
 
         self._left = LeftPanel()
-        self._left.setFixedWidth(320)
+        self._left.setMinimumWidth(220)
+        self._left.setMaximumWidth(MAX_LEFT_WIDTH)
 
         self._map = PostplotMapWidget()
+        self._map.setMinimumWidth(MIN_MAP_WIDTH)
+
         self._right = RightPane()
 
-        sheet = QHBoxLayout()
-        sheet.setContentsMargins(0, 0, 0, 0)
-        sheet.setSpacing(0)
-        sheet.addWidget(self._map, stretch=1)
-        sheet.addWidget(self._right, stretch=0)
+        self._splitter.addWidget(self._left)
+        self._splitter.addWidget(self._map)
+        self._splitter.addWidget(self._right)
+        self._splitter.setStretchFactor(0, 0)
+        self._splitter.setStretchFactor(1, 1)
+        self._splitter.setStretchFactor(2, 0)
+        self._splitter.setCollapsible(0, True)
+        self._splitter.setCollapsible(1, False)
+        self._splitter.setCollapsible(2, True)
 
-        sheet_host = QWidget()
-        sheet_host.setLayout(sheet)
-        content.addWidget(self._left)
-        content.addWidget(sheet_host, stretch=1)
-        root.addLayout(content, stretch=1)
+        root.addWidget(self._splitter, stretch=1)
 
         credit = QLabel(DEVELOPER_CREDIT_HTML)
         credit.setTextFormat(Qt.TextFormat.RichText)
@@ -159,6 +180,64 @@ class MainWindow(QMainWindow):
 
         self._connect_signals()
         self._refresh_ui()
+
+    def showEvent(self, event) -> None:  # noqa: N802
+        super().showEvent(event)
+        handle = self.windowHandle()
+        if handle is not None and not getattr(self, "_screen_hooked", False):
+            handle.screenChanged.connect(self._on_screen_changed)
+            self._screen_hooked = True
+        QTimer.singleShot(0, lambda: self._apply_adaptive_layout(force=True))
+
+    def resizeEvent(self, event) -> None:  # noqa: N802
+        super().resizeEvent(event)
+        self._layout_timer.start()
+
+    def _on_screen_changed(self, _screen) -> None:
+        self._user_splitter_adjusted = False
+        QTimer.singleShot(0, lambda: self._apply_adaptive_layout(force=True))
+
+    def _on_splitter_moved(self, _pos: int, _index: int) -> None:
+        self._user_splitter_adjusted = True
+
+    def _apply_adaptive_layout(self, *, force: bool = False) -> None:
+        central = self.centralWidget()
+        if central is None:
+            return
+        avail_w = max(central.width(), 1)
+        avail_h = max(central.height(), 1)
+        if (
+            not force
+            and avail_w == self._last_auto_layout_width
+            and not self._user_splitter_adjusted
+        ):
+            return
+        layout = compute_panel_layout(avail_w, avail_h)
+        if not self._user_splitter_adjusted or force:
+            self._splitter.setSizes(splitter_sizes(layout))
+            self._last_auto_layout_width = avail_w
+        self._left.setMinimumWidth(layout.left_width)
+        self._left.setMaximumWidth(MAX_LEFT_WIDTH)
+        right_width = (
+            layout.right_width if (not self._user_splitter_adjusted or force) else None
+        )
+        self._right.apply_interactive_layout(
+            width=right_width,
+            minimap_height=layout.minimap_height,
+            text_scale=layout.right_text_scale,
+            logo_height=layout.logo_height,
+        )
+        self._left.apply_interactive_layout(layout.ui_scale)
+        self._apply_ui_density(layout.ui_scale)
+
+    def _apply_ui_density(self, ui_scale: float) -> None:
+        if abs(ui_scale - self._ui_scale) < 0.005:
+            return
+        self._ui_scale = ui_scale
+        app = QApplication.instance()
+        if app is not None:
+            app.setStyleSheet(app_stylesheet() + density_overrides(ui_scale))
+        self._left.refresh_button_styles()
 
     def map_sheet_size(self) -> tuple[int, int]:
         """Pixel width and height of the map + right pane sheet."""
