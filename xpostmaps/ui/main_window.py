@@ -40,7 +40,8 @@ from xpostmaps.core.models import (
 from xpostmaps.core.parse_worker import ParseWorker
 from xpostmaps.core.postplot_4d_cache_worker import Postplot4DCacheWarmWorker
 from xpostmaps.core.postplot_4d_diff import calculate_match_diff_rows
-from xpostmaps.core.postplot_4d_matching import build_postplot_4d_rows
+from xpostmaps.core.postplot_4d_diff_worker import DiffStatRecalcWorker
+from xpostmaps.core.postplot_4d_matching import Postplot4DMatchRow, build_postplot_4d_rows
 from xpostmaps.core.crs_utils import normalize_epsg
 from xpostmaps.core.navplan_catalog_utils import (
     build_navplan_catalog_from_segments,
@@ -92,6 +93,11 @@ class MainWindow(QMainWindow):
         self._navplan_file_signature: tuple | None = None
         self._worker: ParseWorker | None = None
         self._postplot_cache_worker: Postplot4DCacheWarmWorker | None = None
+        # Background fill of missing 4D diffs so conditional colors paint every
+        # matching sequence, not only the ones already saved via Diff Stat.
+        self._conditional_diff_fill_worker: DiffStatRecalcWorker | None = None
+        self._conditional_diff_fill_attempted: set[str] = set()
+        self._conditional_diff_fill_attempted_version: int = -1
         self._loading_project = False
         self._parsing = False
         self._closing_after_parse = False
@@ -617,6 +623,7 @@ class MainWindow(QMainWindow):
             if row.has_match
         ]
         points: list[tuple[float, float, str, float, float]] = []
+        missing_rows: dict[str, Postplot4DMatchRow] = {}
         for entry in active_entries:
             for match_row in match_rows:
                 if not sequence_id_matches(match_row.sequence_id, entry.sequence_ids):
@@ -627,6 +634,11 @@ class MainWindow(QMainWindow):
                     bulk_diffs=bulk_diffs,
                     calculate_if_missing=False,
                 )
+                if not diff_rows:
+                    # No saved diff yet for this matching sequence — schedule a
+                    # background calculation so its conditional color appears too.
+                    missing_rows.setdefault(match_row.sequence_id, match_row)
+                    continue
                 for diff_row in diff_rows:
                     rule = self._conditional_rule_for_diff_row(
                         entry.conditional_colors,
@@ -645,6 +657,7 @@ class MainWindow(QMainWindow):
                     )
         self._map.set_conditional_postplot_points(points)
         self._conditional_points_signature_cache = signature
+        self._ensure_conditional_diffs_async(list(missing_rows.values()))
 
     def _deferred_refresh_conditional_postplot_points(self) -> None:
         """Apply conditional postplot colors after the project shell is visible."""
@@ -653,6 +666,74 @@ class MainWindow(QMainWindow):
         self._refresh_conditional_postplot_points()
         if self._map_data is not None:
             self._map.render(self._map_data, force=True)
+
+    def _ensure_conditional_diffs_async(
+        self,
+        missing_rows: list[Postplot4DMatchRow],
+    ) -> None:
+        """Compute and persist missing 4D diffs in the background.
+
+        Conditional colors only paint sequences that already have saved diff
+        rows. When an active rule matches a sequence whose diff has not been
+        calculated yet, compute it off the UI thread (reusing the Diff Stat
+        worker) and refresh colors when the rows land — pan/zoom stays snappy.
+        """
+        if not missing_rows or self._parsing or self._loading_project:
+            return
+        project_name = self._settings.name.strip()
+        if not project_name or self._map_data is None:
+            return
+        if (
+            self._conditional_diff_fill_worker is not None
+            and self._conditional_diff_fill_worker.isRunning()
+        ):
+            return
+        if self._conditional_diff_fill_attempted_version != self._conditional_data_version:
+            self._conditional_diff_fill_attempted = set()
+            self._conditional_diff_fill_attempted_version = self._conditional_data_version
+        pending = [
+            row
+            for row in missing_rows
+            if row.sequence_id
+            and row.sequence_id not in self._conditional_diff_fill_attempted
+        ]
+        if not pending:
+            return
+        for row in pending:
+            self._conditional_diff_fill_attempted.add(row.sequence_id)
+        worker = DiffStatRecalcWorker(
+            lambda: self._map_data,
+            self._settings,
+            self._current_positions,
+            match_rows=pending,
+            load_source_positions_per_match=True,
+            db_path=self._db.db_path,
+            project_name=project_name,
+            parent=self,
+        )
+        self._conditional_diff_fill_worker = worker
+        queued = Qt.ConnectionType.QueuedConnection
+        worker.finished_batch.connect(self._on_conditional_diff_fill_finished, queued)
+        worker.finished.connect(self._on_conditional_diff_fill_thread_finished, queued)
+        worker.start()
+
+    def _on_conditional_diff_fill_finished(
+        self,
+        recalculated: int,
+        _skipped: int,
+        _failed: int,
+        _elapsed: float,
+        cancelled: bool,
+    ) -> None:
+        if cancelled or recalculated <= 0:
+            return
+        # New diff rows were saved — drop cached misses and repaint colors.
+        self._conditional_points_signature_cache = None
+        self._match_diff_cache = {}
+        QTimer.singleShot(0, self._deferred_refresh_conditional_postplot_points)
+
+    def _on_conditional_diff_fill_thread_finished(self) -> None:
+        self._conditional_diff_fill_worker = None
 
     def _cached_match_diff_rows(
         self,
@@ -733,6 +814,13 @@ class MainWindow(QMainWindow):
         self._conditional_data_version += 1
         self._match_diff_cache = {}
         self._conditional_points_signature_cache = None
+        # A background fill in flight was computed against the old data; stop it
+        # so the next refresh relaunches against the new positions/baseline.
+        if (
+            self._conditional_diff_fill_worker is not None
+            and self._conditional_diff_fill_worker.isRunning()
+        ):
+            self._conditional_diff_fill_worker.cancel()
 
     def _delete_saved_postplot_4d_diffs_for_baseline(self, baseline_kind: str) -> None:
         name = self._settings.name.strip()
@@ -1543,6 +1631,11 @@ class MainWindow(QMainWindow):
         self._metadata_autosave.set_enabled(False)
         if self._postplot_cache_worker is not None and self._postplot_cache_worker.isRunning():
             self._postplot_cache_worker.cancel()
+        if (
+            self._conditional_diff_fill_worker is not None
+            and self._conditional_diff_fill_worker.isRunning()
+        ):
+            self._conditional_diff_fill_worker.cancel()
         if self._worker and self._worker.isRunning():
             self._closing_after_parse = True
             self._save_close_metadata()

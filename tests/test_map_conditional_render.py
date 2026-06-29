@@ -104,7 +104,65 @@ def test_colored_gl_line_keeps_one_item_and_colors_existing_segments(qapp) -> No
     ]
 
 
-def test_colored_resident_layers_are_kept_during_overview_motion(qapp) -> None:
+class _FakeOverlay:
+    """Captures GL line uploads so we can assert the chosen GL representation."""
+
+    available = True
+
+    def __init__(self) -> None:
+        self.runs: list[dict] = []
+
+    def add_line_run(self, layer_id, run_index, rx, ry, *, color, width, mode):
+        self.runs.append(
+            {
+                "rx": np.asarray(rx),
+                "ry": np.asarray(ry),
+                "color": color,
+                "mode": mode,
+            }
+        )
+
+    def set_layer_visible(self, *_args, **_kwargs):
+        pass
+
+
+def test_colored_lines_upload_as_uniform_color_strips(qapp) -> None:
+    xs = np.array([1.0, 2.0, 3.0, 4.0, 5.0], dtype=np.float64)
+    ys = np.array([10.0, 20.0, 30.0, 40.0, 50.0], dtype=np.float64)
+    red = [1.0, 0.0, 0.0, 1.0]
+    green = [0.0, 1.0, 0.0, 1.0]
+    colors = np.array([red, red, green, green, green], dtype=np.float32)
+
+    overlay = _FakeOverlay()
+    layer = ResidentGlLineLayer(
+        parts=[(xs, ys)],
+        color_parts=[colors],
+        pen=_make_nav_pen((0, 0, 255, 255), 1.0, LineStyle.SOLID, dpi=96.0),
+        export_pen=_make_nav_pen((0, 0, 255, 255), 1.0, LineStyle.SOLID, dpi=96.0),
+        line_style=LineStyle.SOLID,
+        map_layer="postplot",
+        plot_item=None,
+        gl_overlay=overlay,
+        line_items=[],
+        plot_items=[],
+    )
+
+    layer.upload_pending_batch()
+
+    # Two contiguous color runs -> two uniform-color line_strip uploads. No
+    # per-vertex color array and no doubled "lines" geometry: identical GL cost
+    # to a plain colored line.
+    assert len(overlay.runs) == 2
+    assert all(run["mode"] == "line_strip" for run in overlay.runs)
+    assert all(isinstance(run["color"], tuple) for run in overlay.runs)
+    assert overlay.runs[0]["color"] == pytest.approx(tuple(red))
+    assert overlay.runs[1]["color"] == pytest.approx(tuple(green))
+    # Boundary vertex is shared so the strips stay visually continuous.
+    assert overlay.runs[0]["rx"].tolist() == [1.0, 2.0, 3.0]
+    assert overlay.runs[1]["rx"].tolist() == [3.0, 4.0, 5.0]
+
+
+def test_colored_resident_layers_follow_default_overview_motion(qapp) -> None:
     widget = PostplotMapWidget.__new__(PostplotMapWidget)
     layer_type = type(
         "Layer",
@@ -128,7 +186,9 @@ def test_colored_resident_layers_are_kept_during_overview_motion(qapp) -> None:
 
     PostplotMapWidget._enter_gl_motion_mode(widget)
 
-    assert colored.visible is True
+    # Conditional colors are now treated exactly like default colors: both hide
+    # full-detail GL during overview motion and rely on the overview preview.
+    assert colored.visible is False
     assert plain.visible is False
 
 

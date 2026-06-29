@@ -102,6 +102,10 @@ class ResidentGlLineLayer:
             if np.asarray(px).size >= 2
         ]
         self._uploaded_runs: set[int] = set()
+        # Colored runs split one source polyline into several uniform-color GL
+        # strips; each needs its own overlay key. Start past the source run
+        # indices so the derived keys never collide with a plain run.
+        self._next_gl_run_key = len(parts)
 
     @property
     def _baked_dash(self) -> bool:
@@ -254,40 +258,56 @@ class ResidentGlLineLayer:
             py = np.asarray(py, dtype=np.float64)
             if px.size < 2:
                 continue
-            color_arg: tuple[float, float, float, float] | np.ndarray = self._gl_color
-            mode = "line_strip"
             colors = None
             if self._color_parts is not None and run_index < len(self._color_parts):
                 colors = np.asarray(self._color_parts[run_index], dtype=np.float32)
-            if self._baked_dash:
-                dashed = self._dash_segments(px, py, colors)
-                if dashed is None:
-                    # Pattern leaves nothing visible for this run — mark done.
-                    self._uploaded_runs.add(run_index)
-                    continue
-                dx, dy, dash_colors = dashed
-                px, py = dx, dy
-                color_arg = dash_colors if dash_colors is not None else self._gl_color
-                mode = "lines"
-            elif colors is not None:
-                rx, ry, color_array = self._segment_gl_geometry(px, py, colors)
-                if rx.size < 2:
-                    continue
-                px, py = rx, ry
-                color_arg = color_array
-                mode = "lines"
-            self._gl_overlay.add_line_run(
-                self._layer_id,
-                run_index,
-                px,
-                py,
-                color=color_arg,
-                width=self._gl_width,
-                mode=mode,
-            )
+            if colors is not None:
+                # Conditional colors render exactly like default lines: split the
+                # polyline into contiguous same-color segments and upload each as
+                # a uniform-color line_strip. No per-vertex color buffer and no
+                # doubled "lines" geometry, so pan/zoom stays transform-only at
+                # the same GPU cost as a plain colored line.
+                colored_runs = self._colored_runs(px, py, colors)
+                if not colored_runs:
+                    colored_runs = [(px, py, self._gl_color)]
+                for rx, ry, color in colored_runs:
+                    key = self._next_gl_run_key
+                    self._next_gl_run_key += 1
+                    self._upload_uniform_run(key, rx, ry, color)
+            else:
+                self._upload_uniform_run(run_index, px, py, self._gl_color)
             self._uploaded_runs.add(run_index)
         self._gl_overlay.set_layer_visible(self._layer_id, self._visible and not self._export_mode)
         return bool(self._pending_runs)
+
+    def _upload_uniform_run(
+        self,
+        run_key: int,
+        px: np.ndarray,
+        py: np.ndarray,
+        color: tuple[float, float, float, float],
+    ) -> None:
+        """Upload one uniform-color polyline (solid line_strip or baked dash)."""
+        px = np.asarray(px, dtype=np.float64)
+        py = np.asarray(py, dtype=np.float64)
+        if px.size < 2:
+            return
+        mode = "line_strip"
+        if self._baked_dash:
+            dashed = self._dash_segments(px, py, None)
+            if dashed is None:
+                return
+            px, py, _ = dashed
+            mode = "lines"
+        self._gl_overlay.add_line_run(
+            self._layer_id,
+            run_key,
+            px,
+            py,
+            color=color,
+            width=self._gl_width,
+            mode=mode,
+        )
 
     def set_gl_visible(self, visible: bool) -> None:
         self._visible = visible

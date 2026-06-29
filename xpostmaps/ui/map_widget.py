@@ -1513,12 +1513,15 @@ class PostplotMapWidget(QWidget):
             layer.clear_settled_detail()
         bbox = self._view_clip_bbox()
         if bbox is not None and self._is_overview_zoom(bbox):
+            # Conditional (colored) layers follow the same path as default
+            # layers during overview motion: hide the full-detail GL geometry and
+            # show the cheap decimated overview preview instead.
             for item in self._overview_cpu_items:
                 item.setVisible(True)
             for layer in self._gl_line_layers:
-                layer.set_gl_visible(layer.has_vertex_colors)
+                layer.set_gl_visible(False)
             for layer in self._gl_scatter_layers:
-                layer.set_gl_visible(layer.has_vertex_colors)
+                layer.set_gl_visible(False)
             return
         self._gl_overlay.set_viewport_cull(False)
         for item in self._overview_cpu_items:
@@ -1824,18 +1827,17 @@ class PostplotMapWidget(QWidget):
                 overview_x, overview_y = screen_scatter_geometry(
                     xs, ys, budget=SCREEN_OVERVIEW_BUDGET
                 )
-                if color_parts is None:
-                    overview_scatter = pg.ScatterPlotItem(
-                        overview_x,
-                        overview_y,
-                        pen=None,
-                        brush=pg.mkBrush(rgba),
-                        size=screen_size,
-                        pxMode=True,
-                        symbol="o",
-                    )
-                    self._register_plot_item(overview_scatter, layer=layer)
-                    self._overview_cpu_items.append(overview_scatter)
+                overview_scatter = pg.ScatterPlotItem(
+                    overview_x,
+                    overview_y,
+                    pen=None,
+                    brush=pg.mkBrush(rgba),
+                    size=screen_size,
+                    pxMode=True,
+                    symbol="o",
+                )
+                self._register_plot_item(overview_scatter, layer=layer)
+                self._overview_cpu_items.append(overview_scatter)
                 self._overview_strokes.append((xs, ys, rgba))
                 gl_layer = ResidentGlScatterLayer(
                     parts=local_parts,
@@ -1955,18 +1957,20 @@ class PostplotMapWidget(QWidget):
                 ly,
                 budget=SCREEN_OVERVIEW_BUDGET,
             )
-            if color_parts is None:
-                overview_curve = pg.PlotCurveItem(
-                    overview_x,
-                    overview_y,
-                    pen=pen,
-                    connect="finite",
-                    antialias=False,
-                    skipFiniteCheck=True,
-                )
-                overview_curve.setSegmentedLineMode("off")
-                self._register_plot_item(overview_curve, layer=layer)
-                self._overview_cpu_items.append(overview_curve)
+            # Conditional (colored) layers get the same base-color overview
+            # preview as default layers, so overview pan/zoom swaps to the cheap
+            # decimated curve instead of redrawing full detail every frame.
+            overview_curve = pg.PlotCurveItem(
+                overview_x,
+                overview_y,
+                pen=pen,
+                connect="finite",
+                antialias=False,
+                skipFiniteCheck=True,
+            )
+            overview_curve.setSegmentedLineMode("off")
+            self._register_plot_item(overview_curve, layer=layer)
+            self._overview_cpu_items.append(overview_curve)
             self._overview_strokes.append((lx, ly, rgba))
             dash_on_world = 0.0
             dash_gap_world = 0.0

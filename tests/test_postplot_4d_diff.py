@@ -1446,6 +1446,9 @@ def test_conditional_refresh_reruns_when_saved_diff_rows_appear(tmp_path) -> Non
         },
     )()
     window._map.points = []
+    # The saved-diff rerun is what this test verifies; the background diff fill
+    # is exercised separately, so keep it from spawning a real worker thread.
+    window._ensure_conditional_diffs_async = lambda *_a, **_k: None
     match_row = Postplot4DMatchRow(
         baseline_name="baseline",
         baseline_kind="navplan",
@@ -1496,6 +1499,94 @@ def test_conditional_refresh_reruns_when_saved_diff_rows_appear(tmp_path) -> Non
     assert len(window._map.points) == 1
     assert window._map.points[0][2] == "#22c55e"
     assert window._conditional_points_signature_cache != cached_after_empty
+    db.close()
+
+
+class _FakeSignal:
+    def __init__(self) -> None:
+        self.slots = []
+
+    def connect(self, slot, *_a, **_k) -> None:
+        self.slots.append(slot)
+
+
+class _FakeDiffWorker:
+    instances: list["_FakeDiffWorker"] = []
+
+    def __init__(self, *_args, match_rows=None, **_kwargs) -> None:
+        self.match_rows = list(match_rows or [])
+        self.finished_batch = _FakeSignal()
+        self.finished = _FakeSignal()
+        self.started = False
+        _FakeDiffWorker.instances.append(self)
+
+    def isRunning(self) -> bool:  # noqa: N802
+        return self.started
+
+    def start(self) -> None:
+        self.started = True
+
+    def cancel(self) -> None:
+        self.started = False
+
+
+def _fill_stub_window(db) -> "MainWindow":
+    window = MainWindow.__new__(MainWindow)
+    window._settings = ProjectSettings(name="proj")
+    window._map_data = MapData()
+    window._db = db
+    window._parsing = False
+    window._loading_project = False
+    window._conditional_data_version = 0
+    window._conditional_diff_fill_worker = None
+    window._conditional_diff_fill_attempted = set()
+    window._conditional_diff_fill_attempted_version = -1
+    return window
+
+
+def _fill_match_row(sequence_id: str) -> Postplot4DMatchRow:
+    return Postplot4DMatchRow(
+        baseline_name="baseline",
+        baseline_kind="navplan",
+        line_name="L",
+        subline="",
+        sequence_no="1",
+        first_sp=1,
+        last_sp=1,
+        line_direction="",
+        sequence_id=sequence_id,
+        baseline_file_name="baseline.navplan",
+    )
+
+
+def test_conditional_diff_fill_launches_worker_for_missing_rows(tmp_path) -> None:
+    db = Database(tmp_path / "p.db")
+    db.save_project(ProjectSettings(name="proj"), MapData())
+    window = _fill_stub_window(db)
+    rows = [_fill_match_row("a|1"), _fill_match_row("b|1")]
+
+    _FakeDiffWorker.instances = []
+    with patch("xpostmaps.ui.main_window.DiffStatRecalcWorker", _FakeDiffWorker):
+        MainWindow._ensure_conditional_diffs_async(window, rows)
+        # Re-invoking with the same already-attempted rows must not relaunch.
+        MainWindow._ensure_conditional_diffs_async(window, rows)
+
+    assert len(_FakeDiffWorker.instances) == 1
+    assert {r.sequence_id for r in _FakeDiffWorker.instances[0].match_rows} == {"a|1", "b|1"}
+    assert window._conditional_diff_fill_attempted == {"a|1", "b|1"}
+    db.close()
+
+
+def test_conditional_diff_fill_skips_when_no_missing_rows(tmp_path) -> None:
+    db = Database(tmp_path / "p.db")
+    db.save_project(ProjectSettings(name="proj"), MapData())
+    window = _fill_stub_window(db)
+
+    _FakeDiffWorker.instances = []
+    with patch("xpostmaps.ui.main_window.DiffStatRecalcWorker", _FakeDiffWorker):
+        MainWindow._ensure_conditional_diffs_async(window, [])
+
+    assert _FakeDiffWorker.instances == []
     db.close()
 
 
