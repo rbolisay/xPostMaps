@@ -19,7 +19,6 @@ from PySide6.QtWidgets import QApplication
 from xpostmaps.core.pdf_export import page_dimensions_mm, page_layout_for
 from xpostmaps.core.postplot_4d_plot_data import (
     PlotKind,
-    build_plot_series,
     default_pdf_time_series_description,
     line_title,
     pdf_page_key,
@@ -297,34 +296,37 @@ def _plot_page_geometry(
 def _render_canvas_for_spec(
     view: Postplot4DStatPlotView,
     spec: PlotPageSpec,
-    diff_rows,
-    match_row,
     *,
     y_min,
     y_max,
     auto_y,
 ):
-    """Render the canvas for one page spec; return (canvas, has_data)."""
+    """Render the canvas for one page spec; return (canvas, has_data).
+
+    Series come from the view's combined builder so a multi-sequence plot
+    exports every (source, sequence) line with the same data, framing and
+    quality as on screen — the export just has more lines.
+    """
     canvas = view.canvas_for_kind(spec.kind)
     if canvas is None:
         return None, False
     styles = view.source_styles_for_kind(spec.kind)
     boundaries = view.boundaries_for_kind(spec.kind)
+    series_by_key = {
+        series.source_no: series for series in view.build_series_for_kind(spec.kind)
+    }
     series_list = [
-        build_plot_series(diff_rows, match_row, spec.kind, src)
+        series_by_key[src]
         for src in spec.export_sources
+        if src in series_by_key and series_by_key[src].shotpoints
     ]
-    series_list = [item for item in series_list if item.shotpoints]
     if not series_list:
         return canvas, False
 
-    render_sources = spec.export_sources if spec.combine else [spec.export_sources[0]]
+    render_series = series_list if spec.combine else series_list[:1]
     canvas.set_combine_sources(spec.combine)
     canvas.render(
-        [
-            build_plot_series(diff_rows, match_row, spec.kind, src)
-            for src in render_sources
-        ],
+        render_series,
         styles,
         boundaries,
         y_min=y_min,
@@ -356,7 +358,6 @@ def compose_4d_stat_plot_pages(
         raise ValueError("Select at least one plot type to include in the PDF.")
 
     render_dpi = dpi if dpi is not None else options.dpi
-    diff_rows = view.diff_rows()
     y_min, y_max = view.y_axis_range()
     auto_y = view.y_axis_auto()
     line_label = f"Line: {line_title(match_row)}"
@@ -367,7 +368,7 @@ def compose_4d_stat_plot_pages(
 
     for spec in page_specs:
         canvas, has_data = _render_canvas_for_spec(
-            view, spec, diff_rows, match_row, y_min=y_min, y_max=y_max, auto_y=auto_y
+            view, spec, y_min=y_min, y_max=y_max, auto_y=auto_y
         )
         if not has_data or canvas is None:
             continue
@@ -474,7 +475,6 @@ def export_4d_stat_plot_pdf(
         raise ValueError("Select at least one plot type to include in the PDF.")
 
     export_dpi = options.dpi
-    diff_rows = view.diff_rows()
     y_min, y_max = view.y_axis_range()
     auto_y = view.y_axis_auto()
     line_label = f"Line: {line_title(match_row)}"
@@ -501,8 +501,6 @@ def export_4d_stat_plot_pdf(
             canvas, has_data = _render_canvas_for_spec(
                 view,
                 spec,
-                diff_rows,
-                match_row,
                 y_min=y_min,
                 y_max=y_max,
                 auto_y=auto_y,

@@ -374,6 +374,15 @@ class Postplot4DStatPlotView(QWidget):
     def diff_rows(self) -> list[Postplot4DDiffRow]:
         return list(self._diff_rows)
 
+    def build_series_for_kind(self, kind: PlotKind):
+        """Combined plot series for *kind*, keyed exactly as the on-screen plot.
+
+        In multi-sequence mode the series are keyed by composite
+        ``"G01 · Seq <n>"`` labels (matching the Source Style columns and the
+        PDF export), so PDF rendering reuses the same data the view shows.
+        """
+        return build_combined_plot_series(self._sets, kind)
+
     def combine_sources(self) -> bool:
         return self._combine_box.isChecked()
 
