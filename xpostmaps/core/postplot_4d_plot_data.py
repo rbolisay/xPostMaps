@@ -273,6 +273,29 @@ def time_series_title(
     return " ".join(part for part in parts if part)
 
 
+def pdf_page_key(
+    kind: PlotKind,
+    source_no: str | None,
+    *,
+    combine: bool,
+) -> str:
+    if combine or not source_no:
+        return kind
+    return f"{kind}:{source_no}"
+
+
+def default_pdf_time_series_description(
+    match_row: Postplot4DMatchRow,
+    *,
+    source_nos: list[str],
+    kind: PlotKind,
+) -> str:
+    direction = _line_direction_label(match_row)
+    stat_label = PLOT_KIND_PDF_LABELS[kind]
+    sources = ", ".join(source_nos)
+    return f"{sources} Position {stat_label} vs. Baseline ({direction})"
+
+
 def primary_vessel_id(diff_rows: list[Postplot4DDiffRow]) -> str:
     for diff_row in diff_rows:
         if diff_row.vessel_id.strip():

@@ -9,9 +9,14 @@ pytest.importorskip("PySide6")
 from PySide6.QtWidgets import QApplication
 
 from xpostmaps.core.postplot_4d_plot_pdf import (
+    DEFAULT_4D_STAT_PDF_REPORT_TITLE,
+    STAT_PLOT_PDF_DEFAULT_DPI,
     Postplot4DStatPlotPdfOptions,
+    _page_layout_pixels,
+    compose_4d_stat_plot_pages,
     render_4d_stat_plot_preview_pages,
     resolve_4d_stat_output_path,
+    resolve_logo_path,
     resolved_plot_kinds,
 )
 
@@ -77,3 +82,39 @@ def test_resolve_4d_stat_output_path_adds_extension() -> None:
         filename="line_plot",
     )
     assert resolve_4d_stat_output_path(options) == Path("/tmp/line_plot.pdf")
+
+
+def test_landscape_layout_is_wider_than_tall() -> None:
+    options = Postplot4DStatPlotPdfOptions(
+        output_dir=Path("."),
+        filename="out.pdf",
+        landscape=True,
+    )
+    page_w, page_h, *_ = _page_layout_pixels(options, dpi=120)
+    assert page_w > page_h
+
+
+def test_portrait_layout_is_taller_than_wide() -> None:
+    options = Postplot4DStatPlotPdfOptions(
+        output_dir=Path("."),
+        filename="out.pdf",
+        landscape=False,
+    )
+    page_w, page_h, *_ = _page_layout_pixels(options, dpi=120)
+    assert page_h > page_w
+
+
+def test_resolve_logo_path_falls_back_to_repo_logo() -> None:
+    logo = resolve_logo_path("")
+    assert logo is not None
+    assert logo.is_file()
+
+
+def test_default_report_title() -> None:
+    options = Postplot4DStatPlotPdfOptions(
+        output_dir=Path("."),
+        filename="out.pdf",
+    )
+    assert options.report_title == DEFAULT_4D_STAT_PDF_REPORT_TITLE
+    assert options.landscape is True
+    assert options.dpi == STAT_PLOT_PDF_DEFAULT_DPI

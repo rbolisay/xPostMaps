@@ -34,9 +34,12 @@ from xpostmaps.core.pdf_export import (
 )
 from xpostmaps.core.postplot_4d_plot_data import PLOT_KIND_LABELS, PlotKind
 from xpostmaps.core.postplot_4d_plot_pdf import (
+    DEFAULT_4D_STAT_PDF_REPORT_TITLE,
+    STAT_PLOT_PDF_DEFAULT_DPI,
     Postplot4DStatPlotPdfOptions,
     default_4d_stat_pdf_filename,
     export_4d_stat_plot_pdf,
+    iter_4d_stat_plot_page_specs,
     render_4d_stat_plot_preview_pages,
     resolve_4d_stat_output_path,
     resolved_plot_kinds,
@@ -105,6 +108,9 @@ class Postplot4DStatPlotPdfDialog:
             filename_edit = QLineEdit(default_4d_stat_pdf_filename(match_row))
             left_form.addRow("PDF filename", filename_edit)
 
+            report_title_edit = QLineEdit(DEFAULT_4D_STAT_PDF_REPORT_TITLE)
+            left_form.addRow("Report title", report_title_edit)
+
             paper_combo = QComboBox()
             paper_combo.addItems(list(PAPER_SIZE_NAMES))
             paper_combo.setCurrentText("A4")
@@ -113,13 +119,18 @@ class Postplot4DStatPlotPdfDialog:
             dpi_combo = QComboBox()
             for dpi in DPI_OPTIONS:
                 dpi_combo.addItem(f"{dpi} DPI", dpi)
-            default_dpi = 300 if 300 in DPI_OPTIONS else DPI_OPTIONS[0]
+            default_dpi = (
+                STAT_PLOT_PDF_DEFAULT_DPI
+                if STAT_PLOT_PDF_DEFAULT_DPI in DPI_OPTIONS
+                else DPI_OPTIONS[0]
+            )
             dpi_index = DPI_OPTIONS.index(default_dpi) if default_dpi in DPI_OPTIONS else 0
             dpi_combo.setCurrentIndex(dpi_index)
             left_form.addRow("Resolution (DPI)", dpi_combo)
 
             orientation_combo = QComboBox()
             orientation_combo.addItems(["Portrait", "Landscape"])
+            orientation_combo.setCurrentText("Landscape")
             left_form.addRow("Orientation", orientation_combo)
 
             margin_combo = QComboBox()
@@ -161,6 +172,12 @@ class Postplot4DStatPlotPdfDialog:
                 plots_layout.addWidget(box)
             left_form.addRow(plots_group)
 
+            time_series_edit = QLineEdit()
+            time_series_edit.setPlaceholderText(
+                "G01, G02 Position Cross-line vs. Baseline (Up-line)"
+            )
+            left_form.addRow("Time series description", time_series_edit)
+
             open_after = QCheckBox("Open folder after export")
             open_after.setChecked(True)
             left_form.addRow("", open_after)
@@ -168,7 +185,8 @@ class Postplot4DStatPlotPdfDialog:
             hint = QLabel(
                 "Use the preview arrows to step through every PDF page. "
                 "Each selected plot type is written to its own page "
-                "(one page per source when Combine Sources is off)."
+                "(one page per source when Combine Sources is off). "
+                "The time series description applies to the current preview page."
             )
             hint.setWordWrap(True)
             hint.setStyleSheet("color: #8b949e; font-size: 11px;")
@@ -225,6 +243,9 @@ class Postplot4DStatPlotPdfDialog:
 
             preview_pages: list = []
             preview_index = 0
+            page_specs = []
+            description_overrides: dict[str, str] = {}
+            syncing_description = False
 
             preview_timer = QTimer(dialog)
             preview_timer.setSingleShot(True)
@@ -244,12 +265,45 @@ class Postplot4DStatPlotPdfDialog:
                     dpi=int(dpi_combo.currentData()),
                     landscape=orientation_combo.currentText() == "Landscape",
                     margin_mm=resolved_margin_mm(),
+                    report_title=report_title_edit.text().strip()
+                    or DEFAULT_4D_STAT_PDF_REPORT_TITLE,
                     include_crossline=plot_checks["crossline"].isChecked(),
                     include_inline=plot_checks["inline"].isChecked(),
                     include_radial=plot_checks["radial"].isChecked(),
                     include_feather=plot_checks["feather"].isChecked(),
                     include_feather_diff=plot_checks["feather_diff"].isChecked(),
+                    time_series_descriptions=dict(description_overrides),
                 )
+
+            def _current_page_spec():
+                if not page_specs:
+                    return None
+                index = max(0, min(preview_index, len(page_specs) - 1))
+                return page_specs[index]
+
+            def _store_current_description() -> None:
+                spec = _current_page_spec()
+                if spec is None:
+                    return
+                text = time_series_edit.text().strip()
+                if text:
+                    description_overrides[spec.page_key] = text
+                else:
+                    description_overrides.pop(spec.page_key, None)
+
+            def _load_description_for_current_page() -> None:
+                nonlocal syncing_description
+                spec = _current_page_spec()
+                syncing_description = True
+                if spec is None:
+                    time_series_edit.clear()
+                else:
+                    text = description_overrides.get(
+                        spec.page_key,
+                        spec.default_time_series_description,
+                    )
+                    time_series_edit.setText(text)
+                syncing_description = False
 
             def sync_margin_controls() -> None:
                 margin_custom.setVisible(margin_combo.currentText() == "Custom")
@@ -289,33 +343,41 @@ class Postplot4DStatPlotPdfDialog:
                 _sync_page_nav()
 
             def refresh_preview() -> None:
-                nonlocal preview_pages, preview_index
+                nonlocal preview_pages, preview_index, page_specs
+                _store_current_description()
                 opts = current_options()
-                if not resolved_plot_kinds(plot_view, opts):
+                page_specs = iter_4d_stat_plot_page_specs(plot_view, opts)
+                if not page_specs:
                     preview_pages = []
                     preview_index = 0
+                    _load_description_for_current_page()
                     _show_preview_page()
                     return
+                preview_index = max(0, min(preview_index, len(page_specs) - 1))
                 preview_pages = render_4d_stat_plot_preview_pages(
                     plot_view,
                     opts,
                     logo_path=logo_path,
                 )
-                preview_index = 0
+                _load_description_for_current_page()
                 _show_preview_page()
 
             def show_previous_page() -> None:
                 nonlocal preview_index
                 if preview_index <= 0:
                     return
+                _store_current_description()
                 preview_index -= 1
+                _load_description_for_current_page()
                 _show_preview_page()
 
             def show_next_page() -> None:
                 nonlocal preview_index
-                if preview_index >= len(preview_pages) - 1:
+                if preview_index >= len(page_specs) - 1:
                     return
+                _store_current_description()
                 preview_index += 1
+                _load_description_for_current_page()
                 _show_preview_page()
 
             def schedule_preview() -> None:
@@ -334,7 +396,14 @@ class Postplot4DStatPlotPdfDialog:
                 if path:
                     output_edit.setText(path)
 
+            def on_description_changed() -> None:
+                if syncing_description:
+                    return
+                _store_current_description()
+                schedule_preview()
+
             def on_export() -> None:
+                _store_current_description()
                 opts = current_options()
                 if not opts.filename.strip():
                     QMessageBox.warning(dialog, "Export PDF", "Enter a PDF filename.")
@@ -392,6 +461,8 @@ class Postplot4DStatPlotPdfDialog:
             orientation_combo.currentTextChanged.connect(schedule_preview)
             output_edit.textChanged.connect(schedule_preview)
             filename_edit.textChanged.connect(schedule_preview)
+            report_title_edit.textChanged.connect(schedule_preview)
+            time_series_edit.textChanged.connect(on_description_changed)
             for box in plot_checks.values():
                 box.toggled.connect(schedule_preview)
 

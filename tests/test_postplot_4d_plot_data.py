@@ -39,7 +39,33 @@ def _diff_row(
     )
 
 
-def test_normalize_source_label_uses_g_prefix() -> None:
+def test_default_pdf_time_series_description_uses_sources_and_metric() -> None:
+    from xpostmaps.core.postplot_4d_plot_data import default_pdf_time_series_description
+
+    match = Postplot4DMatchRow(
+        baseline_name="Base",
+        baseline_kind="navplan",
+        line_name="LineA",
+        subline="a070",
+        sequence_no="1",
+        first_sp=100,
+        last_sp=110,
+        line_direction="Up-line",
+        sequence_id="file|1|LineA",
+    )
+    text = default_pdf_time_series_description(
+        match,
+        source_nos=["G01", "G02"],
+        kind="crossline",
+    )
+    assert text == "G01, G02 Position Cross-line vs. Baseline (Up-line)"
+
+
+def test_pdf_page_key_includes_source_when_uncombined() -> None:
+    from xpostmaps.core.postplot_4d_plot_data import pdf_page_key
+
+    assert pdf_page_key("inline", "G01", combine=False) == "inline:G01"
+    assert pdf_page_key("inline", "G01", combine=True) == "inline"
     assert normalize_source_label("001") == "G01"
     assert normalize_source_label("G002") == "G02"
     assert normalize_source_label("S3") == "G03"

@@ -4,8 +4,8 @@ from __future__ import annotations
 
 import numpy as np
 import pyqtgraph as pg
-from PySide6.QtCore import Qt, QRectF, QTimer
-from PySide6.QtGui import QImage, QPainter, QColor
+from PySide6.QtCore import Qt, QPoint, QTimer
+from PySide6.QtGui import QImage, QPainter, QColor, QFont, QPen, QRegion
 from PySide6.QtWidgets import (
     QApplication,
     QLineEdit,
@@ -24,9 +24,10 @@ from xpostmaps.core.postplot_4d_plot_data import (
     PlotSeries,
     SourceStyleRow,
 )
-from xpostmaps.ui.postplot_4d_stat_plot.plot_pen import boundary_pen, source_pen
+from xpostmaps.ui.postplot_4d_stat_plot.plot_pen import boundary_pen, clone_pen, source_pen
 from xpostmaps.ui.postplot_4d_stat_plot.stat_plot_view_box import StatPlotViewBox
 from xpostmaps.ui.postplot_4d_stat_plot.theme import STAT_PLOT_SOURCE_TAB_STYLE
+from xpostmaps.utils.symbology_units import DEFAULT_SCREEN_DPI
 
 _PLOT_BG = "#ffffff"
 _PLOT_FG = "#111827"
@@ -302,7 +303,7 @@ class TimeSeriesPlotWidget(pg.PlotWidget):
                 symbol="o" if show_symbols else None,
                 symbolSize=symbol_size,
                 symbolBrush=QColor(style.color),
-                symbolPen=pg.mkPen(style.color, width=1),
+                symbolPen=pg.mkPen(style.color, width=1, cosmetic=True),
                 connect="all",
             )
             self._curve_items.append(curve)
@@ -316,12 +317,15 @@ class TimeSeriesPlotWidget(pg.PlotWidget):
             limit = abs(float(boundary.abs_boundary))
             if limit <= 0:
                 continue
-            pen = boundary_pen(boundary)
+            base_pen = boundary_pen(boundary)
             for y_value in (limit, -limit):
+                pen = clone_pen(base_pen)
                 line = pg.InfiniteLine(
                     pos=y_value,
                     angle=0,
                     pen=pen,
+                    hoverPen=clone_pen(base_pen),
+                    movable=False,
                 )
                 self.addItem(line)
                 self._boundary_items.append(line)
@@ -380,47 +384,321 @@ class TimeSeriesPlotWidget(pg.PlotWidget):
 
         QTimer.singleShot(0, _repaint)
 
-    def capture_image(self, *, width: int, height: int) -> QImage:
-        """Render plot scene to an image (pyqtgraph-safe)."""
-        self.resize(max(width, 320), max(height, _MIN_PLOT_HEIGHT))
-        self._position_overlays()
+    def _legend_entries(self) -> list[tuple[str, QColor]]:
+        entries: list[tuple[str, QColor]] = []
+        for curve in self._curve_items:
+            name = str(curve.opts.get("name", "") or "").strip()
+            if not name:
+                continue
+            pen = curve.opts.get("pen")
+            color = QColor(_PLOT_FG)
+            if isinstance(pen, QPen):
+                color = QColor(pen.color())
+            elif isinstance(pen, (list, tuple)) and pen:
+                color = QColor(pen[0])
+            symbol_brush = curve.opts.get("symbolBrush")
+            if isinstance(symbol_brush, QColor):
+                color = QColor(symbol_brush)
+            entries.append((name, color))
+        return entries
+
+    def _pdf_scale(self, dpi: int) -> float:
+        return max(1.0, dpi / float(DEFAULT_SCREEN_DPI))
+
+    def _apply_pdf_style(self, dpi: int) -> None:
+        """Scale pens, markers, axis lines and fonts so the plot reads correctly
+        at the export resolution (cosmetic 1px pens are invisible at high DPI)."""
+        scale = self._pdf_scale(dpi)
+        line_boost = 1.4
+        backup: dict[str, object] = {}
+
+        curve_backup: list[tuple[pg.PlotDataItem, QPen, float, object]] = []
+        for curve in self._curve_items:
+            pen = curve.opts.get("pen")
+            qpen = QPen(pen) if isinstance(pen, QPen) else pg.mkPen(pen)
+            sym_size = curve.opts.get("symbolSize", 5) or 5
+            sym_pen = curve.opts.get("symbolPen")
+            curve_backup.append((curve, QPen(qpen), float(sym_size), sym_pen))
+            new_pen = pg.mkPen(
+                qpen.color(),
+                width=max(1.0, qpen.widthF() * scale * line_boost),
+                style=qpen.style(),
+                cosmetic=True,
+            )
+            curve.setPen(new_pen)
+            curve.setSymbolSize(max(2, int(round(float(sym_size) * scale))))
+            if isinstance(sym_pen, QPen):
+                scaled_sym_pen = pg.mkPen(
+                    sym_pen.color(),
+                    width=max(1.0, sym_pen.widthF() * scale),
+                    cosmetic=True,
+                )
+                curve.setSymbolPen(scaled_sym_pen)
+        backup["curves"] = curve_backup
+
+        boundary_backup: list[tuple[pg.InfiniteLine, QPen]] = []
+        for line in self._boundary_items:
+            pen = line.pen
+            qpen = QPen(pen) if isinstance(pen, QPen) else pg.mkPen(pen)
+            boundary_backup.append((line, QPen(qpen)))
+            line.setPen(
+                pg.mkPen(
+                    qpen.color(),
+                    width=max(1.0, qpen.widthF() * scale * line_boost),
+                    style=qpen.style(),
+                    cosmetic=True,
+                )
+            )
+        backup["boundaries"] = boundary_backup
+
+        axis_backup: dict[str, object] = {}
+        tick_px = max(7, int(round(8.5 * scale)))
+        tick_font = QFont("Segoe UI")
+        tick_font.setPixelSize(tick_px)
+        axis_width = max(1, int(round(scale * 1.2)))
+        for axis_name in ("left", "bottom"):
+            axis = self.getAxis(axis_name)
+            axis_backup[axis_name] = axis.style.get("tickFont")
+            axis.setPen(pg.mkPen(_PLOT_FG, width=axis_width))
+            axis.setTextPen(pg.mkPen(_PLOT_FG))
+            axis.setStyle(tickFont=tick_font)
+        backup["axes"] = axis_backup
+
+        label_px = max(9, int(round(9.5 * scale)))
+        # Reserve room for tick labels + axis label so the label never overlaps ticks.
+        bottom_axis = self.getAxis("bottom")
+        left_axis = self.getAxis("left")
+        backup["bottom_height"] = bottom_axis.height()
+        backup["left_width"] = left_axis.width()
+        bottom_axis.setHeight(int(round(tick_px * 1.6 + label_px * 1.6 + 6 * scale)))
+        left_axis.setWidth(int(round(tick_px * 4.2 + label_px * 1.6 + 6 * scale)))
+        self.setLabel("bottom", "Shot Number", color=_PLOT_FG, **{"font-size": f"{label_px}px"})
+        self.setLabel(
+            "left",
+            PLOT_KIND_UNITS[self._kind],
+            color=_PLOT_FG,
+            **{"font-size": f"{label_px}px"},
+        )
+        self._pdf_style_backup = backup
+
+    def _restore_pdf_style(self) -> None:
+        backup = getattr(self, "_pdf_style_backup", None)
+        if not backup:
+            return
+        for curve, pen, sym_size, sym_pen in backup.get("curves", []):  # type: ignore[misc]
+            curve.setPen(pen)
+            curve.setSymbolSize(int(round(sym_size)))
+            if isinstance(sym_pen, QPen):
+                curve.setSymbolPen(sym_pen)
+        for line, pen in backup.get("boundaries", []):  # type: ignore[misc]
+            line.setPen(pen)
+        for axis_name, tick_font in backup.get("axes", {}).items():  # type: ignore[misc]
+            axis = self.getAxis(axis_name)
+            axis.setPen(pg.mkPen(_PLOT_FG))
+            axis.setTextPen(pg.mkPen(_PLOT_FG))
+            axis.setStyle(tickFont=tick_font)
+        self.getAxis("bottom").setHeight(None)
+        self.getAxis("left").setWidth(None)
+        self.setLabel("bottom", "Shot Number", color=_PLOT_FG)
+        self.setLabel("left", PLOT_KIND_UNITS[self._kind], color=_PLOT_FG)
+        self._pdf_style_backup = None
+
+    def _render_plot_body_for_pdf(self, *, width: int, height: int, dpi: int) -> QImage:
+        """Render the plot at the exact target pixel size so it fills the frame
+        on every page (no crop, no letterbox) with DPI-scaled lines and text.
+
+        The PlotItem geometry is forced directly and the scene is painted 1:1, so
+        the result is independent of the widget's on-screen layout size.
+        """
+        from PySide6.QtCore import QRectF
+
+        width = max(int(width), 1)
+        height = max(int(height), 1)
+        plot_item = self.getPlotItem()
+        plot_item.layout.setContentsMargins(0, 0, 0, 0)
+        scene = self.scene()
+
+        self._apply_pdf_style(dpi)
+        prev_rect = plot_item.geometry()
+        plot_item.setGeometry(QRectF(0, 0, width, height))
+        if scene is not None:
+            scene.setSceneRect(0, 0, width, height)
+        plot_item.layout.activate()
+        self._viewbox.zoom_to_extent()
         QApplication.processEvents()
+        plot_item.layout.activate()
+        QApplication.processEvents()
+
         image = QImage(width, height, QImage.Format.Format_ARGB32)
         image.fill(Qt.GlobalColor.white)
-        scene = self.scene()
-        if scene is None:
-            return image
-        source = self.mapToScene(self.viewport().rect()).boundingRect()
-        if source.isEmpty():
-            source = QRectF(0, 0, self.width(), self.height())
         painter = QPainter(image)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
-        scene.render(
-            painter,
-            QRectF(0, 0, width, height),
-            source,
-            Qt.AspectRatioMode.IgnoreAspectRatio,
-        )
-        scale_x = width / max(self.width(), 1)
-        scale_y = height / max(self.height(), 1)
-        for widget in (self._selection_edit, self._stats_label):
-            if not widget.isVisible() or not widget.text():
-                continue
-            geo = widget.geometry()
-            target = QRectF(
-                geo.x() * scale_x,
-                geo.y() * scale_y,
-                geo.width() * scale_x,
-                geo.height() * scale_y,
+        painter.setRenderHint(QPainter.RenderHint.TextAntialiasing, True)
+        painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
+        try:
+            if scene is not None:
+                scene.render(
+                    painter,
+                    QRectF(0, 0, width, height),
+                    QRectF(0, 0, width, height),
+                )
+        finally:
+            painter.end()
+
+        plot_item.setGeometry(prev_rect)
+        self._restore_pdf_style()
+        return image
+
+    def _draw_pdf_bottom_legend(
+        self,
+        painter: QPainter,
+        *,
+        width: int,
+        band_top: int,
+        band_height: int,
+        dpi: int,
+    ) -> None:
+        entries = self._legend_entries()
+        if not entries:
+            return
+        scale = self._pdf_scale(dpi)
+        font = QFont("Segoe UI", max(7, int(round(8 * scale))))
+        painter.setFont(font)
+        metrics = painter.fontMetrics()
+        swatch_len = max(12, int(round(16 * scale)))
+        marker_size = max(4, int(round(5 * scale)))
+        text_gap = max(3, int(round(4 * scale)))
+        item_gap = max(10, int(round(16 * scale)))
+
+        item_widths: list[int] = []
+        for name, _ in entries:
+            item_widths.append(swatch_len + text_gap + metrics.horizontalAdvance(name))
+        total_width = sum(item_widths) + item_gap * (len(entries) - 1)
+        x = max(8, (width - total_width) // 2)
+        center_y = band_top + band_height // 2
+        line_y = center_y
+
+        for index, (name, color) in enumerate(entries):
+            line_left = x
+            line_right = x + swatch_len
+            pen = QPen(color, max(1, marker_size // 2))
+            pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+            painter.setPen(pen)
+            painter.drawLine(line_left, line_y, line_right, line_y)
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(color)
+            radius = marker_size // 2
+            painter.drawEllipse(
+                line_right - radius,
+                line_y - radius,
+                marker_size,
+                marker_size,
             )
-            painter.fillRect(target, QColor(255, 255, 255, 225))
             painter.setPen(QColor(_PLOT_FG))
-            painter.drawText(
-                target.adjusted(4, 2, -4, -2),
-                int(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter),
-                widget.text() if isinstance(widget, QLabel) else widget.text(),
+            text_y = center_y + (metrics.ascent() - metrics.descent()) // 2
+            painter.drawText(line_right + text_gap, text_y, name)
+            x += item_widths[index] + item_gap
+
+    def _render_plot_body_image(self, *, width: int, height: int) -> QImage:
+        """Rasterise the plot widget at native resolution (pyqtgraph-safe)."""
+        image = QImage(width, height, QImage.Format.Format_ARGB32)
+        image.fill(Qt.GlobalColor.white)
+        painter = QPainter(image)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        painter.setRenderHint(QPainter.RenderHint.TextAntialiasing, True)
+        painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
+        try:
+            # GraphicsView overrides render(); use QWidget.render for correct axes.
+            QWidget.render(
+                self,
+                painter,
+                QPoint(0, 0),
+                QRegion(0, 0, width, height),
+                QWidget.RenderFlag.DrawChildren,
             )
-        painter.end()
+        finally:
+            painter.end()
+        return image
+
+    def capture_image(
+        self,
+        *,
+        width: int,
+        height: int,
+        line_label: str = "",
+        time_series_label: str = "",
+        for_pdf: bool = False,
+        dpi: int = 120,
+    ) -> QImage:
+        """Render plot scene to an image (pyqtgraph-safe)."""
+        prev_min_height = self.minimumHeight()
+        prev_max = self.maximumSize()
+        width = max(int(width), 1)
+        height = max(int(height), 1)
+
+        if for_pdf:
+            self._selection_edit.hide()
+            self._stats_label.hide()
+            scale = self._pdf_scale(dpi)
+            legend_gap = max(1, int(round(2 * scale)))
+            legend_band = max(10, int(round(12 * scale)))
+            plot_body_height = max(height - legend_band - legend_gap, 1)
+
+            body = self._render_plot_body_for_pdf(
+                width=width,
+                height=plot_body_height,
+                dpi=dpi,
+            )
+            plot_image = QImage(width, height, QImage.Format.Format_ARGB32)
+            plot_image.fill(Qt.GlobalColor.white)
+            plot_painter = QPainter(plot_image)
+            plot_painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+            plot_painter.setRenderHint(QPainter.RenderHint.TextAntialiasing, True)
+            plot_painter.drawImage(0, 0, body)
+            legend_top = plot_body_height + legend_gap
+            self._draw_pdf_bottom_legend(
+                plot_painter,
+                width=width,
+                band_top=legend_top,
+                band_height=height - legend_top,
+                dpi=dpi,
+            )
+            border_w = max(1, int(round(1.5 * scale)))
+            border_pen = QPen(QColor("#000000"), border_w)
+            plot_painter.setPen(border_pen)
+            plot_painter.setBrush(Qt.BrushStyle.NoBrush)
+            plot_painter.drawRect(
+                border_w // 2,
+                border_w // 2,
+                width - border_w,
+                height - border_w,
+            )
+            plot_painter.end()
+            image = plot_image
+        else:
+            self.resize(width, max(height, _MIN_PLOT_HEIGHT))
+            self._position_overlays()
+            QApplication.processEvents()
+            image = self._render_plot_body_image(width=width, height=height)
+            if self._selection_edit.isVisible() or self._stats_label.isVisible():
+                overlay_painter = QPainter(image)
+                overlay_painter.setPen(QColor(_PLOT_FG))
+                for widget in (self._selection_edit, self._stats_label):
+                    if not widget.isVisible() or not widget.text():
+                        continue
+                    geo = widget.geometry()
+                    overlay_painter.fillRect(geo, QColor(255, 255, 255, 225))
+                    overlay_painter.drawText(
+                        geo.adjusted(4, 2, -4, -2),
+                        int(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter),
+                        widget.text(),
+                    )
+                overlay_painter.end()
+
+        if for_pdf:
+            self.setMaximumSize(prev_max)
+            self.setMinimumHeight(prev_min_height)
+            self._position_overlays()
         return image
 
 
@@ -486,10 +764,26 @@ class SourceTabPlotHost(QWidget):
     def all_plots(self) -> list[TimeSeriesPlotWidget]:
         return list(self._plots.values())
 
-    def capture_image(self, *, width: int, height: int) -> QImage:
+    def capture_image(
+        self,
+        *,
+        width: int,
+        height: int,
+        line_label: str = "",
+        time_series_label: str = "",
+        for_pdf: bool = False,
+        dpi: int = 120,
+    ) -> QImage:
         plot = self.current_plot()
         if plot is not None:
-            return plot.capture_image(width=width, height=height)
+            return plot.capture_image(
+                width=width,
+                height=height,
+                line_label=line_label,
+                time_series_label=time_series_label,
+                for_pdf=for_pdf,
+                dpi=dpi,
+            )
         image = QImage(width, height, QImage.Format.Format_ARGB32)
         image.fill(Qt.GlobalColor.white)
         return image
@@ -575,11 +869,34 @@ class PlotCanvas(QWidget):
             return self._source_tabs
         return None
 
-    def capture_image(self, *, width: int, height: int) -> QImage:
+    def capture_image(
+        self,
+        *,
+        width: int,
+        height: int,
+        line_label: str = "",
+        time_series_label: str = "",
+        for_pdf: bool = False,
+        dpi: int = 120,
+    ) -> QImage:
         if self._combined_plot is not None:
-            return self._combined_plot.capture_image(width=width, height=height)
+            return self._combined_plot.capture_image(
+                width=width,
+                height=height,
+                line_label=line_label,
+                time_series_label=time_series_label,
+                for_pdf=for_pdf,
+                dpi=dpi,
+            )
         if self._source_tabs is not None:
-            return self._source_tabs.capture_image(width=width, height=height)
+            return self._source_tabs.capture_image(
+                width=width,
+                height=height,
+                line_label=line_label,
+                time_series_label=time_series_label,
+                for_pdf=for_pdf,
+                dpi=dpi,
+            )
         image = QImage(width, height, QImage.Format.Format_ARGB32)
         image.fill(Qt.GlobalColor.white)
         return image

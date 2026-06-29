@@ -7,6 +7,7 @@ import pytest
 
 pytest.importorskip("PySide6")
 
+from PySide6.QtCore import QRect
 from PySide6.QtWidgets import QApplication
 
 from xpostmaps.core.postplot_4d_diff import Postplot4DDiffRow
@@ -99,6 +100,66 @@ def test_time_series_plot_shows_selection_text(qapp) -> None:
     assert plot._selection_edit.isVisible()
     assert "SP 100" in plot._selection_edit.text()
     assert "G01" in plot._selection_edit.text()
+
+
+def test_capture_image_for_pdf_draws_bottom_legend(qapp) -> None:
+    match, rows = _sample_match_and_rows()
+    plot = TimeSeriesPlotWidget("crossline")
+    styles = default_source_styles(["G01", "G02"])
+    series_g01 = build_plot_series(rows, match, "crossline", "G01")
+    rows_g02 = [
+        Postplot4DDiffRow(
+            shotpoint=row.shotpoint,
+            baseline_x=row.baseline_x,
+            baseline_y=row.baseline_y,
+            baseline_latitude=row.baseline_latitude,
+            baseline_longitude=row.baseline_longitude,
+            source_x=row.source_x,
+            source_y=row.source_y,
+            source_latitude=row.source_latitude,
+            source_longitude=row.source_longitude,
+            crossline_m=row.crossline_m + 1.5,
+            inline_m=row.inline_m,
+            radial_m=row.radial_m,
+            firing_source_id="002",
+        )
+        for row in rows
+    ]
+    series_g02 = build_plot_series(rows_g02, match, "crossline", "G02")
+    plot.render(
+        [series_g01, series_g02],
+        styles,
+        [BoundaryRow(abs_boundary=6.0)],
+        y_min=None,
+        y_max=None,
+        auto_y=True,
+    )
+    image = plot.capture_image(
+        width=800,
+        height=480,
+        for_pdf=True,
+        dpi=120,
+    )
+    bottom_band = image.copy(QRect(0, 455, 800, 25))
+    assert _non_white_fraction(bottom_band) > 0.02
+
+
+def test_capture_image_for_pdf_draws_black_border(qapp) -> None:
+    match, rows = _sample_match_and_rows()
+    plot = TimeSeriesPlotWidget("crossline")
+    styles = default_source_styles(["G01"])
+    series = build_plot_series(rows, match, "crossline", "G01")
+    plot.render(
+        [series],
+        styles,
+        [BoundaryRow(abs_boundary=6.0)],
+        y_min=None,
+        y_max=None,
+        auto_y=True,
+    )
+    image = plot.capture_image(width=800, height=480, for_pdf=True, dpi=120)
+    edge = image.pixelColor(1, 1)
+    assert edge.red() < 20 and edge.green() < 20 and edge.blue() < 20
 
 
 def test_plot_canvas_renders_crossline_with_boundaries(qapp) -> None:

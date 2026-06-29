@@ -2,35 +2,35 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
-from PySide6.QtCore import QMarginsF, Qt, QSizeF
+from PySide6.QtCore import Qt
 from PySide6.QtGui import (
     QFont,
     QImage,
-    QPageLayout,
-    QPageSize,
     QPainter,
     QPdfWriter,
     QPixmap,
+    QColor,
 )
-from PySide6.QtWidgets import QApplication, QTableWidget, QTableWidgetItem, QWidget
+from PySide6.QtWidgets import QApplication
 
-from xpostmaps.core.pdf_export import page_dimensions_mm
+from xpostmaps.core.pdf_export import page_dimensions_mm, page_layout_for
 from xpostmaps.core.postplot_4d_plot_data import (
-    PLOT_KIND_LABELS,
-    PLOT_KIND_PDF_LABELS,
-    PLOT_KIND_UNITS,
     PlotKind,
-    SeriesStats,
     build_plot_series,
-    compute_series_stats,
+    default_pdf_time_series_description,
     line_title,
-    primary_vessel_id,
-    time_series_title,
+    pdf_page_key,
 )
 from xpostmaps.ui.postplot_4d_stat_plot.plot_view import Postplot4DStatPlotView
+
+DEFAULT_4D_STAT_PDF_REPORT_TITLE = "EOL 4D Report"
+STAT_PLOT_PDF_DEFAULT_DPI = 600
+STAT_PLOT_PDF_PREVIEW_DPI = 150
+
+_REPO_ROOT = Path(__file__).resolve().parents[2]
 
 
 @dataclass
@@ -38,14 +38,25 @@ class Postplot4DStatPlotPdfOptions:
     output_dir: Path
     filename: str
     paper: str = "A4"
-    dpi: int = 300
-    landscape: bool = False
+    dpi: int = STAT_PLOT_PDF_DEFAULT_DPI
+    landscape: bool = True
     margin_mm: float = 12.0
+    report_title: str = DEFAULT_4D_STAT_PDF_REPORT_TITLE
     include_crossline: bool = True
     include_inline: bool = True
     include_radial: bool = True
     include_feather: bool = True
     include_feather_diff: bool = True
+    time_series_descriptions: dict[str, str] = field(default_factory=dict)
+
+
+@dataclass
+class PlotPageSpec:
+    kind: PlotKind
+    export_sources: list[str]
+    combine: bool
+    page_key: str
+    default_time_series_description: str
 
 
 def resolve_4d_stat_output_path(options: Postplot4DStatPlotPdfOptions) -> Path:
@@ -57,6 +68,92 @@ def resolve_4d_stat_output_path(options: Postplot4DStatPlotPdfOptions) -> Path:
 
 def _paper_size_mm(paper: str, *, landscape: bool) -> tuple[float, float]:
     return page_dimensions_mm(paper, landscape)
+
+
+def resolve_logo_path(logo_path: str) -> Path | None:
+    if logo_path.strip():
+        candidate = Path(logo_path.strip())
+        if candidate.is_file():
+            return candidate
+    for fallback in (
+        _REPO_ROOT / "TierMaps_Logo.png",
+        _REPO_ROOT / "TierMaps_Logo_grey.png",
+        _REPO_ROOT / "TierMaps.png",
+    ):
+        if fallback.is_file():
+            return fallback
+    return None
+
+
+def _font_pixel_size(base_pt: float, dpi: int) -> int:
+    return max(1, int(round(base_pt * dpi / 72.0)))
+
+
+def _page_header_height(dpi: int) -> int:
+    pad = max(4, int(4 / 25.4 * dpi))
+    gap = max(2, int(2 / 25.4 * dpi))
+    logo_h = max(18, int(14 / 25.4 * dpi))
+    title_h = _font_pixel_size(13, dpi) + 2
+    meta_h = _font_pixel_size(8.5, dpi) + 1
+    return pad + max(title_h, logo_h) + gap + meta_h * 2 + gap + max(3, int(3 / 25.4 * dpi))
+
+
+def _draw_page_header(
+    painter: QPainter,
+    *,
+    content_left: int,
+    content_top: int,
+    content_width: int,
+    dpi: int,
+    report_title: str,
+    line_label: str,
+    time_series_label: str,
+    logo_file: Path | None,
+) -> None:
+    pad = max(4, int(4 / 25.4 * dpi))
+    gap = max(2, int(2 / 25.4 * dpi))
+    logo_h = max(18, int(14 / 25.4 * dpi))
+    y = content_top + pad
+
+    if logo_file is not None:
+        logo = QPixmap(str(logo_file))
+        if not logo.isNull():
+            logo = logo.scaledToHeight(
+                logo_h,
+                Qt.TransformationMode.SmoothTransformation,
+            )
+            logo_x = content_left + content_width - logo.width()
+            painter.drawPixmap(logo_x, y, logo)
+
+    title_font = QFont("Segoe UI")
+    title_font.setPixelSize(_font_pixel_size(13, dpi))
+    title_font.setWeight(QFont.Weight.DemiBold)
+    painter.setFont(title_font)
+    painter.setPen(QColor("#111827"))
+    title_metrics = painter.fontMetrics()
+    painter.drawText(
+        content_left,
+        y + title_metrics.ascent(),
+        report_title.strip() or DEFAULT_4D_STAT_PDF_REPORT_TITLE,
+    )
+
+    title_row_h = max(title_metrics.height(), logo_h)
+    y += title_row_h + gap
+
+    meta_font = QFont("Segoe UI")
+    meta_font.setPixelSize(_font_pixel_size(8.5, dpi))
+    painter.setFont(meta_font)
+    painter.setPen(QColor("#4b5563"))
+    meta_metrics = painter.fontMetrics()
+    if line_label:
+        painter.drawText(content_left, y + meta_metrics.ascent(), line_label)
+        y += meta_metrics.height() + 1
+    if time_series_label:
+        painter.drawText(
+            content_left,
+            y + meta_metrics.ascent(),
+            f"Time Series: {time_series_label}",
+        )
 
 
 def resolved_plot_kinds(
@@ -85,45 +182,53 @@ def default_4d_stat_pdf_filename(match_row) -> str:
     return f"{name}_4d_stat_plot.pdf"
 
 
-def _render_plot_image(canvas, *, width: int, height: int) -> QImage:
-    capture = getattr(canvas, "capture_image", None)
-    if callable(capture):
-        return capture(width=width, height=height)
-    return _render_widget_image(canvas, width=width, height=height)
+def iter_4d_stat_plot_page_specs(
+    view: Postplot4DStatPlotView,
+    options: Postplot4DStatPlotPdfOptions,
+) -> list[PlotPageSpec]:
+    match_row = view.match_row()
+    if match_row is None:
+        return []
+    combine = view.combine_sources()
+    specs: list[PlotPageSpec] = []
+    for kind in resolved_plot_kinds(view, options):
+        kind_styles = view.source_styles_for_kind(kind)
+        export_source_nos = [row.source_no for row in kind_styles]
+        export_sets = (
+            [export_source_nos]
+            if combine
+            else [[source_no] for source_no in export_source_nos]
+        )
+        for export_sources in export_sets:
+            page_key = pdf_page_key(
+                kind,
+                export_sources[0] if export_sources and not combine else None,
+                combine=combine,
+            )
+            specs.append(
+                PlotPageSpec(
+                    kind=kind,
+                    export_sources=export_sources,
+                    combine=combine,
+                    page_key=page_key,
+                    default_time_series_description=default_pdf_time_series_description(
+                        match_row,
+                        source_nos=export_sources,
+                        kind=kind,
+                    ),
+                )
+            )
+    return specs
 
 
-def _render_widget_image(widget: QWidget, *, width: int, height: int) -> QImage:
-    image = QImage(width, height, QImage.Format.Format_ARGB32)
-    image.fill(Qt.GlobalColor.white)
-    widget.resize(width, height)
-    widget.render(image)
-    QApplication.processEvents()
-    return image
-
-
-def _stats_table_widget(stats_rows: list[SeriesStats]) -> QTableWidget:
-    table = QTableWidget(len(stats_rows), 6)
-    table.setHorizontalHeaderLabels(
-        ["Attribute", "Min", "Max", "Mean", "Std dev", "RMS"]
+def time_series_description_for_page(
+    spec: PlotPageSpec,
+    options: Postplot4DStatPlotPdfOptions,
+) -> str:
+    return options.time_series_descriptions.get(
+        spec.page_key,
+        spec.default_time_series_description,
     )
-    for row_idx, stats in enumerate(stats_rows):
-        values = [
-            stats.attribute,
-            f"{stats.minimum:.2f}",
-            f"{stats.maximum:.2f}",
-            f"{stats.mean:.2f}",
-            f"{stats.std_dev:.2f}",
-            f"{stats.rms:.2f}",
-        ]
-        for col, text in enumerate(values):
-            item = QTableWidgetItem(text)
-            if col > 0:
-                item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
-            table.setItem(row_idx, col, item)
-    table.resizeColumnsToContents()
-    table.resizeRowsToContents()
-    table.setFixedSize(table.sizeHint())
-    return table
 
 
 def _page_layout_pixels(
@@ -132,13 +237,14 @@ def _page_layout_pixels(
     dpi: int,
 ) -> tuple[int, int, int, int, int]:
     """Return page_w, page_h, content_left, content_top, content_width."""
-    width_mm, height_mm = _paper_size_mm(options.paper, landscape=options.landscape)
-    page_w = int(width_mm / 25.4 * dpi)
-    page_h = int(height_mm / 25.4 * dpi)
+    layout = page_layout_for(options.paper, options.landscape)
+    page_rect = layout.paintRectPixels(dpi)
+    page_w = page_rect.width()
+    page_h = page_rect.height()
     margin_px = int(options.margin_mm / 25.4 * dpi)
     content_left = margin_px
     content_top = margin_px
-    content_width = page_w - 2 * margin_px
+    content_width = max(page_w - 2 * margin_px, 1)
     return page_w, page_h, content_left, content_top, content_width
 
 
@@ -154,146 +260,106 @@ def compose_4d_stat_plot_pages(
     if match_row is None:
         raise ValueError("No 4D Stat match row loaded for PDF export.")
 
-    render_dpi = dpi if dpi is not None else options.dpi
-    kinds = resolved_plot_kinds(view, options)
-    if not kinds:
+    page_specs = iter_4d_stat_plot_page_specs(view, options)
+    if not page_specs:
         raise ValueError("Select at least one plot type to include in the PDF.")
 
+    render_dpi = dpi if dpi is not None else options.dpi
     diff_rows = view.diff_rows()
-    vessel_id = primary_vessel_id(diff_rows)
     y_min, y_max = view.y_axis_range()
     auto_y = view.y_axis_auto()
-    combine = view.combine_sources()
+    line_label = f"Line: {line_title(match_row)}"
+    logo_file = resolve_logo_path(logo_path)
 
     page_w, page_h, content_left, content_top, content_width = _page_layout_pixels(
         options,
         dpi=render_dpi,
     )
-    plot_width = content_width
-    plot_height = int(plot_width * 0.42)
+    header_height = _page_header_height(render_dpi)
 
-    title_font = QFont("Segoe UI", 11)
-    body_font = QFont("Segoe UI", 9)
-    line_label = f"Line: {line_title(match_row)}"
+    # Keep the plot's width:height aspect identical to landscape in every
+    # orientation; in portrait the plot is simply scaled down (anchored under
+    # the header) instead of being stretched to fill the tall page.
+    margin_px = int(options.margin_mm / 25.4 * render_dpi)
+    land_rect = page_layout_for(options.paper, True).paintRectPixels(render_dpi)
+    land_plot_w = max(land_rect.width() - 2 * margin_px, 1)
+    land_plot_h = max(land_rect.height() - 2 * margin_px - header_height, 1)
+    landscape_aspect = land_plot_w / land_plot_h
+
+    available_height = max(page_h - 2 * content_top - header_height, 1)
+    plot_width = content_width
+    plot_height = min(available_height, max(1, int(round(plot_width / landscape_aspect))))
 
     pages: list[QImage] = []
 
-    def _draw_plot_page(
-        painter: QPainter,
-        y_cursor: int,
-        kind: PlotKind,
-        export_sources: list[str],
-        *,
-        page_combine: bool,
-    ) -> int:
-        canvas = view.canvas_for_kind(kind)
+    for spec in page_specs:
+        canvas = view.canvas_for_kind(spec.kind)
         if canvas is None:
-            return y_cursor
-        styles = view.source_styles_for_kind(kind)
-        boundaries = view.boundaries_for_kind(kind)
-        sources = [row.source_no for row in styles]
+            continue
+        styles = view.source_styles_for_kind(spec.kind)
+        boundaries = view.boundaries_for_kind(spec.kind)
         series_list = [
-            build_plot_series(diff_rows, match_row, kind, src)
-            for src in export_sources
+            build_plot_series(diff_rows, match_row, spec.kind, src)
+            for src in spec.export_sources
         ]
         series_list = [item for item in series_list if item.shotpoints]
         if not series_list:
-            return y_cursor
+            continue
 
-        for source_no in export_sources if not page_combine else export_sources[:1]:
-            header_source = source_no if not page_combine else ", ".join(export_sources)
-            header = time_series_title(
-                match_row,
-                vessel_id=vessel_id,
-                source_no=header_source if page_combine else source_no,
-                kind=kind,
-            )
-            painter.setFont(body_font)
-            painter.drawText(content_left, y_cursor + painter.fontMetrics().ascent(), header)
-            y_cursor += int(painter.fontMetrics().height() * 1.4)
+        render_sources = (
+            spec.export_sources if spec.combine else [spec.export_sources[0]]
+        )
+        canvas.set_combine_sources(spec.combine)
+        canvas.render(
+            [
+                build_plot_series(diff_rows, match_row, spec.kind, src)
+                for src in render_sources
+            ],
+            styles,
+            boundaries,
+            y_min=y_min,
+            y_max=y_max,
+            auto_y=auto_y,
+        )
+        if not spec.combine and spec.export_sources:
+            select_tab = getattr(canvas, "select_source_tab", None)
+            if callable(select_tab):
+                select_tab(spec.export_sources[0])
 
-            render_sources = export_sources if page_combine else [source_no]
-            canvas.set_combine_sources(page_combine)
-            canvas.render(
-                [
-                    build_plot_series(diff_rows, match_row, kind, src)
-                    for src in render_sources
-                ],
-                styles,
-                boundaries,
-                y_min=y_min,
-                y_max=y_max,
-                auto_y=auto_y,
-            )
-            if not page_combine and export_sources:
-                select_tab = getattr(canvas, "select_source_tab", None)
-                if callable(select_tab):
-                    select_tab(export_sources[0])
-            plot_image = _render_plot_image(canvas, width=plot_width, height=plot_height)
-            painter.drawImage(content_left, y_cursor, plot_image)
-            y_cursor += plot_height + int(painter.fontMetrics().height() * 0.8)
+        QApplication.processEvents()
 
-            caption = (
-                f"Figure 1: Time-series ({PLOT_KIND_PDF_LABELS[kind]}, "
-                f"{PLOT_KIND_UNITS[kind]})"
-            )
-            painter.drawText(content_left, y_cursor + painter.fontMetrics().ascent(), caption)
-            y_cursor += int(painter.fontMetrics().height() * 1.2)
+        time_series_text = time_series_description_for_page(spec, options)
+        plot_image = canvas.capture_image(
+            width=plot_width,
+            height=plot_height,
+            for_pdf=True,
+            dpi=render_dpi,
+        )
 
-            stats_rows: list[SeriesStats] = []
-            for src in render_sources:
-                src_series = build_plot_series(diff_rows, match_row, kind, src)
-                stats = compute_series_stats(src, src_series.values)
-                if stats is not None:
-                    stats_rows.append(stats)
-            if stats_rows:
-                table = _stats_table_widget(stats_rows)
-                table_h = max(table.sizeHint().height(), 40)
-                table_image = _render_widget_image(table, width=plot_width, height=table_h)
-                painter.drawImage(content_left, y_cursor, table_image)
-                y_cursor += table_h + int(painter.fontMetrics().height() * 0.5)
+        page = QImage(page_w, page_h, QImage.Format.Format_ARGB32)
+        page.fill(Qt.GlobalColor.white)
+        painter = QPainter(page)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        painter.setRenderHint(QPainter.RenderHint.TextAntialiasing, True)
 
-            if not page_combine:
-                break
-        return y_cursor
+        _draw_page_header(
+            painter,
+            content_left=content_left,
+            content_top=content_top,
+            content_width=content_width,
+            dpi=render_dpi,
+            report_title=options.report_title,
+            line_label=line_label,
+            time_series_label=time_series_text,
+            logo_file=logo_file,
+        )
+        plot_top = content_top + header_height
+        painter.drawImage(content_left, plot_top, plot_image)
+        painter.end()
+        pages.append(page)
 
-    for kind in kinds:
-        kind_styles = view.source_styles_for_kind(kind)
-        export_source_nos = [row.source_no for row in kind_styles]
-        export_sets = [export_source_nos] if combine else [[source_no] for source_no in export_source_nos]
-        for export_sources in export_sets:
-            page = QImage(page_w, page_h, QImage.Format.Format_ARGB32)
-            page.fill(Qt.GlobalColor.white)
-            painter = QPainter(page)
-            painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
-            painter.setRenderHint(QPainter.RenderHint.TextAntialiasing, True)
-            y_cursor = content_top
-
-            if logo_path and Path(logo_path).is_file():
-                logo = QPixmap(logo_path)
-                if not logo.isNull():
-                    logo_height = int(18 / 25.4 * render_dpi)
-                    logo = logo.scaledToHeight(
-                        logo_height,
-                        Qt.TransformationMode.SmoothTransformation,
-                    )
-                    logo_x = content_left + content_width - logo.width()
-                    painter.drawPixmap(logo_x, y_cursor, logo)
-
-            painter.setFont(title_font)
-            painter.drawText(content_left, y_cursor + painter.fontMetrics().ascent(), line_label)
-            y_cursor += int(painter.fontMetrics().height() * 1.8)
-
-            _draw_plot_page(
-                painter,
-                y_cursor,
-                kind,
-                export_sources,
-                page_combine=combine,
-            )
-            painter.end()
-            pages.append(page)
-
+    if not pages:
+        raise ValueError("No plot pages to export.")
     return pages
 
 
@@ -302,7 +368,7 @@ def render_4d_stat_plot_preview_pages(
     options: Postplot4DStatPlotPdfOptions,
     *,
     logo_path: str = "",
-    dpi: int = 120,
+    dpi: int = STAT_PLOT_PDF_PREVIEW_DPI,
 ) -> list[QImage]:
     """Render all export pages at preview resolution."""
     if not resolved_plot_kinds(view, options):
@@ -350,34 +416,24 @@ def export_4d_stat_plot_pdf(
     if not pages:
         raise ValueError("No plot pages to export.")
 
+    layout = page_layout_for(options.paper, options.landscape)
     writer = QPdfWriter(str(output_path))
-    page_w_mm, page_h_mm = page_dimensions_mm(options.paper, options.landscape)
-    writer.setPageSize(
-        QPageSize(QSizeF(page_w_mm, page_h_mm), QPageSize.Unit.Millimeter)
-    )
-    writer.setPageOrientation(
-        QPageLayout.Orientation.Landscape
-        if options.landscape
-        else QPageLayout.Orientation.Portrait
-    )
-    writer.setResolution(options.dpi)
-    margins = QMarginsF(
-        options.margin_mm,
-        options.margin_mm,
-        options.margin_mm,
-        options.margin_mm,
-    )
-    writer.setPageMargins(margins, QPageLayout.Unit.Millimeter)
+    export_dpi = options.dpi
+    writer.setResolution(export_dpi)
+    writer.setPageLayout(layout)
 
     painter = QPainter(writer)
+    painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
+    painter.setRenderHint(QPainter.RenderHint.TextAntialiasing, True)
+    target = layout.paintRectPixels(export_dpi)
     for index, page in enumerate(pages):
         if index > 0:
             writer.newPage()
-        target = writer.pageLayout().paintRectPixels(writer.resolution())
-        scaled = page.scaled(
-            target.size(),
-            Qt.AspectRatioMode.IgnoreAspectRatio,
-            Qt.TransformationMode.SmoothTransformation,
-        )
-        painter.drawImage(target.topLeft(), scaled)
+        if page.width() != target.width() or page.height() != target.height():
+            page = page.scaled(
+                target.size(),
+                Qt.AspectRatioMode.IgnoreAspectRatio,
+                Qt.TransformationMode.SmoothTransformation,
+            )
+        painter.drawImage(target.topLeft(), page)
     painter.end()

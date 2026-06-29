@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 from pathlib import Path
+
+from xpostmaps.core.crs_utils import normalize_epsg
 from xpostmaps.core.models import (
     LegendConfig,
     LineSegment,

@@ -227,6 +227,9 @@ class BoundaryTable(QWidget):
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
         self._rows: list[BoundaryRow] = []
+        self._widths: list[float] = []
+        self._dots: list[float] = []
+        self._dashes: list[float] = []
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(4)
@@ -256,6 +259,9 @@ class BoundaryTable(QWidget):
 
     def set_rows(self, rows: list[BoundaryRow]) -> None:
         self._rows = list(rows)
+        self._widths = [row.line_width_mm for row in rows]
+        self._dots = [row.dot_radius_mm for row in rows]
+        self._dashes = [row.dash_length_mm for row in rows]
         self._rebuild()
 
     def rows(self) -> list[BoundaryRow]:
@@ -343,15 +349,17 @@ class BoundaryTable(QWidget):
                 secondary_metric_provider=secondary_provider,
             )
 
-            def bind_style(style_combo=style_combo, color_btn=color_btn) -> None:
+            def bind_style(row_idx=row_idx, style_combo=style_combo, color_btn=color_btn) -> None:
                 def on_style_changed() -> None:
                     style = _StyleComboBox.style_from_index(style_combo.currentIndex())
                     metric = (
-                        row.dot_radius_mm
+                        self._dots[row_idx]
                         if style == LineStyle.DOTTED
-                        else row.line_width_mm
+                        else self._widths[row_idx]
                     )
-                    secondary = row.dash_length_mm if style == LineStyle.DASH else 3.0
+                    secondary = (
+                        self._dashes[row_idx] if style == LineStyle.DASH else 3.0
+                    )
                     color_btn.set_color(
                         color_btn.color,
                         color_btn.opacity,
@@ -362,8 +370,12 @@ class BoundaryTable(QWidget):
 
                 style_combo.currentIndexChanged.connect(on_style_changed)
                 color_btn.color_changed.connect(lambda *_: self.changed.emit())
-                color_btn.metric_changed.connect(lambda *_: self.changed.emit())
-                color_btn.secondary_metric_changed.connect(lambda *_: self.changed.emit())
+                color_btn.metric_changed.connect(
+                    lambda value: self._on_metric(row_idx, value)
+                )
+                color_btn.secondary_metric_changed.connect(
+                    lambda value: self._on_dash(row_idx, value)
+                )
 
             bind_style()
             self._table.setCellWidget(row_idx, 2, color_btn)
@@ -372,6 +384,26 @@ class BoundaryTable(QWidget):
         _fit_table_columns(self._table)
         _fit_table_height(self._table)
         self.adjustSize()
+
+    def _on_metric(self, row_idx: int, value: float) -> None:
+        while len(self._widths) <= row_idx:
+            self._widths.append(0.35)
+        while len(self._dots) <= row_idx:
+            self._dots.append(0.8)
+        style_combo = self._table.cellWidget(row_idx, 1)
+        if isinstance(style_combo, _StyleComboBox):
+            style = _StyleComboBox.style_from_index(style_combo.currentIndex())
+            if style == LineStyle.DOTTED:
+                self._dots[row_idx] = value
+            else:
+                self._widths[row_idx] = value
+        self.changed.emit()
+
+    def _on_dash(self, row_idx: int, value: float) -> None:
+        while len(self._dashes) <= row_idx:
+            self._dashes.append(3.0)
+        self._dashes[row_idx] = value
+        self.changed.emit()
 
 
 class PlotTabControls(QWidget):
