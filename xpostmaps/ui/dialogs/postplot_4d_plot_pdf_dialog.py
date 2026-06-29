@@ -108,9 +108,6 @@ class Postplot4DStatPlotPdfDialog:
             filename_edit = QLineEdit(default_4d_stat_pdf_filename(match_row))
             left_form.addRow("PDF filename", filename_edit)
 
-            report_title_edit = QLineEdit(DEFAULT_4D_STAT_PDF_REPORT_TITLE)
-            left_form.addRow("Report title", report_title_edit)
-
             paper_combo = QComboBox()
             paper_combo.addItems(list(PAPER_SIZE_NAMES))
             paper_combo.setCurrentText("A4")
@@ -171,6 +168,9 @@ class Postplot4DStatPlotPdfDialog:
                 plot_checks[kind] = box
                 plots_layout.addWidget(box)
             left_form.addRow(plots_group)
+
+            report_title_edit = QLineEdit(DEFAULT_4D_STAT_PDF_REPORT_TITLE)
+            left_form.addRow("Report title", report_title_edit)
 
             time_series_edit = QLineEdit()
             time_series_edit.setPlaceholderText(
