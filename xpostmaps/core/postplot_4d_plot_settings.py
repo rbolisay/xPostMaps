@@ -7,16 +7,27 @@ from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 
 from xpostmaps.core.models import LineStyle
+from xpostmaps.core.postplot_4d_matching import Postplot4DMatchRow
 from xpostmaps.core.postplot_4d_plot_data import (
     BoundaryRow,
     PlotKind,
     SourceStyleRow,
     default_source_styles,
 )
+from xpostmaps.core.postplot_4d_survey_spec import (
+    Severity,
+    SurveySpecRow,
+    metric_kind_from_str,
+    severity_from_str,
+    stat_type_from_str,
+)
 
 _SETTINGS_PATH = Path(__file__).resolve().parents[2] / "data" / "settings.json"
 _SETTINGS_KEY = "postplot_4d_plot_kinds"
+_PLOT_BY_LINE_KEY = "postplot_4d_plot_by_line"
 _VIEW_SETTINGS_KEY = "postplot_4d_plot_view"
+_SURVEY_SPECS_KEY = "postplot_4d_survey_specs"
+_EXCLUDED_SHOTPOINTS_KEY = "postplot_4d_excluded_shotpoints"
 
 
 @dataclass(frozen=True)
@@ -52,6 +63,32 @@ def _read_settings() -> dict:
 def _write_settings(data: dict) -> None:
     _SETTINGS_PATH.parent.mkdir(parents=True, exist_ok=True)
     _SETTINGS_PATH.write_text(json.dumps(data, indent=2), encoding="utf-8")
+
+
+def plot_settings_key(match_row: Postplot4DMatchRow) -> str:
+    """Stable key for plot-specific Source Style / Boundary / Y-axis settings."""
+    subline = (match_row.subline or "").strip()
+    baseline = (match_row.baseline_name or "").strip()
+    line = (match_row.line_name or "").strip()
+    return f"{match_row.baseline_kind}|{baseline}|{line}|{subline}"
+
+
+def _plot_blob(plot_key: str) -> dict:
+    root = _read_settings().get(_PLOT_BY_LINE_KEY)
+    if not isinstance(root, dict):
+        return {}
+    blob = root.get(plot_key)
+    return blob if isinstance(blob, dict) else {}
+
+
+def _write_plot_blob(plot_key: str, blob: dict) -> None:
+    data = _read_settings()
+    root = data.get(_PLOT_BY_LINE_KEY)
+    if not isinstance(root, dict):
+        root = {}
+    root[plot_key] = blob
+    data[_PLOT_BY_LINE_KEY] = root
+    _write_settings(data)
 
 
 def _line_style_to_str(style: LineStyle) -> str:
@@ -162,6 +199,7 @@ def save_kind_settings(
     source_styles: list[SourceStyleRow],
     boundaries: list[BoundaryRow],
 ) -> None:
+    """Persist global (legacy) kind settings — used as fallback when no plot key."""
     data = _read_settings()
     root = data.get(_SETTINGS_KEY)
     if not isinstance(root, dict):
@@ -174,16 +212,75 @@ def save_kind_settings(
     _write_settings(data)
 
 
+def load_saved_plot_kind_settings(
+    plot_key: str,
+    kind: PlotKind,
+) -> tuple[list[SourceStyleRow], list[BoundaryRow]] | None:
+    """Load kind settings saved for one 4D Stat plot line."""
+    kinds = _plot_blob(plot_key).get("kinds")
+    if not isinstance(kinds, dict):
+        return None
+    blob = kinds.get(kind)
+    if not isinstance(blob, dict):
+        return None
+    source_rows, boundary_rows = _kind_blob_to_rows(blob)
+    if not source_rows and not boundary_rows:
+        return None
+    return source_rows, boundary_rows
+
+
+def save_plot_kind_settings(
+    plot_key: str,
+    kind: PlotKind,
+    source_styles: list[SourceStyleRow],
+    boundaries: list[BoundaryRow],
+) -> None:
+    """Persist kind settings for one 4D Stat plot line."""
+    blob = dict(_plot_blob(plot_key))
+    kinds = blob.get("kinds")
+    if not isinstance(kinds, dict):
+        kinds = {}
+    kinds[kind] = {
+        "sources": [source_style_row_to_dict(row) for row in source_styles],
+        "boundaries": [boundary_row_to_dict(row) for row in boundaries],
+    }
+    blob["kinds"] = kinds
+    _write_plot_blob(plot_key, blob)
+
+
 def resolve_source_styles_for_line(
     source_nos: list[str],
     kind: PlotKind,
 ) -> list[SourceStyleRow]:
-    """Apply saved styles by source label (G01, G02, …) for the current line."""
+    """Apply saved global styles by source label (G01, G02, …)."""
     defaults = default_source_styles(source_nos)
     default_by_no = {row.source_no: row for row in defaults}
     saved = load_saved_kind_settings(kind)
     if saved is None:
         return defaults
+    saved_sources, _ = saved
+    saved_by_no = {row.source_no: row for row in saved_sources}
+    resolved: list[SourceStyleRow] = []
+    for source_no in source_nos:
+        template = saved_by_no.get(source_no)
+        if template is None:
+            resolved.append(default_by_no[source_no])
+            continue
+        resolved.append(replace(template, source_no=source_no))
+    return resolved
+
+
+def resolve_source_styles_for_plot(
+    plot_key: str,
+    source_nos: list[str],
+    kind: PlotKind,
+) -> list[SourceStyleRow]:
+    """Plot-specific source styles, falling back to global saved styles."""
+    defaults = default_source_styles(source_nos)
+    default_by_no = {row.source_no: row for row in defaults}
+    saved = load_saved_plot_kind_settings(plot_key, kind)
+    if saved is None:
+        return resolve_source_styles_for_line(source_nos, kind)
     saved_sources, _ = saved
     saved_by_no = {row.source_no: row for row in saved_sources}
     resolved: list[SourceStyleRow] = []
@@ -206,6 +303,17 @@ def resolve_boundaries_for_kind(kind: PlotKind) -> list[BoundaryRow]:
     return [replace(row) for row in boundaries]
 
 
+def resolve_boundaries_for_plot(plot_key: str, kind: PlotKind) -> list[BoundaryRow]:
+    """Plot-specific boundary limits, falling back to global saved limits."""
+    saved = load_saved_plot_kind_settings(plot_key, kind)
+    if saved is None:
+        return resolve_boundaries_for_kind(kind)
+    _, boundaries = saved
+    if not boundaries:
+        return resolve_boundaries_for_kind(kind)
+    return [replace(row) for row in boundaries]
+
+
 def apply_saved_settings_to_kinds(
     source_nos: list[str],
     kinds: tuple[PlotKind, ...] = _ALL_KINDS,
@@ -220,7 +328,7 @@ def apply_saved_settings_to_kinds(
 
 
 def load_plot_view_settings() -> PlotViewSettings:
-    """Load shared 4D Stat plot view options (Y axis, combine sources)."""
+    """Load shared global 4D Stat plot view options (legacy fallback)."""
     root = _read_settings().get(_VIEW_SETTINGS_KEY)
     if not isinstance(root, dict):
         return PlotViewSettings()
@@ -232,13 +340,104 @@ def load_plot_view_settings() -> PlotViewSettings:
     )
 
 
+def load_plot_view_settings_for_plot(plot_key: str) -> PlotViewSettings:
+    """Load Y-axis / combine settings for one 4D Stat plot line."""
+    view = _plot_blob(plot_key).get("view")
+    if isinstance(view, dict):
+        return PlotViewSettings(
+            auto_y=bool(view.get("auto_y", True)),
+            y_min=float(view.get("y_min", -10.0)),
+            y_max=float(view.get("y_max", 10.0)),
+            combine_sources=bool(view.get("combine_sources", True)),
+        )
+    return load_plot_view_settings()
+
+
 def save_plot_view_settings(settings: PlotViewSettings) -> None:
-    """Persist shared 4D Stat plot view options."""
+    """Persist shared global plot view options (legacy)."""
     data = _read_settings()
     data[_VIEW_SETTINGS_KEY] = {
         "auto_y": settings.auto_y,
         "y_min": settings.y_min,
         "y_max": settings.y_max,
         "combine_sources": settings.combine_sources,
+    }
+    _write_settings(data)
+
+
+def save_plot_view_settings_for_plot(plot_key: str, settings: PlotViewSettings) -> None:
+    """Persist Y-axis / combine settings for one 4D Stat plot line."""
+    blob = dict(_plot_blob(plot_key))
+    blob["view"] = {
+        "auto_y": settings.auto_y,
+        "y_min": settings.y_min,
+        "y_max": settings.y_max,
+        "combine_sources": settings.combine_sources,
+    }
+    _write_plot_blob(plot_key, blob)
+
+
+def survey_spec_row_to_dict(row: SurveySpecRow) -> dict:
+    statistic = row.statistic.value if hasattr(row.statistic, "value") else str(row.statistic)
+    severity = row.severity.value if hasattr(row.severity, "value") else str(row.severity)
+    return {
+        "metric": row.metric,
+        "statistic": statistic,
+        "reference_value": row.reference_value,
+        "stat_value": row.stat_value,
+        "absolute": row.absolute,
+        "severity": severity,
+    }
+
+
+def survey_spec_row_from_dict(data: dict) -> SurveySpecRow:
+    return SurveySpecRow(
+        metric=metric_kind_from_str(str(data.get("metric", "crossline"))),
+        statistic=stat_type_from_str(str(data.get("statistic", "max_value"))),
+        reference_value=float(data.get("reference_value", 0.0)),
+        stat_value=float(data.get("stat_value", 0.0)),
+        absolute=bool(data.get("absolute", True)),
+        severity=severity_from_str(str(data.get("severity", Severity.ERROR.value))),
+    )
+
+
+def load_survey_specs() -> list[SurveySpecRow]:
+    """Load the saved survey spec rows (empty list when none saved)."""
+    root = _read_settings().get(_SURVEY_SPECS_KEY)
+    if not isinstance(root, list):
+        return []
+    return [
+        survey_spec_row_from_dict(item)
+        for item in root
+        if isinstance(item, dict)
+    ]
+
+
+def save_survey_specs(rows: list[SurveySpecRow]) -> None:
+    """Persist the survey spec rows shared across all lines/sequences."""
+    data = _read_settings()
+    data[_SURVEY_SPECS_KEY] = [survey_spec_row_to_dict(row) for row in rows]
+    _write_settings(data)
+
+
+def load_excluded_shotpoints() -> dict[str, str]:
+    """Load saved excluded-shotpoint text keyed by sequence number."""
+    root = _read_settings().get(_EXCLUDED_SHOTPOINTS_KEY)
+    if not isinstance(root, dict):
+        return {}
+    return {
+        str(key): str(value)
+        for key, value in root.items()
+        if str(key).strip()
+    }
+
+
+def save_excluded_shotpoints(mapping: dict[str, str]) -> None:
+    """Persist excluded-shotpoint text keyed by sequence number."""
+    data = _read_settings()
+    data[_EXCLUDED_SHOTPOINTS_KEY] = {
+        str(key): str(value)
+        for key, value in mapping.items()
+        if str(key).strip()
     }
     _write_settings(data)

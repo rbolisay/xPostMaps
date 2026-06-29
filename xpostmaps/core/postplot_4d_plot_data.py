@@ -231,6 +231,19 @@ def _value_for_kind(diff_row: Postplot4DDiffRow, kind: PlotKind) -> float | None
     return None
 
 
+def metric_values_for_kind(
+    diff_rows: list[Postplot4DDiffRow],
+    kind: PlotKind,
+) -> list[float]:
+    """Every defined value of *kind* across *diff_rows* (unordered)."""
+    values: list[float] = []
+    for diff_row in diff_rows:
+        value = _value_for_kind(diff_row, kind)
+        if value is not None:
+            values.append(float(value))
+    return values
+
+
 def build_plot_series(
     diff_rows: list[Postplot4DDiffRow],
     match_row: Postplot4DMatchRow,

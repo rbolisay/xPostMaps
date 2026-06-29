@@ -32,14 +32,25 @@ from xpostmaps.core.postplot_4d_plot_data import (
 )
 from xpostmaps.core.postplot_4d_plot_settings import (
     PlotViewSettings,
+    load_excluded_shotpoints,
     load_plot_view_settings,
-    resolve_boundaries_for_kind,
-    resolve_source_styles_for_line,
-    save_kind_settings,
-    save_plot_view_settings,
+    load_plot_view_settings_for_plot,
+    load_survey_specs,
+    plot_settings_key,
+    resolve_boundaries_for_plot,
+    resolve_source_styles_for_plot,
+    save_excluded_shotpoints,
+    save_plot_kind_settings,
+    save_plot_view_settings_for_plot,
+    save_survey_specs,
+)
+from xpostmaps.core.postplot_4d_survey_spec import (
+    SurveyEvaluation,
+    evaluate_survey_specs,
 )
 from xpostmaps.ui.postplot_4d_stat_plot.controls import PlotTabControls, YAxisControls
 from xpostmaps.ui.postplot_4d_stat_plot.plot_widget import PlotCanvas
+from xpostmaps.ui.postplot_4d_stat_plot.survey_specs import SurveySpecsPanel
 from xpostmaps.ui.postplot_4d_stat_plot.theme import STAT_PLOT_TAB_STYLE, STAT_PLOT_VIEW_STYLE
 
 _PLOT_KINDS: tuple[PlotKind, ...] = (
@@ -210,6 +221,7 @@ class Postplot4DStatPlotView(QWidget):
         self._streamers_detected = False
         self._sources: list[str] = []
         self._sets: list[SequenceDiffSet] = []
+        self._plot_settings_key: str | None = None
 
         root = QVBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
@@ -238,8 +250,16 @@ class Postplot4DStatPlotView(QWidget):
         toolbar.addStretch()
         toolbar.addWidget(self._subline_nav, alignment=top)
         toolbar.addStretch()
-        toolbar.addWidget(back_btn, alignment=top)
+        back_col = QVBoxLayout()
+        back_col.setContentsMargins(0, 0, 0, 0)
+        back_col.setSpacing(2)
+        back_col.addWidget(back_btn, alignment=Qt.AlignmentFlag.AlignRight)
+        self._acceptance = QLabel("Acceptance: \u2014")
+        self._acceptance.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        back_col.addWidget(self._acceptance, alignment=Qt.AlignmentFlag.AlignRight)
+        toolbar.addLayout(back_col)
         root.addLayout(toolbar)
+        self._update_acceptance(None)
 
         self._title = QLabel("")
         self._title.setStyleSheet("font-weight: 600; color: #e6edf3;")
@@ -266,15 +286,37 @@ class Postplot4DStatPlotView(QWidget):
         self._tabs.currentChanged.connect(self._on_tab_changed)
         root.addWidget(self._tabs, stretch=1)
 
-        controls_host = QWidget()
-        controls_layout = QVBoxLayout(controls_host)
-        controls_layout.setContentsMargins(0, 0, 0, 0)
-        controls_layout.setSpacing(8)
-        controls_layout.addWidget(self._controls_stack)
-        self._y_axis = YAxisControls(parent=controls_host)
+        self._bottom_tabs = QTabWidget()
+        self._bottom_tabs.setStyleSheet(STAT_PLOT_TAB_STYLE)
+
+        # Survey Specs tab (default): acceptance limits + per-sequence results.
+        self._survey_panel = SurveySpecsPanel(parent=self)
+        self._survey_panel.set_rows(load_survey_specs())
+        self._survey_panel.changed.connect(self._on_survey_specs_changed)
+        specs_page = QWidget()
+        specs_layout = QVBoxLayout(specs_page)
+        specs_layout.setContentsMargins(8, 4, 8, 8)
+        specs_layout.setSpacing(0)
+        specs_layout.addWidget(
+            self._survey_panel,
+            alignment=Qt.AlignmentFlag.AlignTop,
+        )
+        specs_layout.addStretch(1)
+        self._bottom_tabs.addTab(specs_page, "Survey Specs")
+
+        # Plot Settings tab: per-kind Source Style + Boundary Limits + Y axis.
+        plot_settings_page = QWidget()
+        plot_settings_layout = QVBoxLayout(plot_settings_page)
+        plot_settings_layout.setContentsMargins(8, 8, 8, 8)
+        plot_settings_layout.setSpacing(8)
+        plot_settings_layout.addWidget(self._controls_stack)
+        self._y_axis = YAxisControls(parent=plot_settings_page)
         self._y_axis.changed.connect(self._on_y_axis_changed)
-        controls_layout.addWidget(self._y_axis)
-        root.addWidget(controls_host)
+        plot_settings_layout.addWidget(self._y_axis)
+        self._bottom_tabs.addTab(plot_settings_page, "Plot Settings")
+
+        self._bottom_tabs.setCurrentIndex(0)
+        root.addWidget(self._bottom_tabs)
 
         self._apply_saved_plot_view_settings()
 
@@ -308,6 +350,8 @@ class Postplot4DStatPlotView(QWidget):
         self._sources = combined_source_numbers(self._sets)
         sequence_nos = combined_sequence_numbers(self._sets)
         multi = len(self._sets) > 1
+        self._plot_settings_key = plot_settings_key(match_row)
+        self._apply_plot_view_settings()
 
         for kind, controls in self._tab_controls.items():
             if multi:
@@ -316,14 +360,22 @@ class Postplot4DStatPlotView(QWidget):
                     for source_no in self._sources
                     for sequence_no in sequence_nos
                 ]
-                resolved = resolve_source_styles_for_line(keys, kind)
+                resolved = resolve_source_styles_for_plot(
+                    self._plot_settings_key, keys, kind
+                )
                 style_by_key = {row.source_no: row for row in resolved}
                 controls.set_source_matrix(self._sources, sequence_nos, style_by_key)
             else:
                 controls.set_sources(
-                    resolve_source_styles_for_line(self._sources, kind)
+                    resolve_source_styles_for_plot(
+                        self._plot_settings_key,
+                        self._sources,
+                        kind,
+                    )
                 )
-            controls.set_boundaries(resolve_boundaries_for_kind(kind))
+            controls.set_boundaries(
+                resolve_boundaries_for_plot(self._plot_settings_key, kind)
+            )
 
         line_label = (
             f"{match_row.line_name}.{match_row.subline}"
@@ -340,6 +392,11 @@ class Postplot4DStatPlotView(QWidget):
             self._title.setText(f"{line_label} 4D Stat Plot")
         self._subline_nav.set_sequence(", ".join(sequence_nos))
         self._subline_nav.set_preplot(match_row.baseline_name)
+
+        self._survey_panel.set_sequences(
+            sequence_nos,
+            load_excluded_shotpoints(),
+        )
 
         show_feather = feather_tab_available(
             self._diff_rows,
@@ -358,6 +415,7 @@ class Postplot4DStatPlotView(QWidget):
                 self._tabs.setTabVisible(tab_index, visible)
         self._sync_controls_stack()
         self._refresh_all_tabs()
+        self._evaluate_survey()
         QTimer.singleShot(0, self._refresh_all_tabs)
 
     def match_row(self) -> Postplot4DMatchRow | None:
@@ -463,15 +521,26 @@ class Postplot4DStatPlotView(QWidget):
         self._refresh_current_tab()
 
     def _apply_saved_plot_view_settings(self) -> None:
+        """Initial defaults before the first plot line is loaded."""
         saved = load_plot_view_settings()
+        self._apply_plot_view_settings(saved)
+
+    def _apply_plot_view_settings(
+        self, settings: PlotViewSettings | None = None
+    ) -> None:
+        if settings is None:
+            if self._plot_settings_key:
+                settings = load_plot_view_settings_for_plot(self._plot_settings_key)
+            else:
+                settings = load_plot_view_settings()
         self._y_axis.apply_settings(
-            auto_y=saved.auto_y,
-            y_min=saved.y_min,
-            y_max=saved.y_max,
+            auto_y=settings.auto_y,
+            y_min=settings.y_min,
+            y_max=settings.y_max,
         )
         self._combine_box.blockSignals(True)
         try:
-            self._combine_box.setChecked(saved.combine_sources)
+            self._combine_box.setChecked(settings.combine_sources)
         finally:
             self._combine_box.blockSignals(False)
 
@@ -485,16 +554,73 @@ class Postplot4DStatPlotView(QWidget):
         )
 
     def _persist_plot_view_settings(self) -> None:
-        save_plot_view_settings(self._current_plot_view_settings())
+        if not self._plot_settings_key:
+            return
+        save_plot_view_settings_for_plot(
+            self._plot_settings_key,
+            self._current_plot_view_settings(),
+        )
 
     def _on_y_axis_changed(self) -> None:
         self._persist_plot_view_settings()
         self._refresh_all_tabs()
 
+    def _autosave_survey_specs(self) -> None:
+        """Persist global survey specs immediately (shared across all sequences)."""
+        save_survey_specs(self._survey_panel.rows())
+        save_excluded_shotpoints(self._survey_panel.excluded_shotpoints())
+
+    def _on_survey_specs_changed(self) -> None:
+        self._autosave_survey_specs()
+        self._evaluate_survey()
+
+    def _evaluate_survey(self) -> None:
+        sequence_nos = combined_sequence_numbers(self._sets) if self._sets else []
+        if not self._sets:
+            self._survey_panel.set_sequences(sequence_nos, self._survey_panel.excluded_shotpoints())
+            self._survey_panel.set_evaluation(None, sequence_nos)
+            self._update_acceptance(None)
+            return
+        excluded = self._survey_panel.excluded_shotpoints()
+        evaluation = evaluate_survey_specs(
+            self._sets,
+            self._survey_panel.rows(),
+            excluded_by_sequence=excluded,
+        )
+        self._survey_panel.set_evaluation(evaluation, sequence_nos)
+        self._update_acceptance(evaluation)
+
+    def _update_acceptance(self, evaluation: SurveyEvaluation | None) -> None:
+        if evaluation is None or evaluation.spec_count == 0:
+            self._acceptance.setText("Acceptance: \u2014")
+            self._acceptance.setStyleSheet("color: #8b949e; font-size: 12px;")
+            return
+        if evaluation.accepted:
+            self._acceptance.setText("Acceptance: PASS")
+            self._acceptance.setStyleSheet(
+                "color: #3fb950; font-size: 13px; font-weight: 700;"
+            )
+        else:
+            self._acceptance.setText("Acceptance: FAIL")
+            self._acceptance.setStyleSheet(
+                "color: #f85149; font-size: 13px; font-weight: 700;"
+            )
+
+    def survey_evaluation(self) -> SurveyEvaluation | None:
+        """Current survey acceptance evaluation (None when no data)."""
+        if not self._sets:
+            return None
+        return evaluate_survey_specs(
+            self._sets,
+            self._survey_panel.rows(),
+            excluded_by_sequence=self._survey_panel.excluded_shotpoints(),
+        )
+
     def _on_kind_controls_changed(self, kind: PlotKind) -> None:
         controls = self._tab_controls.get(kind)
-        if controls is not None:
-            save_kind_settings(
+        if controls is not None and self._plot_settings_key:
+            save_plot_kind_settings(
+                self._plot_settings_key,
                 kind,
                 controls.source_styles(),
                 controls.boundaries(),

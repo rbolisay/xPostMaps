@@ -407,8 +407,8 @@ class BoundaryTable(QWidget):
         _configure_legend_table(self._table)
         self._table.setHorizontalHeaderLabels(
             [
-                "Limit Value",
                 "Reference Value",
+                "Limit Value",
                 "Absolute",
                 "Boundary Style",
                 "Boundary Color",
@@ -430,8 +430,8 @@ class BoundaryTable(QWidget):
     def rows(self) -> list[BoundaryRow]:
         result: list[BoundaryRow] = []
         for row_idx in range(self._table.rowCount()):
-            limit_spin = self._value_spin(row_idx, 0)
-            reference_spin = self._value_spin(row_idx, 1)
+            limit_spin = self._value_spin(row_idx, 1)
+            reference_spin = self._value_spin(row_idx, 0)
             abs_box = _checkbox_in(self._table.cellWidget(row_idx, 2))
             limit_value = limit_spin.value() if limit_spin is not None else 0.0
             reference_value = reference_spin.value() if reference_spin is not None else 0.0
@@ -489,13 +489,13 @@ class BoundaryTable(QWidget):
         self._table.blockSignals(True)
         self._table.setRowCount(len(self._rows))
         for row_idx, row in enumerate(self._rows):
-            limit_spin = _make_boundary_value_spin(row.limit_value)
-            limit_spin.valueChanged.connect(lambda *_: self.changed.emit())
-            self._table.setCellWidget(row_idx, 0, limit_spin)
-
             reference_spin = _make_boundary_value_spin(row.reference_value)
             reference_spin.valueChanged.connect(lambda *_: self.changed.emit())
-            self._table.setCellWidget(row_idx, 1, reference_spin)
+            self._table.setCellWidget(row_idx, 0, reference_spin)
+
+            limit_spin = _make_boundary_value_spin(row.limit_value)
+            limit_spin.valueChanged.connect(lambda *_: self.changed.emit())
+            self._table.setCellWidget(row_idx, 1, limit_spin)
 
             abs_container = _make_absolute_checkbox(row.absolute)
             abs_box = _checkbox_in(abs_container)

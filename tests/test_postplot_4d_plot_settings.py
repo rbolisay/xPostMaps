@@ -144,3 +144,40 @@ def test_save_and_load_plot_view_settings(tmp_path, monkeypatch) -> None:
     assert loaded.y_min == -3.5
     assert loaded.y_max == 7.25
     assert loaded.combine_sources is False
+
+
+def test_plot_specific_kind_settings(tmp_path, monkeypatch) -> None:
+    from xpostmaps.core.postplot_4d_matching import Postplot4DMatchRow
+    from xpostmaps.core.postplot_4d_plot_settings import (
+        plot_settings_key,
+        resolve_boundaries_for_plot,
+        resolve_source_styles_for_plot,
+        save_plot_kind_settings,
+    )
+
+    settings_path = tmp_path / "settings.json"
+    monkeypatch.setattr(
+        "xpostmaps.core.postplot_4d_plot_settings._SETTINGS_PATH",
+        settings_path,
+    )
+    match = Postplot4DMatchRow(
+        baseline_name="PreplotA",
+        baseline_kind="preplot",
+        line_name="Line1",
+        subline="SL01",
+        sequence_no="101",
+        first_sp=1,
+        last_sp=100,
+        line_direction="up",
+    )
+    key = plot_settings_key(match)
+    save_plot_kind_settings(
+        key,
+        "crossline",
+        [SourceStyleRow(source_no="G01", color="#aabbcc")],
+        [],
+    )
+    styles = resolve_source_styles_for_plot(key, ["G01"], "crossline")
+    assert styles[0].color == "#aabbcc"
+    boundaries = resolve_boundaries_for_plot(key, "inline")
+    assert len(boundaries) == 2
