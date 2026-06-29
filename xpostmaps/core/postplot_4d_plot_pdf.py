@@ -364,6 +364,7 @@ def compose_4d_stat_plot_pages(
     logo_file = resolve_logo_path(logo_path)
 
     geom = _plot_page_geometry(options, render_dpi)
+    screen_ref_width = view.onscreen_plot_width()
     pages: list[QImage] = []
 
     for spec in page_specs:
@@ -379,6 +380,7 @@ def compose_4d_stat_plot_pages(
             height=geom.plot_height,
             for_pdf=True,
             dpi=render_dpi,
+            screen_ref_width=screen_ref_width,
         )
 
         page = QImage(geom.page_w, geom.page_h, QImage.Format.Format_ARGB32)
@@ -481,6 +483,9 @@ def export_4d_stat_plot_pdf(
     logo_file = resolve_logo_path(logo_path)
 
     geom = _plot_page_geometry(options, export_dpi)
+    # Measure the on-screen plot width once, before any export re-render replaces
+    # the live plot widgets, so markers keep their on-screen size on every page.
+    screen_ref_width = view.onscreen_plot_width()
 
     layout = page_layout_for(options.paper, options.landscape)
     writer = QPdfWriter(str(output_path))
@@ -530,6 +535,7 @@ def export_4d_stat_plot_pdf(
                 height=geom.plot_height,
                 for_pdf=True,
                 dpi=export_dpi,
+                screen_ref_width=screen_ref_width,
             )
             plot_x = origin_x + geom.content_left
             plot_y = origin_y + geom.content_top + geom.header_height

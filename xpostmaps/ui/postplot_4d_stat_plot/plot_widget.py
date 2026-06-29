@@ -450,11 +450,23 @@ class TimeSeriesPlotWidget(pg.PlotWidget):
     def _pdf_scale(self, dpi: int) -> float:
         return max(1.0, dpi / float(DEFAULT_SCREEN_DPI))
 
-    def _apply_pdf_style(self, dpi: int) -> None:
+    def _apply_pdf_style(self, dpi: int, *, marker_scale: float | None = None) -> None:
         """Scale pens, markers, axis lines and fonts so the plot reads correctly
-        at the export resolution (cosmetic 1px pens are invisible at high DPI)."""
+        at the export resolution (cosmetic 1px pens are invisible at high DPI).
+
+        ``marker_scale`` scales the data-point markers. Markers are blobs, so when
+        the print plot is physically narrower than the on-screen widget, DPI-scaled
+        markers pack denser and merge into fat beaded bands. Passing the export /
+        on-screen plot-width ratio keeps each marker the same *fraction* of the
+        plot as on screen, so the dots read at the on-screen thickness. Falls back
+        to the DPI ``scale`` when no reference width is available."""
         scale = self._pdf_scale(dpi)
-        line_boost = 1.4
+        sym_scale = marker_scale if marker_scale and marker_scale > 0 else scale
+        # Source curves are scaled by DPI only (no extra boost) so the exported
+        # stroke thickness matches the on-screen plot. ``scale`` already maps the
+        # screen-pixel (96 DPI) cosmetic width to the export DPI 1:1; multiplying
+        # by an extra factor made PDF source lines visibly fatter than the plot.
+        boundary_boost = 1.4
         backup: dict[str, object] = {}
 
         curve_backup: list[tuple[pg.PlotDataItem, QPen, float, object]] = []
@@ -464,12 +476,12 @@ class TimeSeriesPlotWidget(pg.PlotWidget):
             sym_size = curve.opts.get("symbolSize", 5) or 5
             sym_pen = curve.opts.get("symbolPen")
             curve_backup.append((curve, QPen(qpen), float(sym_size), sym_pen))
-            curve.setPen(_scale_pen(qpen, scale * line_boost))
-            curve.setSymbolSize(max(2, int(round(float(sym_size) * scale))))
+            curve.setPen(_scale_pen(qpen, scale))
+            curve.setSymbolSize(max(2, int(round(float(sym_size) * sym_scale))))
             if isinstance(sym_pen, QPen):
                 scaled_sym_pen = pg.mkPen(
                     sym_pen.color(),
-                    width=max(1.0, sym_pen.widthF() * scale),
+                    width=max(1.0, sym_pen.widthF() * sym_scale),
                     cosmetic=True,
                 )
                 curve.setSymbolPen(scaled_sym_pen)
@@ -480,7 +492,7 @@ class TimeSeriesPlotWidget(pg.PlotWidget):
             pen = line.pen
             qpen = QPen(pen) if isinstance(pen, QPen) else pg.mkPen(pen)
             boundary_backup.append((line, QPen(qpen)))
-            line.setPen(_scale_pen(qpen, scale * line_boost))
+            line.setPen(_scale_pen(qpen, scale * boundary_boost))
         backup["boundaries"] = boundary_backup
 
         axis_backup: dict[str, object] = {}
@@ -563,7 +575,9 @@ class TimeSeriesPlotWidget(pg.PlotWidget):
             )
         painter.restore()
 
-    def _render_plot_body_for_pdf(self, *, width: int, height: int, dpi: int) -> QImage:
+    def _render_plot_body_for_pdf(
+        self, *, width: int, height: int, dpi: int, screen_ref_width: float | None = None
+    ) -> QImage:
         """Render the plot at the exact target pixel size so it fills the frame
         on every page (no crop, no letterbox) with DPI-scaled lines and text.
 
@@ -578,7 +592,20 @@ class TimeSeriesPlotWidget(pg.PlotWidget):
         plot_item.layout.setContentsMargins(0, 0, 0, 0)
         scene = self.scene()
 
-        self._apply_pdf_style(dpi)
+        # Keep markers at the same fraction of the plot as on screen so the dots
+        # don't balloon when the print plot is physically narrower than the widget.
+        # The caller passes the visible plot's on-screen width as a stable
+        # reference (hidden tabs aren't laid out, so their own width is wrong);
+        # only fall back to this widget's live width when none is supplied.
+        ref_width = screen_ref_width if screen_ref_width and screen_ref_width > 1.0 else None
+        if ref_width is None:
+            live = float(self.width())
+            ref_width = live if live > 200.0 else None
+        marker_scale = None
+        if ref_width is not None:
+            # Never larger than the DPI-faithful size; markers should only shrink.
+            marker_scale = min(self._pdf_scale(dpi), width / ref_width)
+        self._apply_pdf_style(dpi, marker_scale=marker_scale)
         prev_rect = plot_item.geometry()
         plot_item.setGeometry(QRectF(0, 0, width, height))
         if scene is not None:
@@ -693,6 +720,7 @@ class TimeSeriesPlotWidget(pg.PlotWidget):
         time_series_label: str = "",
         for_pdf: bool = False,
         dpi: int = 120,
+        screen_ref_width: float | None = None,
     ) -> QImage:
         """Render plot scene to an image (pyqtgraph-safe)."""
         prev_min_height = self.minimumHeight()
@@ -712,6 +740,7 @@ class TimeSeriesPlotWidget(pg.PlotWidget):
                 width=width,
                 height=plot_body_height,
                 dpi=dpi,
+                screen_ref_width=screen_ref_width,
             )
             plot_image = QImage(width, height, QImage.Format.Format_ARGB32)
             plot_image.fill(Qt.GlobalColor.white)
@@ -837,6 +866,7 @@ class SourceTabPlotHost(QWidget):
         time_series_label: str = "",
         for_pdf: bool = False,
         dpi: int = 120,
+        screen_ref_width: float | None = None,
     ) -> QImage:
         plot = self.current_plot()
         if plot is not None:
@@ -847,6 +877,7 @@ class SourceTabPlotHost(QWidget):
                 time_series_label=time_series_label,
                 for_pdf=for_pdf,
                 dpi=dpi,
+                screen_ref_width=screen_ref_width,
             )
         image = QImage(width, height, QImage.Format.Format_ARGB32)
         image.fill(Qt.GlobalColor.white)
@@ -942,6 +973,7 @@ class PlotCanvas(QWidget):
         time_series_label: str = "",
         for_pdf: bool = False,
         dpi: int = 120,
+        screen_ref_width: float | None = None,
     ) -> QImage:
         if self._combined_plot is not None:
             return self._combined_plot.capture_image(
@@ -951,6 +983,7 @@ class PlotCanvas(QWidget):
                 time_series_label=time_series_label,
                 for_pdf=for_pdf,
                 dpi=dpi,
+                screen_ref_width=screen_ref_width,
             )
         if self._source_tabs is not None:
             return self._source_tabs.capture_image(
@@ -960,6 +993,7 @@ class PlotCanvas(QWidget):
                 time_series_label=time_series_label,
                 for_pdf=for_pdf,
                 dpi=dpi,
+                screen_ref_width=screen_ref_width,
             )
         image = QImage(width, height, QImage.Format.Format_ARGB32)
         image.fill(Qt.GlobalColor.white)

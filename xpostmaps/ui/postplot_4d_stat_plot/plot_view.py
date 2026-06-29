@@ -419,6 +419,22 @@ class Postplot4DStatPlotView(QWidget):
         page = self._tab_pages.get(kind)
         return page._canvas if page is not None else None
 
+    def onscreen_plot_width(self) -> float:
+        """Live on-screen plot width of the visible canvas, for PDF marker scaling.
+
+        Only the currently-shown tab's plot is laid out at full size, so this
+        single reference is shared across every exported page (all tabs display
+        at the same width). Returns 0.0 when nothing is laid out yet, in which
+        case the export falls back to DPI-faithful marker sizing.
+        """
+        page = self._tabs.currentWidget()
+        canvas = getattr(page, "_canvas", None)
+        if canvas is None:
+            return 0.0
+        content = canvas.content_widget()
+        target = content if content is not None else canvas
+        return float(target.width())
+
     def available_plot_kinds(self) -> list[PlotKind]:
         kinds: list[PlotKind] = ["crossline", "inline", "radial"]
         if feather_tab_available(
