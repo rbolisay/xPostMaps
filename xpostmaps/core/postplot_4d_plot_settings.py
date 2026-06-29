@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from dataclasses import asdict, replace
+from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 
 from xpostmaps.core.models import LineStyle
@@ -16,6 +16,15 @@ from xpostmaps.core.postplot_4d_plot_data import (
 
 _SETTINGS_PATH = Path(__file__).resolve().parents[2] / "data" / "settings.json"
 _SETTINGS_KEY = "postplot_4d_plot_kinds"
+_VIEW_SETTINGS_KEY = "postplot_4d_plot_view"
+
+
+@dataclass(frozen=True)
+class PlotViewSettings:
+    auto_y: bool = True
+    y_min: float = -10.0
+    y_max: float = 10.0
+    combine_sources: bool = True
 
 DEFAULT_BOUNDARY_ROWS = [
     BoundaryRow(limit_value=6.0, absolute=True),
@@ -208,3 +217,28 @@ def apply_saved_settings_to_kinds(
         )
         for kind in kinds
     }
+
+
+def load_plot_view_settings() -> PlotViewSettings:
+    """Load shared 4D Stat plot view options (Y axis, combine sources)."""
+    root = _read_settings().get(_VIEW_SETTINGS_KEY)
+    if not isinstance(root, dict):
+        return PlotViewSettings()
+    return PlotViewSettings(
+        auto_y=bool(root.get("auto_y", True)),
+        y_min=float(root.get("y_min", -10.0)),
+        y_max=float(root.get("y_max", 10.0)),
+        combine_sources=bool(root.get("combine_sources", True)),
+    )
+
+
+def save_plot_view_settings(settings: PlotViewSettings) -> None:
+    """Persist shared 4D Stat plot view options."""
+    data = _read_settings()
+    data[_VIEW_SETTINGS_KEY] = {
+        "auto_y": settings.auto_y,
+        "y_min": settings.y_min,
+        "y_max": settings.y_max,
+        "combine_sources": settings.combine_sources,
+    }
+    _write_settings(data)

@@ -31,9 +31,12 @@ from xpostmaps.core.postplot_4d_plot_data import (
     primary_sequence_set,
 )
 from xpostmaps.core.postplot_4d_plot_settings import (
+    PlotViewSettings,
+    load_plot_view_settings,
     resolve_boundaries_for_kind,
     resolve_source_styles_for_line,
     save_kind_settings,
+    save_plot_view_settings,
 )
 from xpostmaps.ui.postplot_4d_stat_plot.controls import PlotTabControls, YAxisControls
 from xpostmaps.ui.postplot_4d_stat_plot.plot_widget import PlotCanvas
@@ -243,7 +246,6 @@ class Postplot4DStatPlotView(QWidget):
         root.addWidget(self._title)
 
         self._combine_box = QCheckBox("Combine Sources")
-        self._combine_box.setChecked(True)
         self._combine_box.setStyleSheet("color: #e6edf3;")
         self._combine_box.toggled.connect(self._on_combine_changed)
         root.addWidget(self._combine_box)
@@ -270,9 +272,11 @@ class Postplot4DStatPlotView(QWidget):
         controls_layout.setSpacing(8)
         controls_layout.addWidget(self._controls_stack)
         self._y_axis = YAxisControls(parent=controls_host)
-        self._y_axis.changed.connect(self._refresh_all_tabs)
+        self._y_axis.changed.connect(self._on_y_axis_changed)
         controls_layout.addWidget(self._y_axis)
         root.addWidget(controls_host)
+
+        self._apply_saved_plot_view_settings()
 
     def set_data(
         self,
@@ -458,6 +462,35 @@ class Postplot4DStatPlotView(QWidget):
         self._sync_controls_stack()
         self._refresh_current_tab()
 
+    def _apply_saved_plot_view_settings(self) -> None:
+        saved = load_plot_view_settings()
+        self._y_axis.apply_settings(
+            auto_y=saved.auto_y,
+            y_min=saved.y_min,
+            y_max=saved.y_max,
+        )
+        self._combine_box.blockSignals(True)
+        try:
+            self._combine_box.setChecked(saved.combine_sources)
+        finally:
+            self._combine_box.blockSignals(False)
+
+    def _current_plot_view_settings(self) -> PlotViewSettings:
+        y_min, y_max = self._y_axis.manual_y_range()
+        return PlotViewSettings(
+            auto_y=self._y_axis.auto_y(),
+            y_min=float(y_min),
+            y_max=float(y_max),
+            combine_sources=self._combine_box.isChecked(),
+        )
+
+    def _persist_plot_view_settings(self) -> None:
+        save_plot_view_settings(self._current_plot_view_settings())
+
+    def _on_y_axis_changed(self) -> None:
+        self._persist_plot_view_settings()
+        self._refresh_all_tabs()
+
     def _on_kind_controls_changed(self, kind: PlotKind) -> None:
         controls = self._tab_controls.get(kind)
         if controls is not None:
@@ -469,6 +502,7 @@ class Postplot4DStatPlotView(QWidget):
         self._render_tab(kind)
 
     def _on_combine_changed(self, checked: bool) -> None:
+        self._persist_plot_view_settings()
         for page in self._tab_pages.values():
             page._canvas.set_combine_sources(checked)
         self._refresh_all_tabs()

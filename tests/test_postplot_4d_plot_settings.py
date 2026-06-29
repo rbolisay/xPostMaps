@@ -3,12 +3,15 @@
 from xpostmaps.core.models import LineStyle
 from xpostmaps.core.postplot_4d_plot_data import SourceStyleRow
 from xpostmaps.core.postplot_4d_plot_settings import (
+    PlotViewSettings,
     boundary_row_from_dict,
     boundary_row_to_dict,
+    load_plot_view_settings,
     load_saved_kind_settings,
     resolve_boundaries_for_kind,
     resolve_source_styles_for_line,
     save_kind_settings,
+    save_plot_view_settings,
     source_style_row_from_dict,
     source_style_row_to_dict,
 )
@@ -107,3 +110,37 @@ def test_boundary_row_from_dict_migrates_legacy_abs_boundary() -> None:
     assert row.reference_value == 0.0
     assert row.absolute is True
     assert row.color == "#123456"
+
+
+def test_plot_view_settings_defaults_when_missing(tmp_path, monkeypatch) -> None:
+    settings_path = tmp_path / "settings.json"
+    monkeypatch.setattr(
+        "xpostmaps.core.postplot_4d_plot_settings._SETTINGS_PATH",
+        settings_path,
+    )
+    loaded = load_plot_view_settings()
+    assert loaded.auto_y is True
+    assert loaded.y_min == -10.0
+    assert loaded.y_max == 10.0
+    assert loaded.combine_sources is True
+
+
+def test_save_and_load_plot_view_settings(tmp_path, monkeypatch) -> None:
+    settings_path = tmp_path / "settings.json"
+    monkeypatch.setattr(
+        "xpostmaps.core.postplot_4d_plot_settings._SETTINGS_PATH",
+        settings_path,
+    )
+    save_plot_view_settings(
+        PlotViewSettings(
+            auto_y=False,
+            y_min=-3.5,
+            y_max=7.25,
+            combine_sources=False,
+        )
+    )
+    loaded = load_plot_view_settings()
+    assert loaded.auto_y is False
+    assert loaded.y_min == -3.5
+    assert loaded.y_max == 7.25
+    assert loaded.combine_sources is False

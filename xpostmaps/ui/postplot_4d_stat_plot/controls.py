@@ -702,3 +702,29 @@ class YAxisControls(QWidget):
         if self._auto_box.isChecked():
             return None, None
         return self._min_spin.value(), self._max_spin.value()
+
+    def manual_y_range(self) -> tuple[float, float]:
+        """Last manual Y limits (used when persisting Auto Y axis state)."""
+        return self._min_spin.value(), self._max_spin.value()
+
+    def apply_settings(
+        self,
+        *,
+        auto_y: bool,
+        y_min: float,
+        y_max: float,
+    ) -> None:
+        """Restore persisted Y-axis options without emitting change signals."""
+        self._min_spin.blockSignals(True)
+        self._max_spin.blockSignals(True)
+        self._auto_box.blockSignals(True)
+        try:
+            self._min_spin.setValue(float(y_min))
+            self._max_spin.setValue(float(y_max))
+            self._auto_box.setChecked(bool(auto_y))
+            self._min_spin.setEnabled(not auto_y)
+            self._max_spin.setEnabled(not auto_y)
+        finally:
+            self._min_spin.blockSignals(False)
+            self._max_spin.blockSignals(False)
+            self._auto_box.blockSignals(False)
