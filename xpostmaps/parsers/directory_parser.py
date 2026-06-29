@@ -269,7 +269,6 @@ def parse_navigation_directory(
     navplan_files = resolve_navplan_files(settings)
     total_steps = max(len(main_files) + len(preplot_files) + len(navplan_files), 1)
     step = 0
-    shared_vessel_id = _scan_shared_vessel_id(main_files)
 
     nav_cache: dict[str, tuple[float, int, str]] = dict(
         existing_map_data.nav_file_cache if existing_map_data else {}
@@ -296,6 +295,10 @@ def parse_navigation_directory(
             continue
         files_to_parse.append(path)
 
+    # True when every active nav file matched its cached signature (nothing to
+    # parse), so the previously built sequences/segments are still exact.
+    nav_unchanged = bool(existing_map_data) and not files_to_parse and bool(main_files)
+
     carried_records: list[PositionRecord] = []
     if existing_map_data and unchanged_names:
         carried_records = [
@@ -317,6 +320,9 @@ def parse_navigation_directory(
 
     parsed_results: dict[int, tuple[Path, list[PositionRecord]]] = {}
     if files_to_parse:
+        # The shared vessel id only feeds files we are about to parse; skip the
+        # (network) header read entirely when everything is cached/unchanged.
+        shared_vessel_id = _scan_shared_vessel_id(main_files)
         worker_count = _nav_parse_worker_count(len(files_to_parse), files_to_parse)
         if progress_callback:
             mode = "multi-threaded" if worker_count > 1 else "single-threaded"
@@ -343,27 +349,29 @@ def parse_navigation_directory(
     for index in range(len(files_to_parse)):
         path, records = parsed_results[index]
         all_records.extend(records)
-        for rec in records:
-            all_x.append(rec.x)
-            all_y.append(rec.y)
         nav_cache[nav_file_cache_key(path)] = nav_file_signature(path)
 
-    for rec in carried_records:
-        all_x.append(rec.x)
-        all_y.append(rec.y)
-
     map_data.positions = all_records
-    map_data.sequences = build_display_sequences(all_records)
     map_data.nav_file_cache = nav_cache
 
-    if settings.show_source:
-        src_recs = [r for r in all_records if r.record_type == RecordType.SOURCE]
-        map_data.segments.extend(_records_to_segments(src_recs))
-    if settings.show_vessel:
-        ves_recs = [r for r in all_records if r.record_type == RecordType.VESSEL]
-        map_data.segments.extend(_records_to_segments(ves_recs))
-    if not map_data.segments and all_records:
-        map_data.segments = _records_to_segments(all_records)
+    if nav_unchanged and existing_map_data is not None:
+        # Every nav file matched its cached (mtime, size, version) signature, so
+        # the sequences/segments built last time are still exact. Skip the full
+        # rebuild — build_display_sequences + records_to_segments are O(all
+        # records) and dominate the cost of re-pressing the P111/P190 button on
+        # large surveys where nothing actually changed.
+        map_data.sequences = list(existing_map_data.sequences)
+        map_data.segments = list(existing_map_data.segments)
+    else:
+        map_data.sequences = build_display_sequences(all_records)
+        if settings.show_source:
+            src_recs = [r for r in all_records if r.record_type == RecordType.SOURCE]
+            map_data.segments.extend(_records_to_segments(src_recs))
+        if settings.show_vessel:
+            ves_recs = [r for r in all_records if r.record_type == RecordType.VESSEL]
+            map_data.segments.extend(_records_to_segments(ves_recs))
+        if not map_data.segments and all_records:
+            map_data.segments = _records_to_segments(all_records)
 
     if not main_files:
         if settings.nav_files_explicit:
@@ -386,6 +394,7 @@ def parse_navigation_directory(
     preplot_stats: dict[str, int] = {}
     skipped_preplot = 0
     parsed_preplot = 0
+    preplot_changed = False
     if settings.show_preplots and preplot_files:
         preplot_cache: dict[str, tuple[float, int, str]] = dict(
             existing_map_data.preplot_file_cache if existing_map_data else {}
@@ -436,6 +445,7 @@ def parse_navigation_directory(
         map_data.survey_perimeters = survey_perimeters
         map_data.preplot_file_order = [str(path) for path in preplot_files]
         map_data.preplot_file_cache = preplot_cache
+        preplot_changed = parsed_preplot > 0
         for seg in preplot_segments:
             all_x.extend(seg.xs)
             all_y.extend(seg.ys)
@@ -464,10 +474,12 @@ def parse_navigation_directory(
         map_data.survey_perimeters = []
         map_data.preplot_file_order = []
         map_data.preplot_file_cache = {}
+        preplot_changed = bool(existing_map_data and existing_map_data.preplot_segments)
 
     navplan_stats: dict[str, int] = {}
     skipped_navplan = 0
     parsed_navplan = 0
+    navplan_changed = False
     if settings.show_preplots and navplan_files:
         navplan_cache: dict[str, tuple[float, int, str]] = dict(
             existing_map_data.navplan_file_cache if existing_map_data else {}
@@ -512,6 +524,7 @@ def parse_navigation_directory(
         map_data.navplan_segments = navplan_segments
         map_data.navplan_file_order = [str(path) for path in navplan_files]
         map_data.navplan_file_cache = navplan_cache
+        navplan_changed = parsed_navplan > 0
         for seg in navplan_segments:
             all_x.extend(seg.xs)
             all_y.extend(seg.ys)
@@ -532,17 +545,40 @@ def parse_navigation_directory(
         map_data.navplan_segments = []
         map_data.navplan_file_order = []
         map_data.navplan_file_cache = {}
+        navplan_changed = bool(existing_map_data and existing_map_data.navplan_segments)
 
-    xs_arr = np.array(all_x, dtype=np.float64)
-    ys_arr = np.array(all_y, dtype=np.float64)
-    map_data.bounds = _merge_bounds(SurveyBounds(), xs_arr, ys_arr)
-    map_data.geo_bounds = _compute_geo_bounds(all_records)
-    map_data.postmap_info = _merge_postmap_info(
-        existing_postmap,
-        main_files,
-        preplot_files + navplan_files,
-        settings,
+    full_reuse = (
+        nav_unchanged
+        and existing_map_data is not None
+        and not preplot_changed
+        and not navplan_changed
     )
+    if full_reuse and existing_map_data is not None:
+        # Nothing changed across nav, preplot, and navplan inputs: reuse the
+        # bounds/geo/metadata computed last time instead of re-scanning every
+        # point and re-reading file headers off the (often network) drive.
+        map_data.bounds = existing_map_data.bounds
+        map_data.geo_bounds = existing_map_data.geo_bounds
+        map_data.postmap_info = existing_map_data.postmap_info
+    else:
+        for rec in all_records:
+            all_x.append(rec.x)
+            all_y.append(rec.y)
+        xs_arr = np.array(all_x, dtype=np.float64)
+        ys_arr = np.array(all_y, dtype=np.float64)
+        map_data.bounds = _merge_bounds(SurveyBounds(), xs_arr, ys_arr)
+        if nav_unchanged and existing_map_data is not None:
+            # Nav records are identical; only preplot/navplan changed, so the
+            # geographic bounds (derived only from nav lat/long) are unchanged.
+            map_data.geo_bounds = existing_map_data.geo_bounds
+        else:
+            map_data.geo_bounds = _compute_geo_bounds(all_records)
+        map_data.postmap_info = _merge_postmap_info(
+            existing_postmap,
+            main_files,
+            preplot_files + navplan_files,
+            settings,
+        )
     map_data.stats = {
         "total_records": len(all_records),
         "total_segments": len(map_data.segments),
