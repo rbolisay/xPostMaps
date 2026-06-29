@@ -70,6 +70,32 @@ class Postplot4DMatchRow:
         return bool(self.sequence_id)
 
 
+def sequence_sort_key(row: Postplot4DMatchRow) -> tuple[int | str, ...]:
+    """Stable natural ordering for sequences ('3' < '20'), text fallback."""
+    try:
+        return (int(row.sequence_no), row.sequence_no.upper())
+    except ValueError:
+        return (-1, row.sequence_no.upper())
+
+
+def find_match_by_sequence_no(
+    rows: list[Postplot4DMatchRow],
+    sequence_text: str,
+) -> Postplot4DMatchRow | None:
+    """Find a match by sequence number, tolerant of leading zeros / case."""
+    query = (sequence_text or "").strip()
+    if not query:
+        return None
+    query_upper = query.upper()
+    query_stripped = query.lstrip("0") or "0"
+    for row in rows:
+        if row.sequence_no == query or row.sequence_no.upper() == query_upper:
+            return row
+        if (row.sequence_no.lstrip("0") or "0") == query_stripped:
+            return row
+    return None
+
+
 def _tokens(text: str) -> list[str]:
     cleaned = _KNOWN_EXTENSION_RE.sub(" ", text or "")
     return [token.upper() for token in _TOKEN_RE.findall(cleaned)]

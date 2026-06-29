@@ -42,6 +42,8 @@ from xpostmaps.core.postplot_4d_matching import (
     BaselineKind,
     Postplot4DMatchRow,
     build_postplot_4d_rows,
+    find_match_by_sequence_no,
+    sequence_sort_key,
 )
 from xpostmaps.parsers.metadata_parser import parse_file_metadata
 from xpostmaps.ui.dialog_size_utils import center_widget_on_screen, postplot_4d_dialog_size
@@ -746,6 +748,100 @@ class Postplot4DDialog:
             if host_dialog is not None:
                 host_dialog.setWindowTitle("Postplot 4D")
 
+        def _plottable_matches() -> list[Postplot4DMatchRow]:
+            """Matched rows (current baseline) that have saved 4D Stat data, in
+            sequence order — the set the plot view can cycle through."""
+            active_baseline = state["baseline"]
+            assert active_baseline in ("navplan", "preplot")
+            matched = [row for row in rows_for(active_baseline) if row.has_match]
+            if database is not None and project_name.strip():
+                pname = project_name.strip()
+                matched = [
+                    row
+                    for row in matched
+                    if database.has_postplot_4d_diffs(
+                        pname, row.baseline_kind, row.sequence_id
+                    )
+                ]
+            return sorted(matched, key=sequence_sort_key)
+
+        def _plot_nav_index(
+            navigable: list[Postplot4DMatchRow],
+            match_row: Postplot4DMatchRow,
+        ) -> int:
+            for index, row in enumerate(navigable):
+                if row.sequence_id == match_row.sequence_id:
+                    return index
+            return -1
+
+        def _update_plot_nav_state(match_row: Postplot4DMatchRow) -> None:
+            navigable = _plottable_matches()
+            index = _plot_nav_index(navigable, match_row)
+            plot_view.set_subline_navigation(
+                can_previous=index > 0,
+                can_next=0 <= index < len(navigable) - 1,
+            )
+
+        def render_plot_for_match(match_row: Postplot4DMatchRow) -> bool:
+            """Load a line's diffs and show its plot; updates active_match so the
+            Back button returns to that same line's 4D Stat table."""
+            nonlocal diff_rows
+            try:
+                if database is not None and project_name.strip():
+                    rows = load_saved_diffs(match_row)
+                else:
+                    rows = calculate_and_persist_diffs(match_row)
+            except CrsMismatchError as exc:
+                QMessageBox.warning(
+                    host_dialog or parent,
+                    "4D Stat Plot",
+                    f"Cannot load 4D Stat plot — CRS not verified:\n{exc}",
+                )
+                return False
+            if not rows:
+                QMessageBox.information(
+                    host_dialog or parent,
+                    "Load Subline",
+                    (
+                        f"No saved 4D Stat data for sequence {match_row.sequence_no}. "
+                        "Open it from the table and use Calculate 4D Stat first."
+                    ),
+                )
+                return False
+            state["active_match"] = match_row
+            diff_rows = rows
+            refresh_diff_table()
+            plot_btn.setEnabled(True)
+            show_plot_view()
+            return True
+
+        def load_subline_by_text(sequence_text: str) -> None:
+            navigable = _plottable_matches()
+            match_row = find_match_by_sequence_no(navigable, sequence_text)
+            if match_row is None:
+                QMessageBox.information(
+                    host_dialog or parent,
+                    "Load Subline",
+                    (
+                        f"No 4D Stat plot found for sequence {sequence_text!r}. "
+                        "Enter a sequence that has saved 4D Stat data."
+                    ),
+                )
+                return
+            render_plot_for_match(match_row)
+
+        def step_subline(delta: int) -> None:
+            match_row = state["active_match"]
+            if not isinstance(match_row, Postplot4DMatchRow):
+                return
+            navigable = _plottable_matches()
+            index = _plot_nav_index(navigable, match_row)
+            if index < 0:
+                return
+            target = index + delta
+            if 0 <= target < len(navigable):
+                render_plot_for_match(navigable[target])
+
         def show_plot_view() -> None:
             match_row = state["active_match"]
             if not isinstance(match_row, Postplot4DMatchRow) or not diff_rows:
@@ -755,6 +851,7 @@ class Postplot4DDialog:
                 diff_rows,
                 streamers_detected=_source_has_streamers_for_match(match_row),
             )
+            _update_plot_nav_state(match_row)
             if host_dialog is not None:
                 if match_row.subline:
                     host_dialog.setWindowTitle(
@@ -768,9 +865,13 @@ class Postplot4DDialog:
             QTimer.singleShot(100, plot_view.refresh)
 
         def show_diff_table_view() -> None:
+            # Re-render so Back returns to the table of whichever line the plot
+            # view last showed (it may differ after subline navigation).
             match_row = state["active_match"]
-            if isinstance(match_row, Postplot4DMatchRow) and host_dialog is not None:
-                host_dialog.setWindowTitle(_diff_title(match_row))
+            if isinstance(match_row, Postplot4DMatchRow):
+                refresh_diff_table()
+                if host_dialog is not None:
+                    host_dialog.setWindowTitle(_diff_title(match_row))
             stack.setCurrentIndex(1)
 
         def export_plot_pdf() -> None:
@@ -1379,6 +1480,9 @@ class Postplot4DDialog:
             plot_view = Postplot4DStatPlotView(parent=diff_page)
             plot_view.back_requested.connect(show_diff_table_view)
             plot_view.export_pdf_requested.connect(export_plot_pdf)
+            plot_view.previous_subline_requested.connect(lambda: step_subline(-1))
+            plot_view.next_subline_requested.connect(lambda: step_subline(1))
+            plot_view.load_subline_requested.connect(load_subline_by_text)
             plot_view.setVisible(False)
 
             stack.addWidget(main_page)

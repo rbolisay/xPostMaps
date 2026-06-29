@@ -7,6 +7,7 @@ from PySide6.QtWidgets import (
     QCheckBox,
     QHBoxLayout,
     QLabel,
+    QLineEdit,
     QPushButton,
     QStackedWidget,
     QTabWidget,
@@ -42,6 +43,81 @@ _PLOT_KINDS: tuple[PlotKind, ...] = (
 )
 _OPTIONAL_PLOT_KINDS: tuple[PlotKind, ...] = ("feather", "feather_diff")
 
+_NAV_CAPTION_STYLE = "color: #8b949e; font-size: 10px;"
+
+
+class _SublineNavigator(QWidget):
+    """Compact centre control: prev/next arrows plus a sequence load box."""
+
+    previous_requested = Signal()
+    next_requested = Signal()
+    load_requested = Signal(str)
+
+    def __init__(self, parent=None) -> None:
+        super().__init__(parent)
+
+        self._prev_btn = QPushButton("\u25c0")
+        self._prev_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self._prev_btn.setFixedSize(36, 32)
+        self._prev_btn.setToolTip("Previous Subline")
+        self._prev_btn.clicked.connect(self.previous_requested.emit)
+
+        self._load_btn = QPushButton("Load Subline")
+        self._load_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self._load_btn.setFixedHeight(32)
+        self._load_btn.setMinimumWidth(110)
+        self._load_btn.clicked.connect(self._emit_load)
+
+        self._sequence_edit = QLineEdit()
+        self._sequence_edit.setPlaceholderText("Sequence")
+        self._sequence_edit.setClearButtonEnabled(True)
+        self._sequence_edit.setFixedHeight(32)
+        self._sequence_edit.setFixedWidth(96)
+        self._sequence_edit.returnPressed.connect(self._emit_load)
+
+        self._next_btn = QPushButton("\u25b6")
+        self._next_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self._next_btn.setFixedSize(36, 32)
+        self._next_btn.setToolTip("Next Subline")
+        self._next_btn.clicked.connect(self.next_requested.emit)
+
+        controls_row = QHBoxLayout()
+        controls_row.setContentsMargins(0, 0, 0, 0)
+        controls_row.setSpacing(6)
+        controls_row.addWidget(self._prev_btn)
+        controls_row.addWidget(self._load_btn)
+        controls_row.addWidget(self._sequence_edit)
+        controls_row.addWidget(self._next_btn)
+
+        prev_caption = QLabel("Previous Subline")
+        prev_caption.setStyleSheet(_NAV_CAPTION_STYLE)
+        next_caption = QLabel("Next Subline")
+        next_caption.setStyleSheet(_NAV_CAPTION_STYLE)
+        captions_row = QHBoxLayout()
+        captions_row.setContentsMargins(0, 0, 0, 0)
+        captions_row.setSpacing(6)
+        captions_row.addWidget(prev_caption, alignment=Qt.AlignmentFlag.AlignLeft)
+        captions_row.addStretch()
+        captions_row.addWidget(next_caption, alignment=Qt.AlignmentFlag.AlignRight)
+
+        host = QVBoxLayout(self)
+        host.setContentsMargins(0, 0, 0, 0)
+        host.setSpacing(1)
+        host.addLayout(controls_row)
+        host.addLayout(captions_row)
+
+    def _emit_load(self) -> None:
+        self.load_requested.emit(self._sequence_edit.text().strip())
+
+    def set_sequence(self, sequence_no: str) -> None:
+        self._sequence_edit.blockSignals(True)
+        self._sequence_edit.setText(sequence_no)
+        self._sequence_edit.blockSignals(False)
+
+    def set_navigation_enabled(self, *, can_previous: bool, can_next: bool) -> None:
+        self._prev_btn.setEnabled(can_previous)
+        self._next_btn.setEnabled(can_next)
+
 
 class _PlotTabPage(QWidget):
     def __init__(self, kind: PlotKind, parent=None) -> None:
@@ -58,6 +134,9 @@ class Postplot4DStatPlotView(QWidget):
 
     back_requested = Signal()
     export_pdf_requested = Signal()
+    previous_subline_requested = Signal()
+    next_subline_requested = Signal()
+    load_subline_requested = Signal(str)
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
@@ -81,9 +160,16 @@ class Postplot4DStatPlotView(QWidget):
         back_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         back_btn.setMinimumSize(80, 32)
         back_btn.clicked.connect(self.back_requested.emit)
-        toolbar.addWidget(export_btn)
+        self._subline_nav = _SublineNavigator(parent=self)
+        self._subline_nav.previous_requested.connect(self.previous_subline_requested.emit)
+        self._subline_nav.next_requested.connect(self.next_subline_requested.emit)
+        self._subline_nav.load_requested.connect(self.load_subline_requested.emit)
+        top = Qt.AlignmentFlag.AlignTop
+        toolbar.addWidget(export_btn, alignment=top)
         toolbar.addStretch()
-        toolbar.addWidget(back_btn)
+        toolbar.addWidget(self._subline_nav, alignment=top)
+        toolbar.addStretch()
+        toolbar.addWidget(back_btn, alignment=top)
         root.addLayout(toolbar)
 
         self._title = QLabel("")
@@ -140,6 +226,7 @@ class Postplot4DStatPlotView(QWidget):
             self._title.setText(f"{match_row.line_name}.{match_row.subline} 4D Stat Plot")
         else:
             self._title.setText(f"{match_row.line_name} 4D Stat Plot")
+        self._subline_nav.set_sequence(match_row.sequence_no)
 
         show_feather = feather_tab_available(
             diff_rows,
@@ -162,6 +249,12 @@ class Postplot4DStatPlotView(QWidget):
 
     def match_row(self) -> Postplot4DMatchRow | None:
         return self._match_row
+
+    def set_subline_navigation(self, *, can_previous: bool, can_next: bool) -> None:
+        self._subline_nav.set_navigation_enabled(
+            can_previous=can_previous,
+            can_next=can_next,
+        )
 
     def diff_rows(self) -> list[Postplot4DDiffRow]:
         return list(self._diff_rows)

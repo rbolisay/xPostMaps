@@ -515,3 +515,35 @@ def test_3190_real_preplot_lines_match_header_and_filename_cases() -> None:
         ("1018", "UNNAMED"),
         ("1486", "1486A177"),
     }
+
+
+def test_find_match_by_sequence_no_and_sort_key() -> None:
+    from xpostmaps.core.postplot_4d_matching import (
+        Postplot4DMatchRow,
+        find_match_by_sequence_no,
+        sequence_sort_key,
+    )
+
+    def _row(sequence_no: str) -> Postplot4DMatchRow:
+        return Postplot4DMatchRow(
+            baseline_name="B",
+            baseline_kind="preplot",
+            line_name="L",
+            subline=f"c{sequence_no}",
+            sequence_no=sequence_no,
+            first_sp=1,
+            last_sp=10,
+            line_direction="Up",
+            sequence_id=f"file|{sequence_no}|L",
+        )
+
+    rows = [_row("0020"), _row("0003")]
+
+    assert find_match_by_sequence_no(rows, "3") is rows[1]
+    assert find_match_by_sequence_no(rows, "0020") is rows[0]
+    assert find_match_by_sequence_no(rows, "999") is None
+    assert find_match_by_sequence_no(rows, "") is None
+    assert [r.sequence_no for r in sorted(rows, key=sequence_sort_key)] == [
+        "0003",
+        "0020",
+    ]
