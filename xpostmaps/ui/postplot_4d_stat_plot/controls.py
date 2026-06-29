@@ -47,13 +47,17 @@ class _StyleComboBox(QComboBox):
         return LayerStylesDialog._index_from_style(style)
 
 
-def _make_boundary_abs_spin(value: float) -> QDoubleSpinBox:
-    """Compact ABS boundary input for table cells — no arrows, readable text."""
+def _make_boundary_value_spin(value: float) -> QDoubleSpinBox:
+    """Compact numeric input for boundary limit/reference cells.
+
+    Allows negative values: a limit or reference may sit below zero, and with
+    Absolute off the limit is plotted directly at ``reference + limit``.
+    """
     spin = QDoubleSpinBox()
     spin.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.NoButtons)
-    spin.setRange(0.0, 99999.0)
+    spin.setRange(-99999.0, 99999.0)
     spin.setDecimals(2)
-    spin.setValue(abs(value))
+    spin.setValue(value)
     spin.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
     spin.setFixedHeight(26)
     spin.setStyleSheet(
@@ -67,6 +71,26 @@ def _make_boundary_abs_spin(value: float) -> QDoubleSpinBox:
         "}"
     )
     return spin
+
+
+def _make_absolute_checkbox(checked: bool) -> QWidget:
+    """Centered checkbox cell; the QCheckBox is the container's only child."""
+    container = QWidget()
+    layout = QHBoxLayout(container)
+    layout.setContentsMargins(0, 0, 0, 0)
+    layout.setSpacing(0)
+    box = QCheckBox()
+    box.setChecked(checked)
+    layout.addStretch()
+    layout.addWidget(box)
+    layout.addStretch()
+    return container
+
+
+def _checkbox_in(container: QWidget | None) -> QCheckBox | None:
+    if container is None:
+        return None
+    return container.findChild(QCheckBox)
 
 
 class SourceStyleTable(QWidget):
@@ -243,18 +267,24 @@ class BoundaryTable(QWidget):
         toolbar.addWidget(remove_btn)
         toolbar.addStretch()
         layout.addLayout(toolbar)
-        boundary_title = QLabel("Boundary")
+        boundary_title = QLabel("Boundary Limits")
         boundary_title.setObjectName("statPlotSection")
         layout.addWidget(boundary_title)
-        self._table = QTableWidget(0, 3)
+        self._table = QTableWidget(0, 5)
         _configure_legend_table(self._table)
         self._table.setHorizontalHeaderLabels(
-            ["ABS Boundary Value", "Boundary Style", "Boundary Color"]
+            [
+                "Limit Value",
+                "Reference Value",
+                "Absolute",
+                "Boundary Style",
+                "Boundary Color",
+            ]
         )
         layout.addWidget(self._table)
 
-    def _abs_spin(self, row_idx: int) -> QDoubleSpinBox | None:
-        widget = self._table.cellWidget(row_idx, 0)
+    def _value_spin(self, row_idx: int, column: int) -> QDoubleSpinBox | None:
+        widget = self._table.cellWidget(row_idx, column)
         return widget if isinstance(widget, QDoubleSpinBox) else None
 
     def set_rows(self, rows: list[BoundaryRow]) -> None:
@@ -267,10 +297,14 @@ class BoundaryTable(QWidget):
     def rows(self) -> list[BoundaryRow]:
         result: list[BoundaryRow] = []
         for row_idx in range(self._table.rowCount()):
-            abs_spin = self._abs_spin(row_idx)
-            abs_value = abs_spin.value() if abs_spin is not None else 0.0
-            style_combo = self._table.cellWidget(row_idx, 1)
-            color_btn = self._table.cellWidget(row_idx, 2)
+            limit_spin = self._value_spin(row_idx, 0)
+            reference_spin = self._value_spin(row_idx, 1)
+            abs_box = _checkbox_in(self._table.cellWidget(row_idx, 2))
+            limit_value = limit_spin.value() if limit_spin is not None else 0.0
+            reference_value = reference_spin.value() if reference_spin is not None else 0.0
+            absolute = abs_box.isChecked() if abs_box is not None else False
+            style_combo = self._table.cellWidget(row_idx, 3)
+            color_btn = self._table.cellWidget(row_idx, 4)
             style = LineStyle.DASH
             color = "#3b82f6"
             opacity = 1.0
@@ -290,7 +324,9 @@ class BoundaryTable(QWidget):
                     dash_length = color_btn.secondary_metric_value
             result.append(
                 BoundaryRow(
-                    abs_boundary=abs(abs_value),
+                    limit_value=limit_value,
+                    reference_value=reference_value,
+                    absolute=absolute,
                     line_style=style,
                     color=color,
                     opacity=opacity,
@@ -320,13 +356,23 @@ class BoundaryTable(QWidget):
         self._table.blockSignals(True)
         self._table.setRowCount(len(self._rows))
         for row_idx, row in enumerate(self._rows):
-            abs_spin = _make_boundary_abs_spin(row.abs_boundary)
-            abs_spin.valueChanged.connect(lambda *_: self.changed.emit())
-            self._table.setCellWidget(row_idx, 0, abs_spin)
+            limit_spin = _make_boundary_value_spin(row.limit_value)
+            limit_spin.valueChanged.connect(lambda *_: self.changed.emit())
+            self._table.setCellWidget(row_idx, 0, limit_spin)
+
+            reference_spin = _make_boundary_value_spin(row.reference_value)
+            reference_spin.valueChanged.connect(lambda *_: self.changed.emit())
+            self._table.setCellWidget(row_idx, 1, reference_spin)
+
+            abs_container = _make_absolute_checkbox(row.absolute)
+            abs_box = _checkbox_in(abs_container)
+            if abs_box is not None:
+                abs_box.toggled.connect(lambda *_: self.changed.emit())
+            self._table.setCellWidget(row_idx, 2, abs_container)
 
             style_combo = _StyleComboBox()
             style_combo.setCurrentIndex(_StyleComboBox.index_from_style(row.line_style))
-            self._table.setCellWidget(row_idx, 1, style_combo)
+            self._table.setCellWidget(row_idx, 3, style_combo)
 
             def metric_provider(style_combo=style_combo):
                 style = _StyleComboBox.style_from_index(style_combo.currentIndex())
@@ -378,7 +424,7 @@ class BoundaryTable(QWidget):
                 )
 
             bind_style()
-            self._table.setCellWidget(row_idx, 2, color_btn)
+            self._table.setCellWidget(row_idx, 4, color_btn)
             self._table.setRowHeight(row_idx, 34)
         self._table.blockSignals(False)
         _fit_table_columns(self._table)
@@ -390,7 +436,7 @@ class BoundaryTable(QWidget):
             self._widths.append(0.35)
         while len(self._dots) <= row_idx:
             self._dots.append(0.8)
-        style_combo = self._table.cellWidget(row_idx, 1)
+        style_combo = self._table.cellWidget(row_idx, 3)
         if isinstance(style_combo, _StyleComboBox):
             style = _StyleComboBox.style_from_index(style_combo.currentIndex())
             if style == LineStyle.DOTTED:

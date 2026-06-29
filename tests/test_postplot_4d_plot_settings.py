@@ -63,8 +63,10 @@ def test_resolve_boundaries_falls_back_to_defaults(
     )
     boundaries = resolve_boundaries_for_kind("inline")
     assert len(boundaries) == 2
-    assert boundaries[0].abs_boundary == 6.0
-    assert boundaries[1].abs_boundary == 9.0
+    assert boundaries[0].limit_value == 6.0
+    assert boundaries[0].absolute is True
+    assert boundaries[1].limit_value == 9.0
+    assert boundaries[1].absolute is True
 
 
 def test_save_and_load_kind_settings(tmp_path, monkeypatch) -> None:
@@ -76,7 +78,16 @@ def test_save_and_load_kind_settings(tmp_path, monkeypatch) -> None:
     save_kind_settings(
         "radial",
         [SourceStyleRow(source_no="G01", color="#abcdef")],
-        [boundary_row_from_dict({"abs_boundary": 12.0, "color": "#00ff00"})],
+        [
+            boundary_row_from_dict(
+                {
+                    "limit_value": 12.0,
+                    "reference_value": 2.0,
+                    "absolute": True,
+                    "color": "#00ff00",
+                }
+            )
+        ],
     )
     loaded = load_saved_kind_settings("radial")
     assert loaded is not None
@@ -84,5 +95,15 @@ def test_save_and_load_kind_settings(tmp_path, monkeypatch) -> None:
     assert len(sources) == 1
     assert sources[0].color == "#abcdef"
     assert len(boundaries) == 1
-    assert boundaries[0].abs_boundary == 12.0
+    assert boundaries[0].limit_value == 12.0
+    assert boundaries[0].reference_value == 2.0
+    assert boundaries[0].absolute is True
     assert boundary_row_to_dict(boundaries[0])["color"] == "#00ff00"
+
+
+def test_boundary_row_from_dict_migrates_legacy_abs_boundary() -> None:
+    row = boundary_row_from_dict({"abs_boundary": 7.0, "color": "#123456"})
+    assert row.limit_value == 7.0
+    assert row.reference_value == 0.0
+    assert row.absolute is True
+    assert row.color == "#123456"

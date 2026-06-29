@@ -66,13 +66,43 @@ class SourceStyleRow:
 
 @dataclass
 class BoundaryRow:
-    abs_boundary: float = 3.0
+    """A pass/fail boundary limit drawn on the plot.
+
+    ``limit_value`` is measured relative to ``reference_value`` (the baseline,
+    default 0). With ``absolute`` off the limit draws a single line at
+    ``reference + limit``. With ``absolute`` on the limit is mirrored on either
+    side of the reference, drawing two lines at ``reference ± |limit|``.
+    """
+
+    limit_value: float = 3.0
+    reference_value: float = 0.0
+    absolute: bool = False
     line_style: LineStyle = LineStyle.DASH
     color: str = DEFAULT_BOUNDARY_COLOR
     opacity: float = 1.0
     line_width_mm: float = 0.35
     dot_radius_mm: float = 0.8
     dash_length_mm: float = 3.0
+
+
+def boundary_line_values(row: BoundaryRow) -> list[float]:
+    """Return the Y position(s) at which a boundary limit is drawn.
+
+    - Absolute off: one line at ``reference + limit``.
+    - Absolute on: two lines at ``reference ± |limit|`` (one each side).
+    """
+    reference = float(row.reference_value)
+    limit = float(row.limit_value)
+    if row.absolute:
+        magnitude = abs(limit)
+        candidates = [reference + magnitude, reference - magnitude]
+    else:
+        candidates = [reference + limit]
+    values: list[float] = []
+    for value in candidates:
+        if value not in values:
+            values.append(value)
+    return values
 
 
 @dataclass

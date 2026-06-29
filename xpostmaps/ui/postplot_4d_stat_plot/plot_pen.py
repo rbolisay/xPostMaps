@@ -9,12 +9,24 @@ import pyqtgraph as pg
 
 from xpostmaps.core.models import LineStyle
 from xpostmaps.core.postplot_4d_plot_data import BoundaryRow, SourceStyleRow
-from xpostmaps.utils.symbology_units import DEFAULT_SCREEN_DPI, mm_to_pixels, scatter_size_px
+from xpostmaps.utils.symbology_units import (
+    DEFAULT_SCREEN_DPI,
+    MIN_LINE_PX,
+    mm_to_pixels,
+    scatter_size_px,
+)
 
 
-def _width_px(line_width_mm: float) -> int:
-    """Cosmetic line width in whole device pixels (consistent across all stat lines)."""
-    return max(1, int(round(mm_to_pixels(DEFAULT_SCREEN_DPI, line_width_mm))))
+def _width_px(line_width_mm: float) -> float:
+    """Cosmetic line width in device pixels.
+
+    Kept as a float (not rounded to whole pixels). Rounding 0.4 mm to an integer
+    2 px made two equally-configured lines render with visibly different stroke
+    weight once antialiasing distributed the 2 px stroke across pixel rows; the
+    precise sub-pixel width antialiases identically for every line, so equal mm
+    settings now produce identical thickness on screen and in the PDF.
+    """
+    return max(MIN_LINE_PX, mm_to_pixels(DEFAULT_SCREEN_DPI, line_width_mm))
 
 
 def pen_from_style(

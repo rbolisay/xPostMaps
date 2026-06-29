@@ -141,7 +141,10 @@ def main() -> int:
     view.resize(1200, 900)
     view.set_data(match, diff_rows, streamers_detected=False)
     view._tab_controls["crossline"].set_boundaries(
-        [BoundaryRow(abs_boundary=5.0), BoundaryRow(abs_boundary=9.0)]
+        [
+            BoundaryRow(limit_value=5.0, absolute=True),
+            BoundaryRow(limit_value=9.0, absolute=True),
+        ]
     )
     view.show()
 

@@ -6,8 +6,8 @@ from xpostmaps.ui.postplot_4d_stat_plot.plot_pen import boundary_pen, pen_from_s
 
 
 def test_boundary_pens_with_same_width_use_equal_pixel_width() -> None:
-    row_a = BoundaryRow(abs_boundary=6.0, line_width_mm=0.35)
-    row_b = BoundaryRow(abs_boundary=9.0, line_width_mm=0.35)
+    row_a = BoundaryRow(limit_value=6.0, line_width_mm=0.35)
+    row_b = BoundaryRow(limit_value=9.0, line_width_mm=0.35)
     assert boundary_pen(row_a).widthF() == boundary_pen(row_b).widthF()
 
 

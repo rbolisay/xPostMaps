@@ -129,7 +129,7 @@ def test_capture_image_for_pdf_draws_bottom_legend(qapp) -> None:
     plot.render(
         [series_g01, series_g02],
         styles,
-        [BoundaryRow(abs_boundary=6.0)],
+        [BoundaryRow(limit_value=6.0, absolute=True)],
         y_min=None,
         y_max=None,
         auto_y=True,
@@ -152,7 +152,7 @@ def test_capture_image_for_pdf_includes_boundary_lines(qapp) -> None:
     plot.render(
         [series],
         styles,
-        [BoundaryRow(abs_boundary=6.0)],
+        [BoundaryRow(limit_value=6.0, absolute=True)],
         y_min=None,
         y_max=None,
         auto_y=True,
@@ -176,7 +176,7 @@ def test_capture_image_for_pdf_draws_black_border(qapp) -> None:
     plot.render(
         [series],
         styles,
-        [BoundaryRow(abs_boundary=6.0)],
+        [BoundaryRow(limit_value=6.0, absolute=True)],
         y_min=None,
         y_max=None,
         auto_y=True,
@@ -195,7 +195,10 @@ def test_plot_canvas_renders_crossline_with_boundaries(qapp) -> None:
     canvas.render(
         [series],
         styles,
-        [BoundaryRow(abs_boundary=5.0), BoundaryRow(abs_boundary=9.0)],
+        [
+            BoundaryRow(limit_value=5.0, absolute=True),
+            BoundaryRow(limit_value=9.0, absolute=True),
+        ],
         y_min=None,
         y_max=None,
         auto_y=True,
@@ -237,7 +240,7 @@ def test_plot_canvas_source_tabs_when_uncombined(qapp) -> None:
     canvas.render(
         [series_g01, series_g02],
         styles,
-        [BoundaryRow(abs_boundary=5.0)],
+        [BoundaryRow(limit_value=5.0, absolute=True)],
         y_min=None,
         y_max=None,
         auto_y=True,

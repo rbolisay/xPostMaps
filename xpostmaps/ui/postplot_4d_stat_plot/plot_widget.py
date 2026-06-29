@@ -23,6 +23,7 @@ from xpostmaps.core.postplot_4d_plot_data import (
     PlotKind,
     PlotSeries,
     SourceStyleRow,
+    boundary_line_values,
 )
 from xpostmaps.ui.postplot_4d_stat_plot.plot_pen import boundary_pen, clone_pen, source_pen
 from xpostmaps.ui.postplot_4d_stat_plot.stat_plot_view_box import StatPlotViewBox
@@ -33,6 +34,8 @@ _PLOT_BG = "#ffffff"
 _PLOT_FG = "#111827"
 _MIN_PLOT_HEIGHT = 420
 _PICK_RADIUS_PX = 12
+# Single data-point marker size for every source, independent of line style.
+_SOURCE_SYMBOL_SIZE_PX = 5
 _OVERLAY_STYLE = (
     "background: rgba(255, 255, 255, 0.88);"
     "color: #111827;"
@@ -68,15 +71,13 @@ def _scale_pen(pen: QPen, factor: float) -> QPen:
 
 
 def _boundary_y_extents(boundaries: list[BoundaryRow]) -> tuple[float | None, float | None]:
-    """Return min/max Y for configured boundary lines (±abs_boundary)."""
-    limits: list[float] = []
+    """Return min/max Y across every configured boundary limit line."""
+    values: list[float] = []
     for boundary in boundaries:
-        limit = abs(float(boundary.abs_boundary))
-        if limit > 0:
-            limits.extend((limit, -limit))
-    if not limits:
+        values.extend(boundary_line_values(boundary))
+    if not values:
         return None, None
-    return min(limits), max(limits)
+    return min(values), max(values)
 
 
 def _configure_plot(plot: pg.PlotWidget, *, y_label: str) -> None:
@@ -329,7 +330,11 @@ class TimeSeriesPlotWidget(pg.PlotWidget):
             x_data = np.asarray(series.shotpoints, dtype=np.float64)
             y_data = np.asarray(series.values, dtype=np.float64)
             show_symbols = True
-            symbol_size = 5 if style.line_style == LineStyle.SOLID else 6
+            # Marker size must not depend on line style: previously solid used 5px
+            # and dashed/dotted used 6px, so two sources with the same width but
+            # different styles looked like different thicknesses (also scaled up
+            # in the PDF). Keep one consistent size for every source.
+            symbol_size = _SOURCE_SYMBOL_SIZE_PX
             curve = self.plot(
                 x_data,
                 y_data,
@@ -349,11 +354,8 @@ class TimeSeriesPlotWidget(pg.PlotWidget):
                 self._pick_points.append((shotpoint, value, series.source_no))
 
         for boundary in boundaries:
-            limit = abs(float(boundary.abs_boundary))
-            if limit <= 0:
-                continue
             base_pen = boundary_pen(boundary)
-            for y_value in (limit, -limit):
+            for y_value in boundary_line_values(boundary):
                 pen = clone_pen(base_pen)
                 line = pg.InfiniteLine(
                     pos=y_value,

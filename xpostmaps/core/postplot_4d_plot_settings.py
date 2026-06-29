@@ -18,8 +18,8 @@ _SETTINGS_PATH = Path(__file__).resolve().parents[2] / "data" / "settings.json"
 _SETTINGS_KEY = "postplot_4d_plot_kinds"
 
 DEFAULT_BOUNDARY_ROWS = [
-    BoundaryRow(abs_boundary=6.0),
-    BoundaryRow(abs_boundary=9.0),
+    BoundaryRow(limit_value=6.0, absolute=True),
+    BoundaryRow(limit_value=9.0, absolute=True),
 ]
 
 _ALL_KINDS: tuple[PlotKind, ...] = (
@@ -83,7 +83,9 @@ def source_style_row_from_dict(data: dict) -> SourceStyleRow:
 
 def boundary_row_to_dict(row: BoundaryRow) -> dict:
     return {
-        "abs_boundary": row.abs_boundary,
+        "limit_value": row.limit_value,
+        "reference_value": row.reference_value,
+        "absolute": row.absolute,
         "line_style": _line_style_to_str(row.line_style),
         "color": row.color,
         "opacity": row.opacity,
@@ -94,8 +96,20 @@ def boundary_row_to_dict(row: BoundaryRow) -> dict:
 
 
 def boundary_row_from_dict(data: dict) -> BoundaryRow:
+    if "limit_value" in data or "reference_value" in data or "absolute" in data:
+        limit_value = float(data.get("limit_value", 0.0))
+        reference_value = float(data.get("reference_value", 0.0))
+        absolute = bool(data.get("absolute", False))
+    else:
+        # Legacy projects stored a single ``abs_boundary`` that always drew a
+        # symmetric pair around zero — preserve that as an absolute limit.
+        limit_value = float(data.get("abs_boundary", 0.0))
+        reference_value = 0.0
+        absolute = True
     return BoundaryRow(
-        abs_boundary=float(data.get("abs_boundary", 0.0)),
+        limit_value=limit_value,
+        reference_value=reference_value,
+        absolute=absolute,
         line_style=_line_style_from_str(str(data.get("line_style", "dash"))),
         color=str(data.get("color", "#3b82f6")),
         opacity=float(data.get("opacity", 1.0)),
