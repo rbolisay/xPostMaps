@@ -245,13 +245,19 @@ class RightPane(PrintPanel):
         return self._harm_interval_m
 
     def apply_export_scale_bar(self) -> None:
-        """Keep live km labels; widen bar for the export pane at true map scale."""
+        """Draw the export bar at the live true-scale width.
+
+        The pane is widened by ``_EXPORT_WIDTH_SCALE`` only to give the minimap and
+        legend more horizontal room, but the map and pane are scaled to the same
+        height in the PDF layout (``PANE_PDF_SCALE == 1`` and the pane height is set
+        equal to the map height). The bar must therefore keep the live
+        ``bar_width_px``: scaling it by the pane-width factor would make a length on
+        the bar represent ``_EXPORT_WIDTH_SCALE`` × the ground distance it does on
+        the map, so a "40 km" bar would span ~54 km of map.
+        """
         if self._harm_bar_width_px <= 0:
             return
-        self._card.set_map_scale_bar(
-            self._harm_total_km,
-            self._harm_bar_width_px * self._EXPORT_WIDTH_SCALE,
-        )
+        self._card.set_map_scale_bar(self._harm_total_km, self._harm_bar_width_px)
 
     def restore_live_scale_bar(self) -> None:
         if self._harm_bar_width_px <= 0:
