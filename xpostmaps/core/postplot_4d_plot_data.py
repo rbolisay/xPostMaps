@@ -11,7 +11,7 @@ import numpy as np
 
 from xpostmaps.core.models import LineStyle
 from xpostmaps.core.postplot_4d_diff import Postplot4DDiffRow, feather_diff_deg
-from xpostmaps.core.postplot_4d_matching import Postplot4DMatchRow
+from xpostmaps.core.postplot_4d_matching import Postplot4DMatchRow, sequence_sort_key
 
 PlotKind = Literal["crossline", "inline", "radial", "feather", "feather_diff"]
 
@@ -122,6 +122,39 @@ class PlotSeries:
     values: list[float] = field(default_factory=list)
 
 
+@dataclass
+class SequenceDiffSet:
+    """One acquired sequence plus its computed 4D Stat diff rows.
+
+    Combined plots overlay several of these on a single set of axes so that a
+    preplot line split across multiple sequences can be evaluated as a whole.
+    """
+
+    match_row: Postplot4DMatchRow
+    diff_rows: list[Postplot4DDiffRow] = field(default_factory=list)
+
+
+def primary_sequence_set(sets: list[SequenceDiffSet]) -> SequenceDiffSet:
+    """Return the set whose sequence number is lowest.
+
+    The lowest sequence is the reference for x-axis direction (FSP -> LSP),
+    titles and navigation when several sequences are combined.
+    """
+    return min(sets, key=lambda item: sequence_sort_key(item.match_row))
+
+
+def combined_source_key(source_no: str, sequence_no: str) -> str:
+    """Composite legend/style key identifying a source within a sequence.
+
+    Used only when more than one sequence is plotted so each sequence's source
+    can carry its own colour ("Source Color - <Sequence number>").
+    """
+    seq = (sequence_no or "").strip()
+    if not seq:
+        return source_no
+    return f"{source_no} \u00b7 Seq {seq}"
+
+
 def normalize_source_label(firing_source_id: str, *, fallback_index: int = 0) -> str:
     """Return G-prefixed source label (G01, G02, …) for table and legend."""
     text = (firing_source_id or "").strip()
@@ -223,6 +256,68 @@ def build_plot_series(
             shotpoints.append(shotpoint)
             values.append(by_shot[shotpoint])
     return PlotSeries(source_no=source_no, shotpoints=shotpoints, values=values)
+
+
+def ordered_sequence_sets(sets: list[SequenceDiffSet]) -> list[SequenceDiffSet]:
+    """Sequences in ascending sequence-number order (lowest first)."""
+    return sorted(sets, key=lambda item: sequence_sort_key(item.match_row))
+
+
+def combined_sequence_numbers(sets: list[SequenceDiffSet]) -> list[str]:
+    """Sequence numbers, lowest first, for the combined view."""
+    return [item.match_row.sequence_no for item in ordered_sequence_sets(sets)]
+
+
+def combined_source_numbers(sets: list[SequenceDiffSet]) -> list[str]:
+    """Union of source labels (G01, G02, …) across all sequences, in order."""
+    seen: dict[str, None] = {}
+    for item in ordered_sequence_sets(sets):
+        for source_no in unique_sources_from_diff_rows(item.diff_rows):
+            if source_no not in seen:
+                seen[source_no] = None
+    return list(seen.keys())
+
+
+def build_combined_plot_series(
+    sets: list[SequenceDiffSet],
+    kind: PlotKind,
+) -> list[PlotSeries]:
+    """Build one series per (sequence, source).
+
+    Every series is ordered FSP -> LSP using the *lowest* sequence as the
+    direction reference, so combined sequences read left-to-right consistently
+    even when individual sequences were acquired in opposite directions. When
+    only one sequence is supplied the series keep their plain source labels so
+    saved single-line styles continue to apply.
+    """
+    if not sets:
+        return []
+    multi = len(sets) > 1
+    primary = primary_sequence_set(sets)
+    series_list: list[PlotSeries] = []
+    for item in ordered_sequence_sets(sets):
+        for source_no in unique_sources_from_diff_rows(item.diff_rows):
+            base = build_plot_series(
+                item.diff_rows,
+                primary.match_row,
+                kind,
+                source_no,
+            )
+            if not base.shotpoints:
+                continue
+            key = (
+                combined_source_key(source_no, item.match_row.sequence_no)
+                if multi
+                else source_no
+            )
+            series_list.append(
+                PlotSeries(
+                    source_no=key,
+                    shotpoints=base.shotpoints,
+                    values=base.values,
+                )
+            )
+    return series_list
 
 
 def compute_series_stats(source_no: str, values: list[float]) -> SeriesStats | None:

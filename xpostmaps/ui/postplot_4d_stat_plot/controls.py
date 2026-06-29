@@ -19,7 +19,11 @@ from PySide6.QtWidgets import (
 )
 
 from xpostmaps.core.models import LineStyle
-from xpostmaps.core.postplot_4d_plot_data import BoundaryRow, SourceStyleRow
+from xpostmaps.core.postplot_4d_plot_data import (
+    BoundaryRow,
+    SourceStyleRow,
+    combined_source_key,
+)
 from xpostmaps.ui.dialogs.legend_dialog import (
     LayerStylesDialog,
     _configure_legend_table,
@@ -102,6 +106,11 @@ class SourceStyleTable(QWidget):
         self._widths: list[float] = []
         self._dots: list[float] = []
         self._dashes: list[float] = []
+        # Multi-sequence (combined) state: one column of colours per sequence.
+        self._multi = False
+        self._source_nos: list[str] = []
+        self._sequence_nos: list[str] = []
+        self._style_by_key: dict[str, SourceStyleRow] = {}
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(4)
@@ -115,13 +124,34 @@ class SourceStyleTable(QWidget):
         layout.addWidget(self._table)
 
     def set_sources(self, rows: list[SourceStyleRow]) -> None:
+        """Single-sequence layout: one row per source, one Source Color column."""
+        self._multi = False
         self._rows = list(rows)
         self._widths = [row.line_width_mm for row in rows]
         self._dots = [row.dot_radius_mm for row in rows]
         self._dashes = [row.dash_length_mm for row in rows]
-        self._rebuild()
+        self._rebuild_single()
+
+    def set_source_matrix(
+        self,
+        source_nos: list[str],
+        sequence_nos: list[str],
+        style_by_key: dict[str, SourceStyleRow],
+    ) -> None:
+        """Combined layout: one row per source, one Source Color column per sequence."""
+        self._multi = True
+        self._source_nos = list(source_nos)
+        self._sequence_nos = list(sequence_nos)
+        self._style_by_key = dict(style_by_key)
+        self._rebuild_multi()
 
     def rows(self) -> list[SourceStyleRow]:
+        if self._multi:
+            return self._rows_multi()
+        return self._rows_single()
+
+    # ----- single-sequence mode -------------------------------------------
+    def _rows_single(self) -> list[SourceStyleRow]:
         result: list[SourceStyleRow] = []
         for row_idx in range(self._table.rowCount()):
             source_item = self._table.item(row_idx, 0)
@@ -129,68 +159,23 @@ class SourceStyleTable(QWidget):
             style_combo = self._table.cellWidget(row_idx, 1)
             color_btn = self._table.cellWidget(row_idx, 2)
             style = LineStyle.SOLID
-            color = "#22c55e"
-            opacity = 1.0
-            line_width = 0.35
-            dot_radius = 0.8
-            dash_length = 3.0
             if isinstance(style_combo, _StyleComboBox):
                 style = _StyleComboBox.style_from_index(style_combo.currentIndex())
-            if isinstance(color_btn, ColorButton):
-                color = color_btn.color
-                opacity = color_btn.opacity
-                if style == LineStyle.DOTTED:
-                    dot_radius = color_btn.metric_value
-                else:
-                    line_width = color_btn.metric_value
-                if style == LineStyle.DASH:
-                    dash_length = color_btn.secondary_metric_value
-            result.append(
-                SourceStyleRow(
-                    source_no=source_no,
-                    line_style=style,
-                    color=color,
-                    opacity=opacity,
-                    line_width_mm=line_width,
-                    dot_radius_mm=dot_radius,
-                    dash_length_mm=dash_length,
-                )
-            )
+            result.append(self._row_from_widgets(source_no, style, color_btn))
         return result
 
-    def _rebuild(self) -> None:
+    def _rebuild_single(self) -> None:
         self._table.blockSignals(True)
+        self._table.setColumnCount(3)
+        self._table.setHorizontalHeaderLabels(["Source No.", "Line Style", "Source Color"])
         self._table.setRowCount(len(self._rows))
         for row_idx, row in enumerate(self._rows):
-            item = QTableWidgetItem(row.source_no)
-            item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsEditable)
-            self._table.setItem(row_idx, 0, item)
-            style_combo = _StyleComboBox()
-            style_combo.setCurrentIndex(_StyleComboBox.index_from_style(row.line_style))
+            self._set_source_item(row_idx, row.source_no)
+            style_combo = self._make_style_combo(row.line_style)
             self._table.setCellWidget(row_idx, 1, style_combo)
+            color_btn = self._make_color_button(style_combo, row)
 
-            def metric_provider(style_combo=style_combo):
-                style = _StyleComboBox.style_from_index(style_combo.currentIndex())
-                return LayerStylesDialog._metric_config_for_style(style)
-
-            def secondary_provider(style_combo=style_combo):
-                style = _StyleComboBox.style_from_index(style_combo.currentIndex())
-                return LayerStylesDialog._secondary_metric_config_for_style(style)
-
-            color_btn = ColorButton(
-                row.color,
-                row.opacity,
-                metric_value=(
-                    row.dot_radius_mm
-                    if row.line_style == LineStyle.DOTTED
-                    else row.line_width_mm
-                ),
-                metric_provider=metric_provider,
-                secondary_metric_value=row.dash_length_mm,
-                secondary_metric_provider=secondary_provider,
-            )
-
-            def bind_style(row_idx=row_idx, style_combo=style_combo, color_btn=color_btn) -> None:
+            def bind(row_idx=row_idx, style_combo=style_combo, color_btn=color_btn) -> None:
                 def on_style_changed() -> None:
                     style = _StyleComboBox.style_from_index(style_combo.currentIndex())
                     metric = (
@@ -198,9 +183,7 @@ class SourceStyleTable(QWidget):
                         if style == LineStyle.DOTTED
                         else self._widths[row_idx]
                     )
-                    secondary = (
-                        self._dashes[row_idx] if style == LineStyle.DASH else 3.0
-                    )
+                    secondary = self._dashes[row_idx] if style == LineStyle.DASH else 3.0
                     color_btn.set_color(
                         color_btn.color,
                         color_btn.opacity,
@@ -216,13 +199,142 @@ class SourceStyleTable(QWidget):
                     lambda value: self._on_dash(row_idx, value)
                 )
 
-            bind_style()
+            bind()
             self._table.setCellWidget(row_idx, 2, color_btn)
             self._table.setRowHeight(row_idx, 34)
         self._table.blockSignals(False)
         _fit_table_columns(self._table)
         _fit_table_height(self._table)
         self.adjustSize()
+
+    # ----- combined (multi-sequence) mode ---------------------------------
+    def _rows_multi(self) -> list[SourceStyleRow]:
+        result: list[SourceStyleRow] = []
+        for row_idx, source_no in enumerate(self._source_nos):
+            style_combo = self._table.cellWidget(row_idx, 1)
+            style = LineStyle.SOLID
+            if isinstance(style_combo, _StyleComboBox):
+                style = _StyleComboBox.style_from_index(style_combo.currentIndex())
+            for col_offset, sequence_no in enumerate(self._sequence_nos):
+                color_btn = self._table.cellWidget(row_idx, 2 + col_offset)
+                key = combined_source_key(source_no, sequence_no)
+                result.append(self._row_from_widgets(key, style, color_btn))
+        return result
+
+    def _rebuild_multi(self) -> None:
+        self._table.blockSignals(True)
+        headers = ["Source No.", "Line Style"] + [
+            f"Source Color - {seq}" for seq in self._sequence_nos
+        ]
+        self._table.setColumnCount(len(headers))
+        self._table.setHorizontalHeaderLabels(headers)
+        self._table.setRowCount(len(self._source_nos))
+        for row_idx, source_no in enumerate(self._source_nos):
+            self._set_source_item(row_idx, source_no)
+            first_key = combined_source_key(source_no, self._sequence_nos[0])
+            base_style = self._style_by_key.get(
+                first_key, SourceStyleRow(source_no=source_no)
+            )
+            style_combo = self._make_style_combo(base_style.line_style)
+            self._table.setCellWidget(row_idx, 1, style_combo)
+
+            color_buttons: list[ColorButton] = []
+            for col_offset, sequence_no in enumerate(self._sequence_nos):
+                key = combined_source_key(source_no, sequence_no)
+                style_row = self._style_by_key.get(key, SourceStyleRow(source_no=key))
+                color_btn = self._make_color_button(style_combo, style_row)
+                color_btn.color_changed.connect(lambda *_: self.changed.emit())
+                color_btn.metric_changed.connect(lambda *_: self.changed.emit())
+                color_btn.secondary_metric_changed.connect(lambda *_: self.changed.emit())
+                self._table.setCellWidget(row_idx, 2 + col_offset, color_btn)
+                color_buttons.append(color_btn)
+
+            def bind(style_combo=style_combo, color_buttons=color_buttons) -> None:
+                def on_style_changed() -> None:
+                    for btn in color_buttons:
+                        btn.set_color(
+                            btn.color,
+                            btn.opacity,
+                            metric_value=btn.metric_value,
+                            secondary_metric_value=btn.secondary_metric_value,
+                        )
+                    self.changed.emit()
+
+                style_combo.currentIndexChanged.connect(on_style_changed)
+
+            bind()
+            self._table.setRowHeight(row_idx, 34)
+        self._table.blockSignals(False)
+        _fit_table_columns(self._table)
+        _fit_table_height(self._table)
+        self.adjustSize()
+
+    # ----- shared widget builders -----------------------------------------
+    def _set_source_item(self, row_idx: int, text: str) -> None:
+        item = QTableWidgetItem(text)
+        item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsEditable)
+        self._table.setItem(row_idx, 0, item)
+
+    def _make_style_combo(self, style: LineStyle) -> _StyleComboBox:
+        combo = _StyleComboBox()
+        combo.setCurrentIndex(_StyleComboBox.index_from_style(style))
+        return combo
+
+    def _make_color_button(
+        self,
+        style_combo: _StyleComboBox,
+        style_row: SourceStyleRow,
+    ) -> ColorButton:
+        def metric_provider(style_combo=style_combo):
+            style = _StyleComboBox.style_from_index(style_combo.currentIndex())
+            return LayerStylesDialog._metric_config_for_style(style)
+
+        def secondary_provider(style_combo=style_combo):
+            style = _StyleComboBox.style_from_index(style_combo.currentIndex())
+            return LayerStylesDialog._secondary_metric_config_for_style(style)
+
+        return ColorButton(
+            style_row.color,
+            style_row.opacity,
+            metric_value=(
+                style_row.dot_radius_mm
+                if style_row.line_style == LineStyle.DOTTED
+                else style_row.line_width_mm
+            ),
+            metric_provider=metric_provider,
+            secondary_metric_value=style_row.dash_length_mm,
+            secondary_metric_provider=secondary_provider,
+        )
+
+    def _row_from_widgets(
+        self,
+        source_no: str,
+        style: LineStyle,
+        color_btn: QWidget | None,
+    ) -> SourceStyleRow:
+        color = "#22c55e"
+        opacity = 1.0
+        line_width = 0.35
+        dot_radius = 0.8
+        dash_length = 3.0
+        if isinstance(color_btn, ColorButton):
+            color = color_btn.color
+            opacity = color_btn.opacity
+            if style == LineStyle.DOTTED:
+                dot_radius = color_btn.metric_value
+            else:
+                line_width = color_btn.metric_value
+            if style == LineStyle.DASH:
+                dash_length = color_btn.secondary_metric_value
+        return SourceStyleRow(
+            source_no=source_no,
+            line_style=style,
+            color=color,
+            opacity=opacity,
+            line_width_mm=line_width,
+            dot_radius_mm=dot_radius,
+            dash_length_mm=dash_length,
+        )
 
     def _on_metric(self, row_idx: int, value: float) -> None:
         while len(self._widths) <= row_idx:
@@ -474,6 +586,14 @@ class PlotTabControls(QWidget):
 
     def set_sources(self, rows: list[SourceStyleRow]) -> None:
         self._source_table.set_sources(rows)
+
+    def set_source_matrix(
+        self,
+        source_nos: list[str],
+        sequence_nos: list[str],
+        style_by_key: dict[str, SourceStyleRow],
+    ) -> None:
+        self._source_table.set_source_matrix(source_nos, sequence_nos, style_by_key)
 
     def set_boundaries(self, rows: list[BoundaryRow]) -> None:
         self._boundary_table.set_rows(rows)

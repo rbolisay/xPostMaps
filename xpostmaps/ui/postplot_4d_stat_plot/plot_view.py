@@ -21,10 +21,14 @@ from xpostmaps.core.postplot_4d_matching import Postplot4DMatchRow
 from xpostmaps.core.postplot_4d_plot_data import (
     PlotKind,
     PLOT_KIND_LABELS,
-    build_plot_series,
+    SequenceDiffSet,
+    build_combined_plot_series,
+    combined_sequence_numbers,
+    combined_source_key,
+    combined_source_numbers,
     feather_diff_tab_available,
     feather_tab_available,
-    unique_sources_from_diff_rows,
+    primary_sequence_set,
 )
 from xpostmaps.core.postplot_4d_plot_settings import (
     resolve_boundaries_for_kind,
@@ -48,56 +52,63 @@ _NAV_CAPTION_STYLE = "color: #8b949e; font-size: 10px;"
 
 
 class _SublineNavigator(QWidget):
-    """Compact centre control: prev/next arrows plus a sequence load box."""
+    """Centre control: preplot/sequence step arrows plus load/combine boxes."""
 
     previous_requested = Signal()
     next_requested = Signal()
     load_requested = Signal(str)
+    previous_preplot_requested = Signal()
+    next_preplot_requested = Signal()
+    load_preplot_requested = Signal(str)
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
 
-        self._prev_btn = QPushButton("\u25c0")
-        self._prev_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-        self._prev_btn.setFixedSize(36, 32)
-        self._prev_btn.setToolTip("Previous Sequence")
-        self._prev_btn.clicked.connect(self.previous_requested.emit)
-
-        self._load_btn = QPushButton("Load Sequence")
-        self._load_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-        self._load_btn.setSizePolicy(
-            QSizePolicy.Policy.Fixed,
-            QSizePolicy.Policy.Fixed,
+        self._prev_preplot_btn = self._arrow_button(
+            "\u23ee", "Previous Preplot", self.previous_preplot_requested.emit
         )
-        self._load_btn.adjustSize()
-        load_w = self._load_btn.sizeHint().width() + 12
-        self._load_btn.setFixedSize(load_w, 32)
-        self._load_btn.clicked.connect(self._emit_load)
+        self._prev_btn = self._arrow_button(
+            "\u25c0", "Previous Sequence", self.previous_requested.emit
+        )
 
-        self._sequence_edit = QLineEdit()
-        self._sequence_edit.setPlaceholderText("Sequence")
-        self._sequence_edit.setClearButtonEnabled(True)
-        self._sequence_edit.setFixedHeight(32)
-        self._sequence_edit.setFixedWidth(96)
+        self._load_btn = self._text_button("Load/Combine Sequence(s)", self._emit_load)
+
+        self._sequence_edit = self._input_box(
+            "Seq, e.g. 1-3 or 1, 5, 9", width=150
+        )
         self._sequence_edit.returnPressed.connect(self._emit_load)
 
-        self._next_btn = QPushButton("\u25b6")
-        self._next_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-        self._next_btn.setFixedSize(36, 32)
-        self._next_btn.setToolTip("Next Sequence")
-        self._next_btn.clicked.connect(self.next_requested.emit)
+        self._load_preplot_btn = self._text_button(
+            "Load Preplot Sequence(s)", self._emit_load_preplot
+        )
+        self._preplot_edit = self._input_box("Preplot", width=130)
+        self._preplot_edit.returnPressed.connect(self._emit_load_preplot)
+
+        self._next_btn = self._arrow_button(
+            "\u25b6", "Next Sequence", self.next_requested.emit
+        )
+        self._next_preplot_btn = self._arrow_button(
+            "\u23ed", "Next Preplot", self.next_preplot_requested.emit
+        )
 
         controls_row = QHBoxLayout()
         controls_row.setContentsMargins(0, 0, 0, 0)
         controls_row.setSpacing(6)
-        controls_row.addWidget(self._prev_btn)
-        controls_row.addWidget(self._load_btn)
-        controls_row.addWidget(self._sequence_edit)
-        controls_row.addWidget(self._next_btn)
+        for widget in (
+            self._prev_preplot_btn,
+            self._prev_btn,
+            self._load_btn,
+            self._sequence_edit,
+            self._load_preplot_btn,
+            self._preplot_edit,
+            self._next_btn,
+            self._next_preplot_btn,
+        ):
+            controls_row.addWidget(widget)
 
-        prev_caption = QLabel("Previous Sequence")
+        prev_caption = QLabel("\u23ee Preplot   \u25c0 Sequence")
         prev_caption.setStyleSheet(_NAV_CAPTION_STYLE)
-        next_caption = QLabel("Next Sequence")
+        next_caption = QLabel("Sequence \u25b6   Preplot \u23ed")
         next_caption.setStyleSheet(_NAV_CAPTION_STYLE)
         captions_row = QHBoxLayout()
         captions_row.setContentsMargins(0, 0, 0, 0)
@@ -113,17 +124,56 @@ class _SublineNavigator(QWidget):
         host.addLayout(captions_row)
         self.setSizePolicy(QSizePolicy.Policy.Maximum, QSizePolicy.Policy.Fixed)
 
+    def _arrow_button(self, glyph: str, tooltip: str, slot) -> QPushButton:
+        btn = QPushButton(glyph)
+        btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        btn.setFixedSize(36, 32)
+        btn.setToolTip(tooltip)
+        btn.clicked.connect(slot)
+        return btn
+
+    def _text_button(self, label: str, slot) -> QPushButton:
+        btn = QPushButton(label)
+        btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        btn.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
+        btn.adjustSize()
+        btn.setFixedSize(btn.sizeHint().width() + 12, 32)
+        btn.clicked.connect(slot)
+        return btn
+
+    def _input_box(self, placeholder: str, *, width: int) -> QLineEdit:
+        edit = QLineEdit()
+        edit.setPlaceholderText(placeholder)
+        edit.setClearButtonEnabled(True)
+        edit.setFixedHeight(32)
+        edit.setFixedWidth(width)
+        return edit
+
     def _emit_load(self) -> None:
         self.load_requested.emit(self._sequence_edit.text().strip())
+
+    def _emit_load_preplot(self) -> None:
+        self.load_preplot_requested.emit(self._preplot_edit.text().strip())
 
     def set_sequence(self, sequence_no: str) -> None:
         self._sequence_edit.blockSignals(True)
         self._sequence_edit.setText(sequence_no)
         self._sequence_edit.blockSignals(False)
 
+    def set_preplot(self, preplot_name: str) -> None:
+        self._preplot_edit.blockSignals(True)
+        self._preplot_edit.setText(preplot_name)
+        self._preplot_edit.blockSignals(False)
+
     def set_navigation_enabled(self, *, can_previous: bool, can_next: bool) -> None:
         self._prev_btn.setEnabled(can_previous)
         self._next_btn.setEnabled(can_next)
+
+    def set_preplot_navigation_enabled(
+        self, *, can_previous: bool, can_next: bool
+    ) -> None:
+        self._prev_preplot_btn.setEnabled(can_previous)
+        self._next_preplot_btn.setEnabled(can_next)
 
 
 class _PlotTabPage(QWidget):
@@ -144,6 +194,9 @@ class Postplot4DStatPlotView(QWidget):
     previous_subline_requested = Signal()
     next_subline_requested = Signal()
     load_subline_requested = Signal(str)
+    previous_preplot_requested = Signal()
+    next_preplot_requested = Signal()
+    load_preplot_requested = Signal(str)
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
@@ -153,6 +206,7 @@ class Postplot4DStatPlotView(QWidget):
         self._diff_rows: list[Postplot4DDiffRow] = []
         self._streamers_detected = False
         self._sources: list[str] = []
+        self._sets: list[SequenceDiffSet] = []
 
         root = QVBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
@@ -171,6 +225,11 @@ class Postplot4DStatPlotView(QWidget):
         self._subline_nav.previous_requested.connect(self.previous_subline_requested.emit)
         self._subline_nav.next_requested.connect(self.next_subline_requested.emit)
         self._subline_nav.load_requested.connect(self.load_subline_requested.emit)
+        self._subline_nav.previous_preplot_requested.connect(
+            self.previous_preplot_requested.emit
+        )
+        self._subline_nav.next_preplot_requested.connect(self.next_preplot_requested.emit)
+        self._subline_nav.load_preplot_requested.connect(self.load_preplot_requested.emit)
         top = Qt.AlignmentFlag.AlignTop
         toolbar.addWidget(export_btn, alignment=top)
         toolbar.addStretch()
@@ -222,21 +281,64 @@ class Postplot4DStatPlotView(QWidget):
         *,
         streamers_detected: bool,
     ) -> None:
+        """Single-sequence entry point (delegates to the combined path)."""
+        self.set_combined_data(
+            [SequenceDiffSet(match_row=match_row, diff_rows=list(diff_rows))],
+            streamers_detected=streamers_detected,
+        )
+
+    def set_combined_data(
+        self,
+        sets: list[SequenceDiffSet],
+        *,
+        streamers_detected: bool,
+    ) -> None:
+        if not sets:
+            return
+        self._sets = list(sets)
+        primary = primary_sequence_set(self._sets)
+        match_row = primary.match_row
         self._match_row = match_row
-        self._diff_rows = list(diff_rows)
+        self._diff_rows = [row for item in self._sets for row in item.diff_rows]
         self._streamers_detected = streamers_detected
-        self._sources = unique_sources_from_diff_rows(diff_rows)
+        self._sources = combined_source_numbers(self._sets)
+        sequence_nos = combined_sequence_numbers(self._sets)
+        multi = len(self._sets) > 1
+
         for kind, controls in self._tab_controls.items():
-            controls.set_sources(resolve_source_styles_for_line(self._sources, kind))
+            if multi:
+                keys = [
+                    combined_source_key(source_no, sequence_no)
+                    for source_no in self._sources
+                    for sequence_no in sequence_nos
+                ]
+                resolved = resolve_source_styles_for_line(keys, kind)
+                style_by_key = {row.source_no: row for row in resolved}
+                controls.set_source_matrix(self._sources, sequence_nos, style_by_key)
+            else:
+                controls.set_sources(
+                    resolve_source_styles_for_line(self._sources, kind)
+                )
             controls.set_boundaries(resolve_boundaries_for_kind(kind))
-        if match_row.subline:
-            self._title.setText(f"{match_row.line_name}.{match_row.subline} 4D Stat Plot")
+
+        line_label = (
+            f"{match_row.line_name}.{match_row.subline}"
+            if match_row.subline
+            else match_row.line_name
+        )
+        if multi:
+            seq_label = ", ".join(sequence_nos)
+            baseline = match_row.baseline_name or line_label
+            self._title.setText(
+                f"{baseline} 4D Stat Plot \u2014 Combined Sequences {seq_label}"
+            )
         else:
-            self._title.setText(f"{match_row.line_name} 4D Stat Plot")
-        self._subline_nav.set_sequence(match_row.sequence_no)
+            self._title.setText(f"{line_label} 4D Stat Plot")
+        self._subline_nav.set_sequence(", ".join(sequence_nos))
+        self._subline_nav.set_preplot(match_row.baseline_name)
 
         show_feather = feather_tab_available(
-            diff_rows,
+            self._diff_rows,
             streamers_detected=streamers_detected,
         )
         show_feather_diff = feather_diff_tab_available(
@@ -259,6 +361,12 @@ class Postplot4DStatPlotView(QWidget):
 
     def set_subline_navigation(self, *, can_previous: bool, can_next: bool) -> None:
         self._subline_nav.set_navigation_enabled(
+            can_previous=can_previous,
+            can_next=can_next,
+        )
+
+    def set_preplot_navigation(self, *, can_previous: bool, can_next: bool) -> None:
+        self._subline_nav.set_preplot_navigation_enabled(
             can_previous=can_previous,
             can_next=can_next,
         )
@@ -350,10 +458,7 @@ class Postplot4DStatPlotView(QWidget):
         styles = controls.source_styles()
         boundaries = controls.boundaries()
         y_min, y_max = self._y_axis.y_range()
-        series_list = [
-            build_plot_series(self._diff_rows, self._match_row, kind, source_no)
-            for source_no in self._sources
-        ]
+        series_list = build_combined_plot_series(self._sets, kind)
         page._canvas.set_combine_sources(self._combine_box.isChecked())
         page._canvas.render(
             series_list,

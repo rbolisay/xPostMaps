@@ -42,8 +42,14 @@ from xpostmaps.core.postplot_4d_matching import (
     BaselineKind,
     Postplot4DMatchRow,
     build_postplot_4d_rows,
-    find_match_by_sequence_no,
+    find_matches_by_sequence_query,
+    matches_for_preplot,
+    preplot_groups,
     sequence_sort_key,
+)
+from xpostmaps.core.postplot_4d_plot_data import (
+    SequenceDiffSet,
+    primary_sequence_set,
 )
 from xpostmaps.parsers.metadata_parser import parse_file_metadata
 from xpostmaps.ui.dialog_size_utils import center_widget_on_screen, postplot_4d_dialog_size
@@ -291,6 +297,7 @@ class Postplot4DDialog:
             "baseline": saved_baseline,
             "coord_mode": "en",
             "active_match": None,
+            "active_sets": [],
             "map_epsg": resolve_diff_map_epsg(map_data, settings),
             "sort_column": 0,
             "sort_order": Qt.SortOrder.AscendingOrder,
@@ -694,6 +701,7 @@ class Postplot4DDialog:
         def show_diff_stat(match_row: Postplot4DMatchRow) -> None:
             nonlocal diff_rows
             state["active_match"] = match_row
+            state["active_sets"] = []
             try:
                 if database is not None and project_name.strip():
                     diff_rows = load_saved_diffs(match_row)
@@ -743,6 +751,7 @@ class Postplot4DDialog:
 
         def show_main_view() -> None:
             state["active_match"] = None
+            state["active_sets"] = []
             stack.setCurrentIndex(0)
             _autosize_dialog_width(host_dialog, table)
             if host_dialog is not None:
@@ -774,23 +783,79 @@ class Postplot4DDialog:
                     return index
             return -1
 
+        def _active_sets() -> list[SequenceDiffSet]:
+            sets = state.get("active_sets")
+            return list(sets) if isinstance(sets, list) else []
+
+        def _nav_anchor() -> Postplot4DMatchRow | None:
+            """The lowest-sequence match currently plotted (navigation reference)."""
+            sets = _active_sets()
+            if sets:
+                return primary_sequence_set(sets).match_row
+            anchor = state["active_match"]
+            return anchor if isinstance(anchor, Postplot4DMatchRow) else None
+
         def _update_plot_nav_state(match_row: Postplot4DMatchRow) -> None:
             navigable = _plottable_matches()
-            index = _plot_nav_index(navigable, match_row)
+            anchor = _nav_anchor() or match_row
+            index = _plot_nav_index(navigable, anchor)
             plot_view.set_subline_navigation(
                 can_previous=index > 0,
                 can_next=0 <= index < len(navigable) - 1,
             )
+            groups = preplot_groups(navigable)
+            group_index = next(
+                (
+                    pos
+                    for pos, (name, _) in enumerate(groups)
+                    if name == anchor.baseline_name
+                ),
+                -1,
+            )
+            plot_view.set_preplot_navigation(
+                can_previous=group_index > 0,
+                can_next=0 <= group_index < len(groups) - 1,
+            )
+
+        def _load_diff_rows_for(
+            match_row: Postplot4DMatchRow,
+        ) -> list[Postplot4DDiffRow]:
+            if database is not None and project_name.strip():
+                return load_saved_diffs(match_row)
+            return calculate_and_persist_diffs(match_row)
+
+        def _load_sets_for_matches(
+            matches: list[Postplot4DMatchRow],
+        ) -> list[SequenceDiffSet]:
+            sets: list[SequenceDiffSet] = []
+            for match_row in matches:
+                try:
+                    rows = _load_diff_rows_for(match_row)
+                except CrsMismatchError:
+                    continue
+                if rows:
+                    sets.append(SequenceDiffSet(match_row=match_row, diff_rows=rows))
+            return sets
+
+        def _show_sets(sets: list[SequenceDiffSet]) -> bool:
+            """Plot one or more sequences combined; the lowest sequence becomes
+            the active match (Back returns to its 4D Stat table)."""
+            nonlocal diff_rows
+            if not sets:
+                return False
+            primary = primary_sequence_set(sets)
+            state["active_match"] = primary.match_row
+            state["active_sets"] = sets
+            diff_rows = [row for item in sets for row in item.diff_rows]
+            refresh_diff_table()
+            plot_btn.setEnabled(True)
+            show_plot_view()
+            return True
 
         def render_plot_for_match(match_row: Postplot4DMatchRow) -> bool:
-            """Load a line's diffs and show its plot; updates active_match so the
-            Back button returns to that same line's 4D Stat table."""
-            nonlocal diff_rows
+            """Load a single line's diffs and show its plot."""
             try:
-                if database is not None and project_name.strip():
-                    rows = load_saved_diffs(match_row)
-                else:
-                    rows = calculate_and_persist_diffs(match_row)
+                rows = _load_diff_rows_for(match_row)
             except CrsMismatchError as exc:
                 QMessageBox.warning(
                     host_dialog or parent,
@@ -801,59 +866,115 @@ class Postplot4DDialog:
             if not rows:
                 QMessageBox.information(
                     host_dialog or parent,
-                    "Load Sequence",
+                    "Load/Combine Sequence(s)",
                     (
                         f"No saved 4D Stat data for sequence {match_row.sequence_no}. "
                         "Open it from the table and use Calculate 4D Stat first."
                     ),
                 )
                 return False
-            state["active_match"] = match_row
-            diff_rows = rows
-            refresh_diff_table()
-            plot_btn.setEnabled(True)
-            show_plot_view()
-            return True
+            return _show_sets([SequenceDiffSet(match_row=match_row, diff_rows=rows)])
 
         def load_subline_by_text(sequence_text: str) -> None:
             navigable = _plottable_matches()
-            match_row = find_match_by_sequence_no(navigable, sequence_text)
-            if match_row is None:
+            matches = find_matches_by_sequence_query(navigable, sequence_text)
+            if not matches:
                 QMessageBox.information(
                     host_dialog or parent,
-                    "Load Sequence",
+                    "Load/Combine Sequence(s)",
                     (
-                        f"No 4D Stat plot found for sequence {sequence_text!r}. "
-                        "Enter a sequence that has saved 4D Stat data."
+                        f"No 4D Stat plot found for {sequence_text!r}. Enter one or "
+                        "more sequences (e.g. 1-3 or 1, 5, 9) that have saved 4D "
+                        "Stat data."
                     ),
                 )
                 return
-            render_plot_for_match(match_row)
+            sets = _load_sets_for_matches(matches)
+            if not sets:
+                QMessageBox.information(
+                    host_dialog or parent,
+                    "Load/Combine Sequence(s)",
+                    "None of the requested sequences have saved 4D Stat data.",
+                )
+                return
+            _show_sets(sets)
+
+        def load_preplot_by_text(preplot_text: str) -> None:
+            navigable = _plottable_matches()
+            matches = matches_for_preplot(navigable, preplot_text)
+            if not matches:
+                QMessageBox.information(
+                    host_dialog or parent,
+                    "Load Preplot Sequence(s)",
+                    (
+                        f"No preplot line {preplot_text!r} with saved 4D Stat data. "
+                        "Enter a preplot name shown in the table."
+                    ),
+                )
+                return
+            sets = _load_sets_for_matches(matches)
+            if not sets:
+                QMessageBox.information(
+                    host_dialog or parent,
+                    "Load Preplot Sequence(s)",
+                    f"No sequences on preplot {preplot_text!r} have saved 4D Stat data.",
+                )
+                return
+            _show_sets(sets)
 
         def step_subline(delta: int) -> None:
-            match_row = state["active_match"]
-            if not isinstance(match_row, Postplot4DMatchRow):
+            anchor = _nav_anchor()
+            if anchor is None:
                 return
             navigable = _plottable_matches()
-            index = _plot_nav_index(navigable, match_row)
+            index = _plot_nav_index(navigable, anchor)
             if index < 0:
                 return
             target = index + delta
             if 0 <= target < len(navigable):
                 render_plot_for_match(navigable[target])
 
+        def step_preplot(delta: int) -> None:
+            anchor = _nav_anchor()
+            if anchor is None:
+                return
+            navigable = _plottable_matches()
+            groups = preplot_groups(navigable)
+            group_index = next(
+                (
+                    pos
+                    for pos, (name, _) in enumerate(groups)
+                    if name == anchor.baseline_name
+                ),
+                -1,
+            )
+            if group_index < 0:
+                return
+            target = group_index + delta
+            if not (0 <= target < len(groups)):
+                return
+            _, members = groups[target]
+            sets = _load_sets_for_matches(members)
+            if sets:
+                _show_sets(sets)
+
         def show_plot_view() -> None:
             match_row = state["active_match"]
             if not isinstance(match_row, Postplot4DMatchRow) or not diff_rows:
                 return
-            plot_view.set_data(
-                match_row,
-                diff_rows,
+            sets = _active_sets() or [
+                SequenceDiffSet(match_row=match_row, diff_rows=list(diff_rows))
+            ]
+            plot_view.set_combined_data(
+                sets,
                 streamers_detected=_source_has_streamers_for_match(match_row),
             )
             _update_plot_nav_state(match_row)
             if host_dialog is not None:
-                if match_row.subline:
+                if len(sets) > 1:
+                    baseline = match_row.baseline_name or match_row.line_name
+                    host_dialog.setWindowTitle(f"{baseline} 4D Stat Plot (Combined)")
+                elif match_row.subline:
                     host_dialog.setWindowTitle(
                         f"{match_row.line_name}.{match_row.subline} 4D Stat Plot"
                     )
@@ -1483,6 +1604,9 @@ class Postplot4DDialog:
             plot_view.previous_subline_requested.connect(lambda: step_subline(-1))
             plot_view.next_subline_requested.connect(lambda: step_subline(1))
             plot_view.load_subline_requested.connect(load_subline_by_text)
+            plot_view.previous_preplot_requested.connect(lambda: step_preplot(-1))
+            plot_view.next_preplot_requested.connect(lambda: step_preplot(1))
+            plot_view.load_preplot_requested.connect(load_preplot_by_text)
             plot_view.setVisible(False)
 
             stack.addWidget(main_page)

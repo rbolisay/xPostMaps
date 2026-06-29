@@ -96,6 +96,96 @@ def find_match_by_sequence_no(
     return None
 
 
+def parse_sequence_query(text: str) -> list[str]:
+    """Expand a sequence query into individual sequence tokens.
+
+    Accepts comma/space separated values and inclusive numeric ranges, e.g.
+    ``"1-3"`` -> ``["1", "2", "3"]`` and ``"1, 35, 25"`` -> ``["1", "35", "25"]``.
+    Order is preserved and duplicates are removed. Non-numeric tokens (and
+    non-numeric range endpoints) are passed through verbatim so alphanumeric
+    sequence names still work.
+    """
+    tokens: list[str] = []
+    seen: set[str] = set()
+
+    def _add(value: str) -> None:
+        value = value.strip()
+        if value and value not in seen:
+            seen.add(value)
+            tokens.append(value)
+
+    for raw in re.split(r"[,\s]+", (text or "").strip()):
+        if not raw:
+            continue
+        range_match = re.fullmatch(r"(\d+)\s*-\s*(\d+)", raw)
+        if range_match:
+            start = int(range_match.group(1))
+            end = int(range_match.group(2))
+            step = 1 if start <= end else -1
+            for value in range(start, end + step, step):
+                _add(str(value))
+            continue
+        _add(raw)
+    return tokens
+
+
+def find_matches_by_sequence_query(
+    rows: list[Postplot4DMatchRow],
+    text: str,
+) -> list[Postplot4DMatchRow]:
+    """Resolve every token in *text* to a match row (deduped, query order)."""
+    resolved: list[Postplot4DMatchRow] = []
+    seen: set[str] = set()
+    for token in parse_sequence_query(text):
+        match = find_match_by_sequence_no(rows, token)
+        if match is not None and match.sequence_id not in seen:
+            seen.add(match.sequence_id)
+            resolved.append(match)
+    return resolved
+
+
+def matches_for_preplot(
+    rows: list[Postplot4DMatchRow],
+    preplot_text: str,
+) -> list[Postplot4DMatchRow]:
+    """All matches whose baseline (preplot/navplan) name matches *preplot_text*.
+
+    Tolerant of case and surrounding whitespace; also matches on the compacted
+    token form so ``"1305 R1"`` resolves the same baseline as ``"1305R1"``.
+    """
+    query = (preplot_text or "").strip()
+    if not query:
+        return []
+    query_upper = query.upper()
+    query_compact = _compact(query)
+    matched = [
+        row
+        for row in rows
+        if row.baseline_name.strip().upper() == query_upper
+        or (query_compact and _compact(row.baseline_name) == query_compact)
+    ]
+    return sorted(matched, key=sequence_sort_key)
+
+
+def preplot_groups(
+    rows: list[Postplot4DMatchRow],
+) -> list[tuple[str, list[Postplot4DMatchRow]]]:
+    """Group matches by baseline name, ordered by each group's lowest sequence.
+
+    Returns ``(baseline_name, sorted_matches)`` pairs so the plot view can step
+    between whole preplot lines (Next/Previous Preplot).
+    """
+    groups: dict[str, list[Postplot4DMatchRow]] = {}
+    for row in rows:
+        groups.setdefault(row.baseline_name, []).append(row)
+    ordered: list[tuple[str, list[Postplot4DMatchRow]]] = []
+    for name, members in groups.items():
+        members_sorted = sorted(members, key=sequence_sort_key)
+        ordered.append((name, members_sorted))
+    ordered.sort(key=lambda pair: sequence_sort_key(pair[1][0]))
+    return ordered
+
+
 def _tokens(text: str) -> list[str]:
     cleaned = _KNOWN_EXTENSION_RE.sub(" ", text or "")
     return [token.upper() for token in _TOKEN_RE.findall(cleaned)]
