@@ -801,7 +801,7 @@ class Postplot4DDialog:
             if not rows:
                 QMessageBox.information(
                     host_dialog or parent,
-                    "Load Subline",
+                    "Load Sequence",
                     (
                         f"No saved 4D Stat data for sequence {match_row.sequence_no}. "
                         "Open it from the table and use Calculate 4D Stat first."
@@ -821,7 +821,7 @@ class Postplot4DDialog:
             if match_row is None:
                 QMessageBox.information(
                     host_dialog or parent,
-                    "Load Subline",
+                    "Load Sequence",
                     (
                         f"No 4D Stat plot found for sequence {sequence_text!r}. "
                         "Enter a sequence that has saved 4D Stat data."

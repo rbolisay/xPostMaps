@@ -9,6 +9,7 @@ from PySide6.QtWidgets import (
     QLabel,
     QLineEdit,
     QPushButton,
+    QSizePolicy,
     QStackedWidget,
     QTabWidget,
     QVBoxLayout,
@@ -59,13 +60,18 @@ class _SublineNavigator(QWidget):
         self._prev_btn = QPushButton("\u25c0")
         self._prev_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self._prev_btn.setFixedSize(36, 32)
-        self._prev_btn.setToolTip("Previous Subline")
+        self._prev_btn.setToolTip("Previous Sequence")
         self._prev_btn.clicked.connect(self.previous_requested.emit)
 
-        self._load_btn = QPushButton("Load Subline")
+        self._load_btn = QPushButton("Load Sequence")
         self._load_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-        self._load_btn.setFixedHeight(32)
-        self._load_btn.setMinimumWidth(110)
+        self._load_btn.setSizePolicy(
+            QSizePolicy.Policy.Fixed,
+            QSizePolicy.Policy.Fixed,
+        )
+        self._load_btn.adjustSize()
+        load_w = self._load_btn.sizeHint().width() + 12
+        self._load_btn.setFixedSize(load_w, 32)
         self._load_btn.clicked.connect(self._emit_load)
 
         self._sequence_edit = QLineEdit()
@@ -78,7 +84,7 @@ class _SublineNavigator(QWidget):
         self._next_btn = QPushButton("\u25b6")
         self._next_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self._next_btn.setFixedSize(36, 32)
-        self._next_btn.setToolTip("Next Subline")
+        self._next_btn.setToolTip("Next Sequence")
         self._next_btn.clicked.connect(self.next_requested.emit)
 
         controls_row = QHBoxLayout()
@@ -89,9 +95,9 @@ class _SublineNavigator(QWidget):
         controls_row.addWidget(self._sequence_edit)
         controls_row.addWidget(self._next_btn)
 
-        prev_caption = QLabel("Previous Subline")
+        prev_caption = QLabel("Previous Sequence")
         prev_caption.setStyleSheet(_NAV_CAPTION_STYLE)
-        next_caption = QLabel("Next Subline")
+        next_caption = QLabel("Next Sequence")
         next_caption.setStyleSheet(_NAV_CAPTION_STYLE)
         captions_row = QHBoxLayout()
         captions_row.setContentsMargins(0, 0, 0, 0)
@@ -105,6 +111,7 @@ class _SublineNavigator(QWidget):
         host.setSpacing(1)
         host.addLayout(controls_row)
         host.addLayout(captions_row)
+        self.setSizePolicy(QSizePolicy.Policy.Maximum, QSizePolicy.Policy.Fixed)
 
     def _emit_load(self) -> None:
         self.load_requested.emit(self._sequence_edit.text().strip())
