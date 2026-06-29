@@ -7,7 +7,21 @@ from PySide6.QtWidgets import QApplication, QWidget
 # Outer dialog margins + title bar (approximate client chrome).
 _DIALOG_CHROME_WIDTH = 48
 _DIALOG_CHROME_HEIGHT = 88
-_POSTPLOT_4D_HEIGHT_SCALE = 0.85
+# Slightly shorter than the map sheet so the bottom Survey Specs pane fits on laptop screens.
+_POSTPLOT_4D_HEIGHT_SCALE = 0.76
+_SCREEN_HEIGHT_MARGIN = 0.90
+_SCREEN_WIDTH_MARGIN = 0.96
+
+
+def _available_screen_geometry(parent: QWidget | None):
+    if parent is not None:
+        screen_obj = parent.screen()
+        if screen_obj is not None:
+            return screen_obj.availableGeometry()
+    primary = QApplication.primaryScreen()
+    if primary is not None:
+        return primary.availableGeometry()
+    return None
 
 
 def map_sheet_dialog_size(parent: QWidget | None) -> tuple[int, int]:
@@ -30,20 +44,31 @@ def map_sheet_dialog_size(parent: QWidget | None) -> tuple[int, int]:
 
 
 def postplot_4d_dialog_size(parent: QWidget | None) -> tuple[int, int]:
-    """Postplot 4D / 4D Stat Plot window size — map sheet width, 15% shorter height."""
+    """Postplot 4D / 4D Stat Plot window size — map sheet width, reduced height."""
     width, height = map_sheet_dialog_size(parent)
-    return width, max(480, int(height * _POSTPLOT_4D_HEIGHT_SCALE))
+    height = max(480, int(height * _POSTPLOT_4D_HEIGHT_SCALE))
+    screen = _available_screen_geometry(parent)
+    if screen is not None:
+        width = min(width, int(screen.width() * _SCREEN_WIDTH_MARGIN))
+        height = min(height, int(screen.height() * _SCREEN_HEIGHT_MARGIN))
+    return max(640, width), max(480, height)
 
 
 def center_widget_on_screen(widget: QWidget) -> None:
-    """Move *widget* so its frame is centered on the available screen area."""
-    screen = widget.screen().availableGeometry() if widget.screen() else None
-    if screen is None:
-        primary = QApplication.primaryScreen()
-        if primary is not None:
-            screen = primary.availableGeometry()
+    """Move *widget* so its frame is centered and fully on the available screen."""
+    screen = _available_screen_geometry(widget)
     if screen is None:
         return
     frame = widget.frameGeometry()
+    if frame.height() > screen.height():
+        widget.resize(frame.width(), int(screen.height() * _SCREEN_HEIGHT_MARGIN))
+        frame = widget.frameGeometry()
+    if frame.width() > screen.width():
+        widget.resize(int(screen.width() * _SCREEN_WIDTH_MARGIN), frame.height())
+        frame = widget.frameGeometry()
     frame.moveCenter(screen.center())
+    if frame.bottom() > screen.bottom():
+        frame.moveTop(screen.bottom() - frame.height())
+    if frame.top() < screen.top():
+        frame.moveTop(screen.top())
     widget.move(frame.topLeft())

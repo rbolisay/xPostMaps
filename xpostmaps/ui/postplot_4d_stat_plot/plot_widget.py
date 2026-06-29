@@ -32,7 +32,10 @@ from xpostmaps.utils.symbology_units import DEFAULT_SCREEN_DPI
 
 _PLOT_BG = "#ffffff"
 _PLOT_FG = "#111827"
-_MIN_PLOT_HEIGHT = 420
+# Minimum on-screen height for an embedded plot. Kept modest so the whole 4D
+# Stat Plot window (plot + bottom tabs + toolbars) still fits on laptop screens
+# without the window growing taller than the display.
+_MIN_PLOT_HEIGHT = 200
 _PICK_RADIUS_PX = 12
 # Single data-point marker size for every source, independent of line style.
 _SOURCE_SYMBOL_SIZE_PX = 5

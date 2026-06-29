@@ -35,17 +35,32 @@ from xpostmaps.ui.dialogs.legend_dialog import (
 )
 from xpostmaps.ui.widgets.color_button import ColorButton
 
+# Match Survey Specs table: capped body rows + vertical scroll for extra rows.
+_PLOT_SETTINGS_TABLE_MAX_BODY_ROWS = 4
 
-def _fit_table_to_content(table: QTableWidget) -> None:
+_BOUNDARY_HEADERS = (
+    "Boundary Reference",
+    "Boundary Limit",
+    "Absolute",
+    "Line Style",
+    "Line Color",
+)
+
+
+def _fit_table_to_content(
+    table: QTableWidget,
+    *,
+    max_body_rows: int | None = None,
+) -> None:
     """Size a 4D Stat control table to its content.
 
     Each column is sized to its header/cell content (Resize To Contents), and
     the table widget width is then locked to the total so no column is ever
-    truncated. Horizontal overflow is handled by the surrounding scroll area
-    rather than an in-table scrollbar.
+    truncated. When *max_body_rows* is set, viewport height is capped and a
+    vertical scrollbar appears for additional rows.
     """
     _fit_table_columns(table)
-    _fit_table_height(table)
+    _fit_table_height(table, max_body_rows=max_body_rows)
     total = sum(table.columnWidth(col) for col in range(table.columnCount()))
     frame = table.frameWidth() * 2
     vbar = 0
@@ -156,15 +171,18 @@ class SourceStyleTable(QWidget):
         self._sequence_nos: list[str] = []
         self._style_by_key: dict[str, SourceStyleRow] = {}
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setContentsMargins(8, 4, 8, 8)
         layout.setSpacing(4)
-        self.setSizePolicy(QSizePolicy.Policy.Maximum, QSizePolicy.Policy.Fixed)
+        self.setSizePolicy(QSizePolicy.Policy.Maximum, QSizePolicy.Policy.Preferred)
         section = QLabel("Source Style")
         section.setObjectName("statPlotSection")
         layout.addWidget(section)
         self._table = QTableWidget(0, 3)
         _configure_legend_table(self._table)
-        self._table.setHorizontalHeaderLabels(["Source No.", "Line Style", "Source Color"])
+        self._table.setHorizontalHeaderLabels(
+            ["Source No.", "Source Line Style", "Source Color"]
+        )
+        self._table.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
         layout.addWidget(self._table)
 
     def set_sources(self, rows: list[SourceStyleRow]) -> None:
@@ -211,7 +229,9 @@ class SourceStyleTable(QWidget):
     def _rebuild_single(self) -> None:
         self._table.blockSignals(True)
         self._table.setColumnCount(3)
-        self._table.setHorizontalHeaderLabels(["Source No.", "Line Style", "Source Color"])
+        self._table.setHorizontalHeaderLabels(
+            ["Source No.", "Source Line Style", "Source Color"]
+        )
         self._table.setRowCount(len(self._rows))
         for row_idx, row in enumerate(self._rows):
             self._set_source_item(row_idx, row.source_no)
@@ -247,8 +267,10 @@ class SourceStyleTable(QWidget):
             self._table.setCellWidget(row_idx, 2, color_btn)
             self._table.setRowHeight(row_idx, 34)
         self._table.blockSignals(False)
-        _fit_table_to_content(self._table)
-        self.adjustSize()
+        _fit_table_to_content(
+            self._table,
+            max_body_rows=_PLOT_SETTINGS_TABLE_MAX_BODY_ROWS,
+        )
 
     # ----- combined (multi-sequence) mode ---------------------------------
     def _rows_multi(self) -> list[SourceStyleRow]:
@@ -266,7 +288,7 @@ class SourceStyleTable(QWidget):
 
     def _rebuild_multi(self) -> None:
         self._table.blockSignals(True)
-        headers = ["Source No.", "Line Style"] + [
+        headers = ["Source No.", "Source Line Style"] + [
             f"Source Color - {seq}" for seq in self._sequence_nos
         ]
         self._table.setColumnCount(len(headers))
@@ -308,8 +330,10 @@ class SourceStyleTable(QWidget):
             bind()
             self._table.setRowHeight(row_idx, 34)
         self._table.blockSignals(False)
-        _fit_table_to_content(self._table)
-        self.adjustSize()
+        _fit_table_to_content(
+            self._table,
+            max_body_rows=_PLOT_SETTINGS_TABLE_MAX_BODY_ROWS,
+        )
 
     # ----- shared widget builders -----------------------------------------
     def _set_source_item(self, row_idx: int, text: str) -> None:
@@ -409,14 +433,14 @@ class BoundaryTable(QWidget):
         self._dots: list[float] = []
         self._dashes: list[float] = []
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setContentsMargins(8, 4, 8, 8)
         layout.setSpacing(4)
-        self.setSizePolicy(QSizePolicy.Policy.Maximum, QSizePolicy.Policy.Fixed)
-        boundary_title = QLabel("Boundary Limits")
+        self.setSizePolicy(QSizePolicy.Policy.Maximum, QSizePolicy.Policy.Preferred)
+        boundary_title = QLabel("Boundary Style")
         boundary_title.setObjectName("statPlotSection")
         layout.addWidget(boundary_title)
         toolbar = QHBoxLayout()
-        add_btn = _legend_section_toolbar_button("Add Row", kind="add")
+        add_btn = _legend_section_toolbar_button("Add Boundary Row", kind="add")
         remove_btn = _legend_section_toolbar_button("Remove Selected", kind="remove")
         add_btn.clicked.connect(self._add_row)
         remove_btn.clicked.connect(self._remove_selected)
@@ -426,15 +450,8 @@ class BoundaryTable(QWidget):
         layout.addLayout(toolbar)
         self._table = QTableWidget(0, 5)
         _configure_legend_table(self._table)
-        self._table.setHorizontalHeaderLabels(
-            [
-                "Reference Value",
-                "Limit Value",
-                "Absolute",
-                "Boundary Style",
-                "Boundary Color",
-            ]
-        )
+        self._table.setHorizontalHeaderLabels(list(_BOUNDARY_HEADERS))
+        self._table.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
         layout.addWidget(self._table)
 
     def _value_spin(self, row_idx: int, column: int) -> QDoubleSpinBox | None:
@@ -581,8 +598,10 @@ class BoundaryTable(QWidget):
             self._table.setCellWidget(row_idx, 4, color_btn)
             self._table.setRowHeight(row_idx, 34)
         self._table.blockSignals(False)
-        _fit_table_to_content(self._table)
-        self.adjustSize()
+        _fit_table_to_content(
+            self._table,
+            max_body_rows=_PLOT_SETTINGS_TABLE_MAX_BODY_ROWS,
+        )
 
     def _on_metric(self, row_idx: int, value: float) -> None:
         while len(self._widths) <= row_idx:
@@ -626,10 +645,10 @@ class PlotTabControls(QWidget):
         inner_row.setSpacing(12)
         self._source_table = SourceStyleTable(parent=inner)
         self._source_table.changed.connect(self.changed.emit)
-        inner_row.addWidget(self._source_table)
+        inner_row.addWidget(self._source_table, alignment=Qt.AlignmentFlag.AlignTop)
         self._boundary_table = BoundaryTable(parent=inner)
         self._boundary_table.changed.connect(self.changed.emit)
-        inner_row.addWidget(self._boundary_table)
+        inner_row.addWidget(self._boundary_table, alignment=Qt.AlignmentFlag.AlignTop)
         inner_row.addStretch(1)
 
         scroll = QScrollArea()

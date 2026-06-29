@@ -5,11 +5,14 @@ from __future__ import annotations
 from PySide6.QtCore import Qt, QTimer, Signal
 from PySide6.QtWidgets import (
     QCheckBox,
+    QFrame,
     QHBoxLayout,
     QLabel,
     QLineEdit,
     QPushButton,
+    QScrollArea,
     QSizePolicy,
+    QSplitter,
     QStackedWidget,
     QTabWidget,
     QVBoxLayout,
@@ -222,6 +225,7 @@ class Postplot4DStatPlotView(QWidget):
         self._sources: list[str] = []
         self._sets: list[SequenceDiffSet] = []
         self._plot_settings_key: str | None = None
+        self._splitter_sized = False
 
         root = QVBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
@@ -255,7 +259,9 @@ class Postplot4DStatPlotView(QWidget):
         back_col.setSpacing(2)
         back_col.addWidget(back_btn, alignment=Qt.AlignmentFlag.AlignRight)
         self._acceptance = QLabel("Acceptance: \u2014")
-        self._acceptance.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        self._acceptance.setAlignment(
+            Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
+        )
         back_col.addWidget(self._acceptance, alignment=Qt.AlignmentFlag.AlignRight)
         toolbar.addLayout(back_col)
         root.addLayout(toolbar)
@@ -284,10 +290,13 @@ class Postplot4DStatPlotView(QWidget):
             self._tab_controls[kind] = controls
             self._controls_stack.addWidget(controls)
         self._tabs.currentChanged.connect(self._on_tab_changed)
-        root.addWidget(self._tabs, stretch=1)
 
         self._bottom_tabs = QTabWidget()
         self._bottom_tabs.setStyleSheet(STAT_PLOT_TAB_STYLE)
+        self._bottom_tabs.setSizePolicy(
+            QSizePolicy.Policy.Expanding,
+            QSizePolicy.Policy.Preferred,
+        )
 
         # Survey Specs tab (default): acceptance limits + per-sequence results.
         self._survey_panel = SurveySpecsPanel(parent=self)
@@ -295,30 +304,82 @@ class Postplot4DStatPlotView(QWidget):
         self._survey_panel.changed.connect(self._on_survey_specs_changed)
         specs_page = QWidget()
         specs_layout = QVBoxLayout(specs_page)
-        specs_layout.setContentsMargins(8, 4, 8, 8)
+        specs_layout.setContentsMargins(0, 0, 0, 0)
         specs_layout.setSpacing(0)
-        specs_layout.addWidget(
-            self._survey_panel,
-            alignment=Qt.AlignmentFlag.AlignTop,
+        specs_scroll = QScrollArea(specs_page)
+        specs_scroll.setWidgetResizable(True)
+        specs_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        specs_scroll.setHorizontalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAsNeeded
         )
-        specs_layout.addStretch(1)
+        specs_scroll.setVerticalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAsNeeded
+        )
+        specs_scroll.setWidget(self._survey_panel)
+        specs_layout.addWidget(specs_scroll)
         self._bottom_tabs.addTab(specs_page, "Survey Specs")
 
-        # Plot Settings tab: per-kind Source Style + Boundary Limits + Y axis.
+        # Plot Settings tab: per-kind Source Style + Boundary Style + Y axis.
+        # Keep the tables pinned just under the tab bar (top-aligned) with any
+        # spare vertical room collected at the bottom instead of above them.
+        self._controls_stack.setSizePolicy(
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Maximum
+        )
         plot_settings_page = QWidget()
         plot_settings_layout = QVBoxLayout(plot_settings_page)
-        plot_settings_layout.setContentsMargins(8, 8, 8, 8)
-        plot_settings_layout.setSpacing(8)
-        plot_settings_layout.addWidget(self._controls_stack)
+        plot_settings_layout.setContentsMargins(8, 6, 8, 6)
+        plot_settings_layout.setSpacing(6)
+        plot_settings_layout.addWidget(
+            self._controls_stack, alignment=Qt.AlignmentFlag.AlignTop
+        )
         self._y_axis = YAxisControls(parent=plot_settings_page)
         self._y_axis.changed.connect(self._on_y_axis_changed)
         plot_settings_layout.addWidget(self._y_axis)
-        self._bottom_tabs.addTab(plot_settings_page, "Plot Settings")
+        plot_settings_layout.addStretch(1)
+        plot_settings_scroll = QScrollArea()
+        plot_settings_scroll.setWidgetResizable(True)
+        plot_settings_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        plot_settings_scroll.setHorizontalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAsNeeded
+        )
+        plot_settings_scroll.setVerticalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAsNeeded
+        )
+        plot_settings_scroll.setWidget(plot_settings_page)
+        self._bottom_tabs.addTab(plot_settings_scroll, "Plot Settings")
 
         self._bottom_tabs.setCurrentIndex(0)
-        root.addWidget(self._bottom_tabs)
+
+        self._main_splitter = QSplitter(Qt.Orientation.Vertical)
+        self._main_splitter.setChildrenCollapsible(False)
+        self._main_splitter.addWidget(self._tabs)
+        self._main_splitter.addWidget(self._bottom_tabs)
+        self._main_splitter.setStretchFactor(0, 3)
+        self._main_splitter.setStretchFactor(1, 2)
+        root.addWidget(self._main_splitter, stretch=1)
 
         self._apply_saved_plot_view_settings()
+
+    def showEvent(self, event) -> None:  # noqa: N802
+        super().showEvent(event)
+        if self._splitter_sized:
+            return
+        QTimer.singleShot(0, self._apply_initial_splitter_sizes)
+
+    def _apply_initial_splitter_sizes(self) -> None:
+        if self._splitter_sized:
+            return
+        total = self._main_splitter.height()
+        if total < 120:
+            return
+        # ~40% for Survey Specs / Plot Settings — plot area ~10% shorter than before.
+        bottom = min(max(int(total * 0.40), 280), 420)
+        self._main_splitter.setSizes([max(total - bottom, 180), bottom])
+        self._splitter_sized = True
+
+    def _reset_splitter_sizes(self) -> None:
+        self._splitter_sized = False
+        QTimer.singleShot(0, self._apply_initial_splitter_sizes)
 
     def set_data(
         self,
@@ -416,6 +477,7 @@ class Postplot4DStatPlotView(QWidget):
         self._sync_controls_stack()
         self._refresh_all_tabs()
         self._evaluate_survey()
+        self._reset_splitter_sizes()
         QTimer.singleShot(0, self._refresh_all_tabs)
 
     def match_row(self) -> Postplot4DMatchRow | None:

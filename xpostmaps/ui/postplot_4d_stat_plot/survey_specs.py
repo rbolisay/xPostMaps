@@ -94,6 +94,9 @@ _SURVEY_SPEC_HEADERS = (
     "Severity",
 )
 
+# Body rows visible before the survey-spec table scrolls vertically.
+_SURVEY_SPEC_MAX_BODY_ROWS = 4
+
 
 def _make_combo(items: list[tuple[str, object]], current: object) -> QComboBox:
     combo = QComboBox()
@@ -123,7 +126,7 @@ class SurveySpecsPanel(QWidget):
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
-        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        self.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Preferred)
         self._rows: list[SurveySpecRow] = []
         self._sequence_nos: list[str] = []
         self._excluded_by_sequence: dict[str, str] = {}
@@ -135,9 +138,9 @@ class SurveySpecsPanel(QWidget):
         root.setAlignment(Qt.AlignmentFlag.AlignTop)
 
         left = QWidget()
-        left.setSizePolicy(QSizePolicy.Policy.Maximum, QSizePolicy.Policy.Fixed)
+        left.setSizePolicy(QSizePolicy.Policy.Maximum, QSizePolicy.Policy.Preferred)
         left_layout = QVBoxLayout(left)
-        left_layout.setContentsMargins(0, 0, 0, 0)
+        left_layout.setContentsMargins(8, 4, 8, 8)
         left_layout.setSpacing(4)
 
         title = QLabel("Survey Specs")
@@ -159,6 +162,7 @@ class SurveySpecsPanel(QWidget):
         self._table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
         self._table.setSelectionMode(QTableWidget.SelectionMode.ExtendedSelection)
         self._table.setHorizontalHeaderLabels(list(_SURVEY_SPEC_HEADERS))
+        self._table.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
         left_layout.addWidget(self._table)
         root.addWidget(left, alignment=Qt.AlignmentFlag.AlignTop)
 
@@ -361,8 +365,10 @@ class SurveySpecsPanel(QWidget):
             self._table.setRowHeight(row_idx, 34)
         self._table.blockSignals(False)
         self._rebuilding = False
-        _fit_table_to_content(self._table)
-        self.adjustSize()
+        _fit_table_to_content(
+            self._table,
+            max_body_rows=_SURVEY_SPEC_MAX_BODY_ROWS,
+        )
 
 
 class _ResultSummary(QWidget):
@@ -376,13 +382,13 @@ class _ResultSummary(QWidget):
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
-        self.setSizePolicy(QSizePolicy.Policy.Maximum, QSizePolicy.Policy.Fixed)
+        self.setSizePolicy(QSizePolicy.Policy.Maximum, QSizePolicy.Policy.Preferred)
         self._sequence_nos: list[str] = []
         self._excluded_by_sequence: dict[str, str] = {}
         self._failed_details: list[FailedSpecDetail] = []
 
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setContentsMargins(8, 4, 8, 8)
         layout.setSpacing(4)
 
         title = QLabel("Sequence(s) Results")
@@ -503,8 +509,7 @@ class _ResultSummary(QWidget):
             self._table.setCellWidget(row_idx, self._COL_FAILED, failed_container)
             self._table.setRowHeight(row_idx, 34)
         self._table.blockSignals(False)
-        _fit_table_to_content(self._table)
-        self.adjustSize()
+        _fit_table_to_content(self._table, max_body_rows=3)
 
     def _on_excluded_changed(self) -> None:
         self._excluded_by_sequence = self.excluded_shotpoints()
