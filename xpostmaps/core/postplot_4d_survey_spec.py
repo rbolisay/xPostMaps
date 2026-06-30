@@ -904,3 +904,11 @@ def parse_excluded_shotpoints(text: str) -> set[int]:
         except ValueError:
             continue
     return excluded
+
+
+def merge_excluded_shotpoints_text(existing: str, shotpoints: set[int]) -> str:
+    """Merge *shotpoints* into parsed exclusion text."""
+    merged = parse_excluded_shotpoints(existing) | set(shotpoints)
+    if not merged:
+        return (existing or "").strip()
+    return format_shotpoint_ranges(sorted(merged))

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
+
 import numpy as np
 import pyqtgraph as pg
 from PySide6.QtCore import Qt, QPoint, QTimer
@@ -10,6 +12,7 @@ from PySide6.QtWidgets import (
     QApplication,
     QLineEdit,
     QLabel,
+    QMenu,
     QSizePolicy,
     QTabWidget,
     QVBoxLayout,
@@ -29,6 +32,12 @@ from xpostmaps.core.postplot_4d_plot_data import (
 )
 from xpostmaps.core.postplot_4d_survey_spec import Severity
 from xpostmaps.ui.postplot_4d_stat_plot.plot_pen import boundary_pen, clone_pen, source_pen
+from xpostmaps.ui.postplot_4d_stat_plot.shotpoint_selection import (
+    SelectionKey,
+    format_selection_overlay,
+    group_selected_by_sequence,
+    pick_points_in_rect,
+)
 from xpostmaps.ui.postplot_4d_stat_plot.stat_plot_view_box import StatPlotViewBox
 from xpostmaps.ui.postplot_4d_stat_plot.theme import STAT_PLOT_SOURCE_TAB_STYLE
 from xpostmaps.utils.symbology_units import DEFAULT_SCREEN_DPI
@@ -46,6 +55,10 @@ _MIN_PLOT_HEIGHT = 240
 _PICK_RADIUS_PX = 12
 # Single data-point marker size for every source, independent of line style.
 _SOURCE_SYMBOL_SIZE_PX = 5
+# Fuchsia ring around selected shotpoints; fill stays transparent so source colour shows.
+_SELECTION_RING_COLOR = "#ff00ff"
+_SELECTION_RING_WIDTH_PX = 2
+_SELECTION_RING_SIZE_PX = _SOURCE_SYMBOL_SIZE_PX + 4
 _OVERLAY_STYLE = (
     "background: rgba(255, 255, 255, 0.88);"
     "color: #111827;"
@@ -148,12 +161,6 @@ def nearest_pick_point(
     return best
 
 
-def _format_pick_value(kind: PlotKind, value: float) -> str:
-    if kind in ("feather", "feather_diff"):
-        return f"{value:.2f}"
-    return f"{value:.3f}"
-
-
 class TimeSeriesPlotWidget(pg.PlotWidget):
     """Single time-series plot with navigation, point pick, and stats overlay."""
 
@@ -166,13 +173,24 @@ class TimeSeriesPlotWidget(pg.PlotWidget):
         self._pick_points: list[tuple[float, float, str]] = []
         self._extent_x: tuple[float, float] | None = None
         self._extent_y: tuple[float, float] | None = None
+        self._default_sequence_no = ""
+        self._on_add_to_excluded: Callable[[dict[str, set[int]]], None] | None = None
+        self._selected: dict[SelectionKey, tuple[float, float]] = {}
         self._selection_marker = pg.ScatterPlotItem(
-            size=11,
-            pen=pg.mkPen("#111827", width=1.5),
-            brush=pg.mkBrush(255, 255, 255, 230),
+            size=_SELECTION_RING_SIZE_PX,
+            pen=pg.mkPen(
+                _SELECTION_RING_COLOR,
+                width=_SELECTION_RING_WIDTH_PX,
+                cosmetic=True,
+            ),
+            brush=pg.mkBrush(0, 0, 0, 0),
             symbol="o",
         )
         self._selection_marker.setZValue(200)
+        self._drag_rect = pg.PlotCurveItem(
+            pen=pg.mkPen(_SELECTION_RING_COLOR, width=1, cosmetic=True),
+        )
+        self._drag_rect.setZValue(250)
         self._selection_edit = QLineEdit()
         self._stats_label = QLabel()
         super().__init__(parent=parent, background=_PLOT_BG, viewBox=self._viewbox)
@@ -186,14 +204,116 @@ class TimeSeriesPlotWidget(pg.PlotWidget):
         self._stats_label.setStyleSheet(_OVERLAY_STYLE)
         self.addItem(self._selection_marker)
         self._selection_marker.hide()
+        self.addItem(self._drag_rect)
+        self._drag_rect.hide()
         self._viewbox.set_handlers(
             center_average=self._center_average,
             reset_zoom=self._reset_zoom,
+            selection_drag_start=self._on_selection_drag_start,
+            selection_drag_move=self._on_selection_drag_move,
+            selection_drag_finish=self._on_selection_drag_finish,
+            populate_context_menu=self._populate_context_menu,
         )
         scene = self.scene()
         if scene is not None:
             scene.sigMouseClicked.connect(self._on_scene_mouse_clicked)
         self._position_overlays()
+
+    def configure_shotpoint_selection(
+        self,
+        *,
+        default_sequence_no: str,
+        on_add_to_excluded: Callable[[dict[str, set[int]]], None] | None = None,
+    ) -> None:
+        self._default_sequence_no = default_sequence_no
+        self._on_add_to_excluded = on_add_to_excluded
+
+    def selected_shotpoints_by_sequence(self) -> dict[str, set[int]]:
+        return group_selected_by_sequence(
+            list(self._selected.keys()),
+            self._default_sequence_no,
+        )
+
+    def clear_shotpoint_selection(self) -> None:
+        self._selected.clear()
+        self._refresh_selection_display()
+
+    def _refresh_selection_display(self) -> None:
+        if not self._selected:
+            self._set_selection_text("")
+            return
+        keys = list(self._selected.keys())
+        xs = [float(self._selected[key][0]) for key in keys]
+        ys = [float(self._selected[key][1]) for key in keys]
+        self._selection_marker.setData(xs, ys)
+        self._selection_marker.show()
+        self._set_selection_text(format_selection_overlay(keys))
+
+    def _set_selected_keys(self, keys: list[SelectionKey], *, replace: bool) -> None:
+        if replace:
+            self._selected.clear()
+        for shotpoint, source_no in keys:
+            value = self._value_for_pick(shotpoint, source_no)
+            if value is None:
+                continue
+            self._selected[(shotpoint, source_no)] = (float(shotpoint), float(value))
+        self._refresh_selection_display()
+
+    def _value_for_pick(self, shotpoint: int, source_no: str) -> float | None:
+        for sp, value, label in self._pick_points:
+            if int(round(sp)) == shotpoint and label == source_no:
+                return float(value)
+        return None
+
+    def _toggle_selected_key(self, key: SelectionKey, shotpoint: float, value: float) -> None:
+        if key in self._selected:
+            del self._selected[key]
+        else:
+            self._selected[key] = (float(shotpoint), float(value))
+        self._refresh_selection_display()
+
+    def _on_selection_drag_start(self) -> None:
+        self._drag_rect.hide()
+
+    def _on_selection_drag_move(
+        self,
+        x0: float,
+        y0: float,
+        x1: float,
+        y1: float,
+    ) -> None:
+        xs = [x0, x1, x1, x0, x0]
+        ys = [y0, y0, y1, y1, y0]
+        self._drag_rect.setData(xs, ys)
+        self._drag_rect.show()
+
+    def _on_selection_drag_finish(
+        self,
+        x0: float,
+        y0: float,
+        x1: float,
+        y1: float,
+    ) -> None:
+        self._drag_rect.hide()
+        keys = pick_points_in_rect(self._pick_points, x0, y0, x1, y1)
+        modifiers = QApplication.keyboardModifiers()
+        replace = not bool(modifiers & Qt.KeyboardModifier.ControlModifier)
+        self._set_selected_keys(keys, replace=replace)
+
+    def _populate_context_menu(self, menu: QMenu) -> None:
+        if not self._selected or self._on_add_to_excluded is None:
+            return
+        action = menu.addAction("Add to Excluded Shotpoints")
+        action.triggered.connect(self._add_selection_to_excluded)
+
+    def _add_selection_to_excluded(self) -> None:
+        if self._on_add_to_excluded is None or not self._selected:
+            return
+        grouped = self.selected_shotpoints_by_sequence()
+        if not grouped:
+            return
+        self._on_add_to_excluded(grouped)
+        self.clear_shotpoint_selection()
 
     def resizeEvent(self, event) -> None:  # noqa: N802
         super().resizeEvent(event)
@@ -222,15 +342,6 @@ class TimeSeriesPlotWidget(pg.PlotWidget):
             self._selection_edit.hide()
             self._selection_marker.hide()
 
-    def _show_pick(self, shotpoint: float, value: float, source_no: str) -> None:
-        sp_text = str(int(shotpoint)) if shotpoint == int(shotpoint) else f"{shotpoint:.1f}"
-        unit = PLOT_KIND_UNITS[self._kind]
-        self._set_selection_text(
-            f"SP {sp_text}: {_format_pick_value(self._kind, value)} {unit}  ({source_no})"
-        )
-        self._selection_marker.setData([shotpoint], [value])
-        self._selection_marker.show()
-
     def _on_scene_mouse_clicked(self, ev) -> None:
         if ev.button() != Qt.MouseButton.LeftButton or ev.double():
             return
@@ -246,11 +357,18 @@ class TimeSeriesPlotWidget(pg.PlotWidget):
             x_tol,
             y_tol,
         )
+        modifiers = QApplication.keyboardModifiers()
+        ctrl = bool(modifiers & Qt.KeyboardModifier.ControlModifier)
         if picked is None:
-            self._set_selection_text("")
+            if not ctrl:
+                self.clear_shotpoint_selection()
             return
         shotpoint, value, source_no = picked
-        self._show_pick(shotpoint, value, source_no)
+        key = (int(round(shotpoint)), source_no)
+        if ctrl:
+            self._toggle_selected_key(key, shotpoint, value)
+            return
+        self._set_selected_keys([key], replace=True)
 
     def _bind_curve_pick(self, curve: pg.PlotDataItem, source_no: str) -> None:
         if not hasattr(curve, "sigPointsClicked"):
@@ -260,7 +378,12 @@ class TimeSeriesPlotWidget(pg.PlotWidget):
             if not points:
                 return
             pos = points[0].pos()
-            self._show_pick(pos.x(), pos.y(), source_no)
+            key = (int(round(pos.x())), source_no)
+            modifiers = QApplication.keyboardModifiers()
+            if modifiers & Qt.KeyboardModifier.ControlModifier:
+                self._toggle_selected_key(key, pos.x(), pos.y())
+            else:
+                self._set_selected_keys([key], replace=True)
 
         curve.sigPointsClicked.connect(on_points_clicked)
 
@@ -318,8 +441,8 @@ class TimeSeriesPlotWidget(pg.PlotWidget):
         self._boundary_items.clear()
         self._flag_items.clear()
         self._pick_points.clear()
-        self._set_selection_text("")
-        self._selection_marker.hide()
+        self.clear_shotpoint_selection()
+        self._drag_rect.hide()
 
         flag_map = flags or {}
         style_by_source = _style_lookup(styles)
@@ -982,6 +1105,18 @@ class SourceTabPlotHost(QWidget):
     def all_plots(self) -> list[TimeSeriesPlotWidget]:
         return list(self._plots.values())
 
+    def configure_shotpoint_selection(
+        self,
+        *,
+        default_sequence_no: str,
+        on_add_to_excluded: Callable[[dict[str, set[int]]], None] | None = None,
+    ) -> None:
+        for plot in self._plots.values():
+            plot.configure_shotpoint_selection(
+                default_sequence_no=default_sequence_no,
+                on_add_to_excluded=on_add_to_excluded,
+            )
+
     def capture_image(
         self,
         *,
@@ -1034,6 +1169,28 @@ class PlotCanvas(QWidget):
         self._combined_plot: TimeSeriesPlotWidget | None = None
         self._source_tabs: SourceTabPlotHost | None = None
         self._frame_layout.addWidget(self._direct_host, stretch=1)
+        self._default_sequence_no = ""
+        self._on_add_to_excluded: Callable[[dict[str, set[int]]], None] | None = None
+
+    def configure_shotpoint_selection(
+        self,
+        *,
+        default_sequence_no: str,
+        on_add_to_excluded: Callable[[dict[str, set[int]]], None] | None = None,
+    ) -> None:
+        self._default_sequence_no = default_sequence_no
+        self._on_add_to_excluded = on_add_to_excluded
+        self._apply_shotpoint_selection_config()
+
+    def _apply_shotpoint_selection_config(self) -> None:
+        kwargs = {
+            "default_sequence_no": self._default_sequence_no,
+            "on_add_to_excluded": self._on_add_to_excluded,
+        }
+        if self._combined_plot is not None:
+            self._combined_plot.configure_shotpoint_selection(**kwargs)
+        if self._source_tabs is not None:
+            self._source_tabs.configure_shotpoint_selection(**kwargs)
 
     def set_combine_sources(self, combine: bool) -> None:
         self._combine = combine
@@ -1084,6 +1241,7 @@ class PlotCanvas(QWidget):
             )
             self._direct_layout.addWidget(tabs, stretch=1)
             self._source_tabs = tabs
+        self._apply_shotpoint_selection_config()
 
     def content_widget(self) -> QWidget | None:
         if self._combined_plot is not None:

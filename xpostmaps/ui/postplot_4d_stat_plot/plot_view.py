@@ -715,6 +715,17 @@ class Postplot4DStatPlotView(QWidget):
             auto_y=self._y_axis.auto_y(),
             flags=flags,
         )
+        sequence_nos = combined_sequence_numbers(self._sets)
+        default_sequence = sequence_nos[0] if sequence_nos else ""
+        page._canvas.configure_shotpoint_selection(
+            default_sequence_no=default_sequence,
+            on_add_to_excluded=self._append_excluded_from_plot,
+        )
+
+    def _append_excluded_from_plot(self, grouped: dict[str, set[int]]) -> None:
+        for sequence_no, shotpoints in grouped.items():
+            self._survey_panel.append_excluded_shotpoints(sequence_no, shotpoints)
+        self._on_survey_specs_changed()
 
     def _refresh_current_tab(self) -> None:
         self._render_tab(self.current_kind())

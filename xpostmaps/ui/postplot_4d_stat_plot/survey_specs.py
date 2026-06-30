@@ -30,6 +30,7 @@ from xpostmaps.core.postplot_4d_survey_spec import (
     SurveySpecRow,
     excluded_text_for_sequence,
     failed_details_for_sequence,
+    merge_excluded_shotpoints_text,
     metric_kind_from_str,
     severity_from_str,
     stat_uses_reference,
@@ -199,6 +200,15 @@ class SurveySpecsPanel(QWidget):
 
     def excluded_shotpoints(self) -> dict[str, str]:
         return self._summary.excluded_shotpoints()
+
+    def append_excluded_shotpoints(
+        self,
+        sequence_no: str,
+        shotpoints: set[int],
+    ) -> None:
+        if not shotpoints:
+            return
+        self._summary.append_excluded_shotpoints(sequence_no, shotpoints)
 
     def set_evaluation(
         self,
@@ -545,6 +555,26 @@ class _ResultSummary(QWidget):
         self._table.blockSignals(False)
         self._rebuilding = False
         _fit_table_to_content(self._table, max_body_rows=3)
+
+    def append_excluded_shotpoints(
+        self,
+        sequence_no: str,
+        shotpoints: set[int],
+    ) -> None:
+        if not shotpoints:
+            return
+        current = excluded_text_for_sequence(self._excluded_by_sequence, sequence_no)
+        merged = merge_excluded_shotpoints_text(current, shotpoints)
+        self._excluded_by_sequence[sequence_no] = merged
+        for row_idx, seq in enumerate(self._sequence_nos):
+            if seq != sequence_no:
+                continue
+            edit = self._table.cellWidget(row_idx, self._COL_EXCLUDED)
+            if isinstance(edit, QLineEdit):
+                edit.blockSignals(True)
+                edit.setText(merged)
+                edit.blockSignals(False)
+            break
 
     def _on_excluded_changed(self) -> None:
         if self._rebuilding:
