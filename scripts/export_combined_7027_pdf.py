@@ -96,13 +96,13 @@ def main() -> int:
         specs = iter_4d_stat_plot_page_specs(view, options)
         print(f"[{tag}] page_specs={len(specs)}")
 
-        pages = compose_4d_stat_plot_pages(view, options, dpi=120)
-        print(f"[{tag}] composed pages={len(pages)}")
-        if not pages:
+        composed = compose_4d_stat_plot_pages(view, options, dpi=120)
+        print(f"[{tag}] composed pages={len(composed)}")
+        if not composed:
             failures.append(f"{tag}: no pages composed")
-        for i, pg in enumerate(pages):
-            frac = _non_white(pg)
-            pg.save(str(OUT_DIR / f"{tag}_page{i}.png"))
+        for i, pg in enumerate(composed):
+            frac = _non_white(pg.image)
+            pg.image.save(str(OUT_DIR / f"{tag}_page{i}.png"))
             if frac < 0.01:
                 failures.append(f"{tag} page {i} blank ({frac:.4f})")
         print(f"[{tag}] page non-white fractions sampled; saved previews")

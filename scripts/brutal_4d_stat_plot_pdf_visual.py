@@ -168,11 +168,11 @@ def main() -> int:
                 include_feather=False,
                 include_feather_diff=False,
             )
-            pages = compose_4d_stat_plot_pages(view, options, dpi=dpi)
-            if not pages:
+            composed = compose_4d_stat_plot_pages(view, options, dpi=dpi)
+            if not composed:
                 failures.append(f"{label}: no pages composed")
                 continue
-            page = pages[0]
+            page = composed[0].image
             png_path = OUT_DIR / f"{label}.png"
             page.save(str(png_path))
             fill = _plot_fill_ratio(page)

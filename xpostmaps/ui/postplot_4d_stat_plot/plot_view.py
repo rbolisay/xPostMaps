@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from PySide6.QtCore import Qt, QTimer, Signal
 from PySide6.QtWidgets import (
+    QApplication,
     QCheckBox,
     QFrame,
     QHBoxLayout,
@@ -48,6 +49,7 @@ from xpostmaps.core.postplot_4d_plot_settings import (
     save_survey_specs,
 )
 from xpostmaps.core.postplot_4d_survey_spec import (
+    Severity,
     SurveyEvaluation,
     evaluate_survey_specs,
     flag_map_for_kind,
@@ -535,6 +537,15 @@ class Postplot4DStatPlotView(QWidget):
         page = self._tab_pages.get(kind)
         return page._canvas if page is not None else None
 
+    def focus_plot_kind(self, kind: PlotKind) -> None:
+        """Show *kind* so its canvas is laid out before PDF preview/export capture."""
+        page = self._tab_pages.get(kind)
+        if page is None:
+            return
+        self._tabs.setCurrentWidget(page)
+        self._sync_controls_stack()
+        QApplication.processEvents()
+
     def onscreen_plot_width(self) -> float:
         """Live on-screen plot width of the visible canvas, for PDF marker scaling.
 
@@ -670,6 +681,15 @@ class Postplot4DStatPlotView(QWidget):
             page._canvas.set_combine_sources(checked)
         self._refresh_all_tabs()
 
+    def flags_for_kind(self, kind: PlotKind) -> dict[str, dict[int, Severity]]:
+        """Survey-spec flag colours keyed by plot series label for *kind*."""
+        return flag_map_for_kind(
+            self._sets,
+            self._survey_panel.rows(),
+            kind,
+            excluded_by_sequence=self._survey_panel.excluded_shotpoints(),
+        )
+
     def _render_tab(self, kind: PlotKind) -> None:
         if self._match_row is None:
             return
@@ -681,12 +701,7 @@ class Postplot4DStatPlotView(QWidget):
         boundaries = controls.boundaries()
         y_min, y_max = self._y_axis.y_range()
         series_list = build_combined_plot_series(self._sets, kind)
-        flags = flag_map_for_kind(
-            self._sets,
-            self._survey_panel.rows(),
-            kind,
-            excluded_by_sequence=self._survey_panel.excluded_shotpoints(),
-        )
+        flags = self.flags_for_kind(kind)
         page._canvas.set_combine_sources(self._combine_box.isChecked())
         page._canvas.render(
             series_list,

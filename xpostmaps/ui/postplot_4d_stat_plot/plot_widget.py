@@ -5,7 +5,7 @@ from __future__ import annotations
 import numpy as np
 import pyqtgraph as pg
 from PySide6.QtCore import Qt, QPoint, QTimer
-from PySide6.QtGui import QImage, QPainter, QColor, QFont, QPen, QRegion
+from PySide6.QtGui import QImage, QPainter, QColor, QFont, QPen, QRegion, QBrush
 from PySide6.QtWidgets import (
     QApplication,
     QLineEdit,
@@ -23,6 +23,8 @@ from xpostmaps.core.postplot_4d_plot_data import (
     PlotKind,
     PlotSeries,
     SourceStyleRow,
+    SURVEY_FLAG_ERROR_COLOR,
+    SURVEY_FLAG_WARNING_COLOR,
     boundary_line_values,
 )
 from xpostmaps.core.postplot_4d_survey_spec import Severity
@@ -35,8 +37,8 @@ _PLOT_BG = "#ffffff"
 _PLOT_FG = "#111827"
 # Per-shotpoint flag colours overriding the source marker colour: a shotpoint
 # failing an Error-severity survey spec is drawn red, a Warning one orange.
-_FLAG_ERROR_COLOR = "#ff0000"
-_FLAG_WARNING_COLOR = "#ff8c00"
+_FLAG_ERROR_COLOR = SURVEY_FLAG_ERROR_COLOR
+_FLAG_WARNING_COLOR = SURVEY_FLAG_WARNING_COLOR
 # Minimum on-screen height for an embedded plot. Kept modest so the whole 4D
 # Stat Plot window (plot + bottom tabs + toolbars) still fits on laptop screens
 # without the window growing taller than the display.
@@ -650,6 +652,43 @@ class TimeSeriesPlotWidget(pg.PlotWidget):
             )
         painter.restore()
 
+    def _scatter_marker_color(self, scatter: pg.ScatterPlotItem) -> QColor:
+        brush = scatter.opts.get("brush")
+        if isinstance(brush, QBrush):
+            return QColor(brush.color())
+        pen = scatter.opts.get("pen")
+        if isinstance(pen, QPen):
+            return QColor(pen.color())
+        return QColor(_FLAG_ERROR_COLOR)
+
+    def _paint_pdf_flag_markers(self, painter: QPainter) -> None:
+        """Paint survey-spec flag overlays; scatter can be missed by scene.render()."""
+        if not self._flag_items:
+            return
+        vb = self._viewbox
+        painter.save()
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        for scatter in self._flag_items:
+            xs, ys = scatter.getData()
+            if xs is None or ys is None:
+                continue
+            color = self._scatter_marker_color(scatter)
+            size = float(scatter.opts.get("size", _SOURCE_SYMBOL_SIZE_PX + 2))
+            radius = max(1.0, size / 2.0)
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(color)
+            for x, y in zip(xs, ys, strict=False):
+                pt = vb.mapViewToScene(pg.Point(float(x), float(y)))
+                cx = int(round(pt.x()))
+                cy = int(round(pt.y()))
+                painter.drawEllipse(
+                    int(round(cx - radius)),
+                    int(round(cy - radius)),
+                    int(round(radius * 2)),
+                    int(round(radius * 2)),
+                )
+        painter.restore()
+
     def _render_plot_body_for_pdf(
         self, *, width: int, height: int, dpi: int, screen_ref_width: float | None = None
     ) -> QImage:
@@ -691,6 +730,10 @@ class TimeSeriesPlotWidget(pg.PlotWidget):
         plot_item.layout.activate()
         QApplication.processEvents()
 
+        flag_visibility = [(scatter, scatter.isVisible()) for scatter in self._flag_items]
+        for scatter, _visible in flag_visibility:
+            scatter.setVisible(False)
+
         image = QImage(width, height, QImage.Format.Format_ARGB32)
         image.fill(Qt.GlobalColor.white)
         painter = QPainter(image)
@@ -705,8 +748,12 @@ class TimeSeriesPlotWidget(pg.PlotWidget):
                     QRectF(0, 0, width, height),
                 )
             self._paint_pdf_boundaries(painter)
+            self._paint_pdf_flag_markers(painter)
         finally:
             painter.end()
+
+        for scatter, visible in flag_visibility:
+            scatter.setVisible(visible)
 
         plot_item.setGeometry(prev_rect)
         self._restore_pdf_style()

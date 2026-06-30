@@ -293,6 +293,25 @@ def _plot_page_geometry(
     )
 
 
+@dataclass
+class ComposedPlotPage:
+    spec: PlotPageSpec
+    image: QImage
+
+
+def _screen_ref_width_for_canvas(view: Postplot4DStatPlotView, canvas) -> float:
+    """Plot width for PDF marker scaling; prefer the live canvas being captured."""
+    width = view.onscreen_plot_width()
+    if width > 1.0:
+        return width
+    content = canvas.content_widget() if canvas is not None else None
+    if content is not None and content.width() > 1:
+        return float(content.width())
+    if canvas is not None and canvas.width() > 1:
+        return float(canvas.width())
+    return 0.0
+
+
 def _render_canvas_for_spec(
     view: Postplot4DStatPlotView,
     spec: PlotPageSpec,
@@ -307,6 +326,7 @@ def _render_canvas_for_spec(
     exports every (source, sequence) line with the same data, framing and
     quality as on screen — the export just has more lines.
     """
+    view.focus_plot_kind(spec.kind)
     canvas = view.canvas_for_kind(spec.kind)
     if canvas is None:
         return None, False
@@ -332,6 +352,7 @@ def _render_canvas_for_spec(
         y_min=y_min,
         y_max=y_max,
         auto_y=auto_y,
+        flags=view.flags_for_kind(spec.kind),
     )
     if not spec.combine and spec.export_sources:
         select_tab = getattr(canvas, "select_source_tab", None)
@@ -341,13 +362,19 @@ def _render_canvas_for_spec(
     return canvas, True
 
 
+def _restore_view_plot_state(view: Postplot4DStatPlotView) -> None:
+    """Re-render live plots after PDF preview/export replaced canvases."""
+    view.refresh()
+    QApplication.processEvents()
+
+
 def compose_4d_stat_plot_pages(
     view: Postplot4DStatPlotView,
     options: Postplot4DStatPlotPdfOptions,
     *,
     logo_path: str = "",
     dpi: int | None = None,
-) -> list[QImage]:
+) -> list[ComposedPlotPage]:
     """Render each selected plot type (and source when uncombined) to a page image."""
     match_row = view.match_row()
     if match_row is None:
@@ -364,46 +391,49 @@ def compose_4d_stat_plot_pages(
     logo_file = resolve_logo_path(logo_path)
 
     geom = _plot_page_geometry(options, render_dpi)
-    screen_ref_width = view.onscreen_plot_width()
-    pages: list[QImage] = []
+    pages: list[ComposedPlotPage] = []
 
-    for spec in page_specs:
-        canvas, has_data = _render_canvas_for_spec(
-            view, spec, y_min=y_min, y_max=y_max, auto_y=auto_y
-        )
-        if not has_data or canvas is None:
-            continue
+    try:
+        for spec in page_specs:
+            canvas, has_data = _render_canvas_for_spec(
+                view, spec, y_min=y_min, y_max=y_max, auto_y=auto_y
+            )
+            if not has_data or canvas is None:
+                continue
 
-        time_series_text = time_series_description_for_page(spec, options)
-        plot_image = canvas.capture_image(
-            width=geom.plot_width,
-            height=geom.plot_height,
-            for_pdf=True,
-            dpi=render_dpi,
-            screen_ref_width=screen_ref_width,
-        )
+            screen_ref_width = _screen_ref_width_for_canvas(view, canvas)
+            time_series_text = time_series_description_for_page(spec, options)
+            plot_image = canvas.capture_image(
+                width=geom.plot_width,
+                height=geom.plot_height,
+                for_pdf=True,
+                dpi=render_dpi,
+                screen_ref_width=screen_ref_width or None,
+            )
 
-        page = QImage(geom.page_w, geom.page_h, QImage.Format.Format_ARGB32)
-        page.fill(Qt.GlobalColor.white)
-        painter = QPainter(page)
-        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
-        painter.setRenderHint(QPainter.RenderHint.TextAntialiasing, True)
+            page = QImage(geom.page_w, geom.page_h, QImage.Format.Format_ARGB32)
+            page.fill(Qt.GlobalColor.white)
+            painter = QPainter(page)
+            painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+            painter.setRenderHint(QPainter.RenderHint.TextAntialiasing, True)
 
-        _draw_page_header(
-            painter,
-            content_left=geom.content_left,
-            content_top=geom.content_top,
-            content_width=geom.content_width,
-            dpi=render_dpi,
-            report_title=options.report_title,
-            line_label=line_label,
-            time_series_label=time_series_text,
-            logo_file=logo_file,
-        )
-        plot_top = geom.content_top + geom.header_height
-        painter.drawImage(geom.content_left, plot_top, plot_image)
-        painter.end()
-        pages.append(page)
+            _draw_page_header(
+                painter,
+                content_left=geom.content_left,
+                content_top=geom.content_top,
+                content_width=geom.content_width,
+                dpi=render_dpi,
+                report_title=options.report_title,
+                line_label=line_label,
+                time_series_label=time_series_text,
+                logo_file=logo_file,
+            )
+            plot_top = geom.content_top + geom.header_height
+            painter.drawImage(geom.content_left, plot_top, plot_image)
+            painter.end()
+            pages.append(ComposedPlotPage(spec=spec, image=page))
+    finally:
+        _restore_view_plot_state(view)
 
     if not pages:
         raise ValueError("No plot pages to export.")
@@ -416,10 +446,21 @@ def render_4d_stat_plot_preview_pages(
     *,
     logo_path: str = "",
     dpi: int = STAT_PLOT_PDF_PREVIEW_DPI,
-) -> list[QImage]:
+) -> list[ComposedPlotPage]:
     """Render all export pages at preview resolution."""
     if not resolved_plot_kinds(view, options):
-        return [_preview_placeholder_image("Select at least one plot")]
+        return [
+            ComposedPlotPage(
+                spec=PlotPageSpec(
+                    kind="crossline",
+                    export_sources=[],
+                    combine=True,
+                    page_key="placeholder",
+                    default_time_series_description="",
+                ),
+                image=_preview_placeholder_image("Select at least one plot"),
+            )
+        ]
     try:
         return compose_4d_stat_plot_pages(
             view,
@@ -428,7 +469,18 @@ def render_4d_stat_plot_preview_pages(
             dpi=dpi,
         )
     except ValueError:
-        return [_preview_placeholder_image("Select at least one plot")]
+        return [
+            ComposedPlotPage(
+                spec=PlotPageSpec(
+                    kind="crossline",
+                    export_sources=[],
+                    combine=True,
+                    page_key="placeholder",
+                    default_time_series_description="",
+                ),
+                image=_preview_placeholder_image("Select at least one plot"),
+            )
+        ]
 
 
 def _preview_placeholder_image(message: str) -> QImage:
@@ -449,7 +501,7 @@ def render_4d_stat_plot_preview(
 ) -> QImage:
     """Render a lightweight preview of the first export page."""
     pages = render_4d_stat_plot_preview_pages(view, options, logo_path=logo_path)
-    return pages[0]
+    return pages[0].image
 
 
 def export_4d_stat_plot_pdf(
@@ -485,8 +537,6 @@ def export_4d_stat_plot_pdf(
     geom = _plot_page_geometry(options, export_dpi)
     # Measure the on-screen plot width once, before any export re-render replaces
     # the live plot widgets, so markers keep their on-screen size on every page.
-    screen_ref_width = view.onscreen_plot_width()
-
     layout = page_layout_for(options.paper, options.landscape)
     writer = QPdfWriter(str(output_path))
     writer.setResolution(export_dpi)
@@ -517,6 +567,7 @@ def export_4d_stat_plot_pdf(
                 writer.newPage()
             rendered_any = True
 
+            screen_ref_width = _screen_ref_width_for_canvas(view, canvas)
             painter.fillRect(page_rect, Qt.GlobalColor.white)
             time_series_text = time_series_description_for_page(spec, options)
             _draw_page_header(
@@ -535,13 +586,14 @@ def export_4d_stat_plot_pdf(
                 height=geom.plot_height,
                 for_pdf=True,
                 dpi=export_dpi,
-                screen_ref_width=screen_ref_width,
+                screen_ref_width=screen_ref_width or None,
             )
             plot_x = origin_x + geom.content_left
             plot_y = origin_y + geom.content_top + geom.header_height
             painter.drawImage(plot_x, plot_y, plot_image)
     finally:
         painter.end()
+        _restore_view_plot_state(view)
 
     if not rendered_any:
         raise ValueError("No plot pages to export.")

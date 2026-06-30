@@ -13,6 +13,8 @@ from xpostmaps.core.postplot_4d_plot_data import (
     PlotKind,
     SourceStyleRow,
     default_source_styles,
+    is_flag_reserved_source_color,
+    should_exclude_flag_colors_from_sources,
 )
 from xpostmaps.core.postplot_4d_survey_spec import (
     Severity,
@@ -248,11 +250,27 @@ def save_plot_kind_settings(
     _write_plot_blob(plot_key, blob)
 
 
+def _resolve_source_style_row(
+    source_no: str,
+    template: SourceStyleRow | None,
+    default_row: SourceStyleRow,
+    *,
+    exclude_flag_colors: bool,
+) -> SourceStyleRow:
+    if template is None:
+        return default_row
+    color = template.color
+    if exclude_flag_colors and is_flag_reserved_source_color(color):
+        color = default_row.color
+    return replace(template, source_no=source_no, color=color)
+
+
 def resolve_source_styles_for_line(
     source_nos: list[str],
     kind: PlotKind,
 ) -> list[SourceStyleRow]:
     """Apply saved global styles by source label (G01, G02, …)."""
+    exclude = should_exclude_flag_colors_from_sources(source_nos)
     defaults = default_source_styles(source_nos)
     default_by_no = {row.source_no: row for row in defaults}
     saved = load_saved_kind_settings(kind)
@@ -262,11 +280,14 @@ def resolve_source_styles_for_line(
     saved_by_no = {row.source_no: row for row in saved_sources}
     resolved: list[SourceStyleRow] = []
     for source_no in source_nos:
-        template = saved_by_no.get(source_no)
-        if template is None:
-            resolved.append(default_by_no[source_no])
-            continue
-        resolved.append(replace(template, source_no=source_no))
+        resolved.append(
+            _resolve_source_style_row(
+                source_no,
+                saved_by_no.get(source_no),
+                default_by_no[source_no],
+                exclude_flag_colors=exclude,
+            )
+        )
     return resolved
 
 
@@ -276,6 +297,7 @@ def resolve_source_styles_for_plot(
     kind: PlotKind,
 ) -> list[SourceStyleRow]:
     """Plot-specific source styles, falling back to global saved styles."""
+    exclude = should_exclude_flag_colors_from_sources(source_nos)
     defaults = default_source_styles(source_nos)
     default_by_no = {row.source_no: row for row in defaults}
     saved = load_saved_plot_kind_settings(plot_key, kind)
@@ -285,11 +307,14 @@ def resolve_source_styles_for_plot(
     saved_by_no = {row.source_no: row for row in saved_sources}
     resolved: list[SourceStyleRow] = []
     for source_no in source_nos:
-        template = saved_by_no.get(source_no)
-        if template is None:
-            resolved.append(default_by_no[source_no])
-            continue
-        resolved.append(replace(template, source_no=source_no))
+        resolved.append(
+            _resolve_source_style_row(
+                source_no,
+                saved_by_no.get(source_no),
+                default_by_no[source_no],
+                exclude_flag_colors=exclude,
+            )
+        )
     return resolved
 
 

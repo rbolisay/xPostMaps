@@ -6,7 +6,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-from PySide6.QtCore import Qt, QTimer
+from PySide6.QtCore import Qt, QTimer, QSize
 from PySide6.QtGui import QPixmap
 from PySide6.QtWidgets import (
     QApplication,
@@ -39,7 +39,6 @@ from xpostmaps.core.postplot_4d_plot_pdf import (
     Postplot4DStatPlotPdfOptions,
     default_4d_stat_pdf_filename,
     export_4d_stat_plot_pdf,
-    iter_4d_stat_plot_page_specs,
     render_4d_stat_plot_preview_pages,
     resolve_4d_stat_output_path,
     resolved_plot_kinds,
@@ -319,6 +318,22 @@ class Postplot4DStatPlotPdfDialog:
                 prev_page_btn.setEnabled(preview_index > 0)
                 next_page_btn.setEnabled(preview_index < total - 1)
 
+            def _preview_display_size() -> QSize:
+                viewport = preview_scroll.viewport()
+                width = max(
+                    preview_label.width(),
+                    viewport.width() - 8 if viewport is not None else 0,
+                    preview_label.minimumWidth(),
+                    420,
+                )
+                height = max(
+                    preview_label.height(),
+                    viewport.height() - 48 if viewport is not None else 0,
+                    preview_label.minimumHeight(),
+                    360,
+                )
+                return QSize(width, height)
+
             def _show_preview_page() -> None:
                 if not preview_pages:
                     preview_label.setText("Select at least one plot type")
@@ -333,8 +348,9 @@ class Postplot4DStatPlotPdfDialog:
                     _sync_page_nav()
                     return
                 pix = QPixmap.fromImage(image)
+                target = _preview_display_size()
                 scaled = pix.scaled(
-                    preview_label.size(),
+                    target,
                     Qt.AspectRatioMode.KeepAspectRatio,
                     Qt.TransformationMode.SmoothTransformation,
                 )
@@ -346,21 +362,22 @@ class Postplot4DStatPlotPdfDialog:
                 nonlocal preview_pages, preview_index, page_specs
                 _store_current_description()
                 opts = current_options()
-                page_specs = iter_4d_stat_plot_page_specs(plot_view, opts)
-                if not page_specs:
-                    preview_pages = []
-                    preview_index = 0
-                    _load_description_for_current_page()
-                    _show_preview_page()
-                    return
-                preview_index = max(0, min(preview_index, len(page_specs) - 1))
-                preview_pages = render_4d_stat_plot_preview_pages(
+                composed = render_4d_stat_plot_preview_pages(
                     plot_view,
                     opts,
                     logo_path=logo_path,
                 )
+                page_specs = [item.spec for item in composed]
+                preview_pages = [item.image for item in composed]
+                if not page_specs:
+                    preview_index = 0
+                    _load_description_for_current_page()
+                    _show_preview_page()
+                    return
+                preview_index = max(0, min(preview_index, len(preview_pages) - 1))
                 _load_description_for_current_page()
                 _show_preview_page()
+                QTimer.singleShot(0, _show_preview_page)
 
             def show_previous_page() -> None:
                 nonlocal preview_index
@@ -373,7 +390,7 @@ class Postplot4DStatPlotPdfDialog:
 
             def show_next_page() -> None:
                 nonlocal preview_index
-                if preview_index >= len(page_specs) - 1:
+                if preview_index >= len(preview_pages) - 1:
                     return
                 _store_current_description()
                 preview_index += 1

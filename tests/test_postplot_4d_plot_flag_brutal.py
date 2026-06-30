@@ -313,10 +313,17 @@ def test_pdf_export_with_flags_unchanged(qapp, tmp_path: Path) -> None:
     export_4d_stat_plot_pdf(view, pdf_path, options)
     assert pdf_path.is_file()
     assert pdf_path.stat().st_size > 5000
+    qapp.processEvents()
+
+    canvas = view.canvas_for_kind("radial")
+    assert canvas is not None
+    assert canvas._combined_plot is not None
+    assert canvas._combined_plot._flag_items, "flags should restore after PDF export"
 
     image = canvas.capture_image(width=900, height=420, for_pdf=True, dpi=120)
     assert not image.isNull()
     assert _non_white_fraction(image) > 0.01
+    assert _has_flag_colored_pixels(image), "PDF capture should include flag overlay colours"
 
 
 def _non_white_fraction(image: QImage) -> float:
@@ -333,3 +340,15 @@ def _non_white_fraction(image: QImage) -> float:
             if color.red() < 250 or color.green() < 250 or color.blue() < 250:
                 non_white += 1
     return non_white / max(sampled, 1)
+
+
+def _has_flag_colored_pixels(image: QImage) -> bool:
+    """True when the raster contains strong red/orange survey-spec flag pixels."""
+    width = image.width()
+    height = image.height()
+    for y in range(0, height, 2):
+        for x in range(0, width, 2):
+            color = image.pixelColor(x, y)
+            if color.red() >= 200 and color.green() <= 160 and color.blue() <= 80:
+                return True
+    return False

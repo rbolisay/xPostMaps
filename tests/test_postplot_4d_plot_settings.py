@@ -1,7 +1,7 @@
 """Tests for persisted 4D Stat plot style settings."""
 
 from xpostmaps.core.models import LineStyle
-from xpostmaps.core.postplot_4d_plot_data import SourceStyleRow
+from xpostmaps.core.postplot_4d_plot_data import SourceStyleRow, default_source_styles
 from xpostmaps.core.postplot_4d_plot_settings import (
     PlotViewSettings,
     boundary_row_from_dict,
@@ -181,3 +181,41 @@ def test_plot_specific_kind_settings(tmp_path, monkeypatch) -> None:
     assert styles[0].color == "#aabbcc"
     boundaries = resolve_boundaries_for_plot(key, "inline")
     assert len(boundaries) == 2
+
+
+def test_default_source_styles_avoid_flag_colors_when_combined() -> None:
+    styles = default_source_styles(["G01", "G02", "G03"])
+    reserved = {"#ff0000", "#ff8c00", "#ef4444", "#f97316"}
+    for row in styles:
+        assert row.color.lower() not in {color.lower() for color in reserved}
+
+
+def test_default_source_styles_avoid_flag_colors_for_multi_sequence_keys() -> None:
+    keys = ["G01 \u00b7 Seq 070", "G01 \u00b7 Seq 071", "G02 \u00b7 Seq 070"]
+    styles = default_source_styles(keys)
+    reserved = {"#ff0000", "#ff8c00", "#ef4444", "#f97316"}
+    for row in styles:
+        assert row.color.lower() not in {color.lower() for color in reserved}
+
+
+def test_resolve_source_styles_remaps_saved_flag_colors_when_combined(
+    tmp_path, monkeypatch
+) -> None:
+    settings_path = tmp_path / "settings.json"
+    monkeypatch.setattr(
+        "xpostmaps.core.postplot_4d_plot_settings._SETTINGS_PATH",
+        settings_path,
+    )
+    save_kind_settings(
+        "crossline",
+        [
+            SourceStyleRow(source_no="G01", color="#111111"),
+            SourceStyleRow(source_no="G02", color="#ef4444"),
+            SourceStyleRow(source_no="G03", color="#f97316"),
+        ],
+        [],
+    )
+    styles = resolve_source_styles_for_line(["G01", "G02", "G03"], "crossline")
+    assert styles[0].color == "#111111"
+    assert styles[1].color == "#3b82f6"
+    assert styles[2].color == "#a855f7"

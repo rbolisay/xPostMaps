@@ -73,7 +73,7 @@ def test_render_preview_pages_without_selection_returns_placeholder(qapp) -> Non
     )
     pages = render_4d_stat_plot_preview_pages(view, options)
     assert len(pages) == 1
-    assert not pages[0].isNull()
+    assert not pages[0].image.isNull()
 
 
 def test_resolve_4d_stat_output_path_adds_extension() -> None:

@@ -39,6 +39,11 @@ PLOT_KIND_UNITS: dict[PlotKind, str] = {
     "feather_diff": "degree",
 }
 
+# Survey-spec flag overlay colours on time-series plots (do not assign as source defaults
+# when several sequences or combined sources share one plot).
+SURVEY_FLAG_ERROR_COLOR = "#ff0000"
+SURVEY_FLAG_WARNING_COLOR = "#ff8c00"
+
 DEFAULT_SOURCE_COLORS: tuple[str, ...] = (
     "#22c55e",
     "#3b82f6",
@@ -48,6 +53,30 @@ DEFAULT_SOURCE_COLORS: tuple[str, ...] = (
     "#14b8a6",
     "#eab308",
     "#ec4899",
+)
+
+# Palette used when multiple sources/sequences share a plot so red/orange stay reserved
+# for survey-spec Error/Warning markers.
+DEFAULT_SOURCE_COLORS_FLAG_SAFE: tuple[str, ...] = (
+    "#22c55e",
+    "#3b82f6",
+    "#a855f7",
+    "#14b8a6",
+    "#eab308",
+    "#ec4899",
+    "#6366f1",
+    "#06b6d4",
+    "#84cc16",
+    "#8b5cf6",
+)
+
+_FLAG_RESERVED_SOURCE_COLORS: frozenset[str] = frozenset(
+    {
+        SURVEY_FLAG_ERROR_COLOR,
+        SURVEY_FLAG_WARNING_COLOR,
+        "#ef4444",
+        "#f97316",
+    }
 )
 
 DEFAULT_BOUNDARY_COLOR = "#3b82f6"
@@ -350,10 +379,30 @@ def compute_series_stats(source_no: str, values: list[float]) -> SeriesStats | N
     )
 
 
+def is_flag_reserved_source_color(color: str) -> bool:
+    """True when *color* matches survey-spec flag or legacy default red/orange."""
+    return color.strip().lower() in {item.lower() for item in _FLAG_RESERVED_SOURCE_COLORS}
+
+
+def should_exclude_flag_colors_from_sources(source_nos: list[str]) -> bool:
+    """Multiple sources on one plot, or multi-sequence combined keys."""
+    if len(source_nos) > 1:
+        return True
+    return any("\u00b7 Seq " in source_no for source_no in source_nos)
+
+
+def _source_color_palette(*, exclude_flag_colors: bool) -> tuple[str, ...]:
+    if exclude_flag_colors:
+        return DEFAULT_SOURCE_COLORS_FLAG_SAFE
+    return DEFAULT_SOURCE_COLORS
+
+
 def default_source_styles(sources: list[str]) -> list[SourceStyleRow]:
+    exclude = should_exclude_flag_colors_from_sources(sources)
+    palette = _source_color_palette(exclude_flag_colors=exclude)
     rows: list[SourceStyleRow] = []
     for index, source_no in enumerate(sources):
-        color = DEFAULT_SOURCE_COLORS[index % len(DEFAULT_SOURCE_COLORS)]
+        color = palette[index % len(palette)]
         rows.append(SourceStyleRow(source_no=source_no, color=color))
     return rows
 
