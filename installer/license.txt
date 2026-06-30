@@ -1,9 +1,57 @@
-TierMaps - Navigation PostMaps Viewer
-Copyright (c) R. Bolisay
+END-USER LICENSE AGREEMENT
 
-Permission is hereby granted to use this software for internal business purposes.
-Redistribution outside your organization requires prior written permission from the copyright holder.
+IMPORTANT: PLEASE READ THIS LICENSE CAREFULLY BEFORE USING THIS SOFTWARE.
 
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED,
-INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A
-PARTICULAR PURPOSE AND NONINFRINGEMENT.
+This End-User License Agreement ("EULA") is a legal agreement between you (either
+an individual or a single entity) and the software publisher for the software
+product identified above, which includes computer software and may include associated
+media, printed materials, and online or electronic documentation ("Software").
+
+By installing, copying, or otherwise using the Software, you agree to be bound by
+the terms of this EULA. If you do not agree to the terms of this EULA, do not install
+or use the Software.
+
+1. GRANT OF LICENSE
+   The Software publisher grants you a non-exclusive, non-transferable license to
+   install and use one copy of the Software on a single computer for your internal
+   business or personal use, subject to the terms of this EULA.
+
+2. RESTRICTIONS
+   You may not:
+   (a) reverse engineer, decompile, or disassemble the Software, except to the
+       extent expressly permitted by applicable law;
+   (b) rent, lease, lend, sell, redistribute, or sublicense the Software;
+   (c) remove or alter any proprietary notices or labels on the Software;
+   (d) use the Software in any manner that violates applicable laws or regulations.
+
+3. OWNERSHIP
+   The Software is licensed, not sold. The publisher retains all right, title, and
+   interest in and to the Software, including all intellectual property rights.
+
+4. TERMINATION
+   This EULA is effective until terminated. Your rights under this EULA will
+   terminate automatically without notice if you fail to comply with any term of
+   this EULA. Upon termination, you must destroy all copies of the Software in
+   your possession.
+
+5. DISCLAIMER OF WARRANTIES
+   THE SOFTWARE IS PROVIDED "AS IS" WITHOUT WARRANTY OF ANY KIND, EITHER EXPRESS OR
+   IMPLIED, INCLUDING BUT NOT LIMITED TO THE IMPLIED WARRANTIES OF MERCHANTABILITY,
+   FITNESS FOR A PARTICULAR PURPOSE, AND NON-INFRINGEMENT. THE ENTIRE RISK AS TO
+   THE QUALITY AND PERFORMANCE OF THE SOFTWARE IS WITH YOU.
+
+6. LIMITATION OF LIABILITY
+   IN NO EVENT SHALL THE PUBLISHER BE LIABLE FOR ANY SPECIAL, INCIDENTAL, INDIRECT,
+   OR CONSEQUENTIAL DAMAGES WHATSOEVER (INCLUDING, WITHOUT LIMITATION, DAMAGES FOR
+   LOSS OF BUSINESS PROFITS, BUSINESS INTERRUPTION, LOSS OF BUSINESS INFORMATION, OR
+   ANY OTHER PECUNIARY LOSS) ARISING OUT OF THE USE OF OR INABILITY TO USE THE
+   SOFTWARE, EVEN IF THE PUBLISHER HAS BEEN ADVISED OF THE POSSIBILITY OF SUCH
+   DAMAGES.
+
+7. GOVERNING LAW
+   This EULA shall be governed by the laws of the jurisdiction in which the
+   publisher is located, without regard to conflict-of-law principles.
+
+If you have questions concerning this EULA, contact the software publisher.
+
+Copyright (c) R. Bolisay. All rights reserved.
