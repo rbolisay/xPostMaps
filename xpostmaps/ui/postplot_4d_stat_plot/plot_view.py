@@ -450,7 +450,7 @@ class Postplot4DStatPlotView(QWidget):
 
         self._survey_panel.set_sequences(
             sequence_nos,
-            load_excluded_shotpoints(),
+            load_excluded_shotpoints(self._plot_settings_key),
         )
 
         show_feather = feather_tab_available(
@@ -633,7 +633,10 @@ class Postplot4DStatPlotView(QWidget):
     def _autosave_survey_specs(self) -> None:
         """Persist global survey specs immediately (shared across all sequences)."""
         save_survey_specs(self._survey_panel.rows())
-        save_excluded_shotpoints(self._survey_panel.excluded_shotpoints())
+        save_excluded_shotpoints(
+            self._survey_panel.excluded_shotpoints(),
+            self._plot_settings_key,
+        )
 
     def _on_survey_specs_changed(self) -> None:
         self._autosave_survey_specs()

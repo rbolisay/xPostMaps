@@ -307,6 +307,32 @@ class TestSurveySpecsPanel(unittest.TestCase):
         self.assertTrue(stat_uses_absolute(StatType.MAX_VALUE))
         self.assertFalse(stat_uses_absolute(StatType.MAX_PCT_FAILURE))
 
+    def test_excluded_shotpoints_survives_evaluation_refresh(self) -> None:
+        """Typing excluded shotpoints must not rebuild the line edit on each keystroke."""
+        from PySide6.QtWidgets import QLineEdit
+
+        _ensure_qapp()
+        panel = SurveySpecsPanel()
+        panel.set_sequences(["3047"], {"3047": ""})
+        summary = panel._summary
+        edit = summary._table.cellWidget(0, summary._COL_EXCLUDED)
+        self.assertIsInstance(edit, QLineEdit)
+
+        edit.setText("1001")
+        evaluation = evaluate_survey_specs(
+            [],
+            [SurveySpecRow(metric="radial", statistic=StatType.MAX_VALUE, stat_value=10.0)],
+            excluded_by_sequence={"3047": "1001"},
+        )
+        summary.set_evaluation(evaluation, ["3047"])
+
+        same_edit = summary._table.cellWidget(0, summary._COL_EXCLUDED)
+        self.assertIs(edit, same_edit)
+        self.assertEqual(edit.text(), "1001")
+
+        edit.setText("1001, 1005-1010")
+        self.assertEqual(panel.excluded_shotpoints()["3047"], "1001, 1005-1010")
+
 
 @unittest.skipUnless(DB_7027.is_file(), f"database not found: {DB_7027}")
 class TestSurveySpecReal7027(unittest.TestCase):

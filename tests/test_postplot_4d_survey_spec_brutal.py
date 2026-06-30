@@ -24,10 +24,13 @@ from xpostmaps.core.postplot_4d_survey_spec import (
     flag_map_for_kind,
     format_shotpoint_ranges,
     parse_excluded_shotpoints,
+    excluded_shotpoints_for_sequence,
+    excluded_text_for_sequence,
 )
 
 ROOT = Path(__file__).resolve().parents[1]
 DB_7027 = ROOT / "data" / "7027.db"
+DB_10221 = ROOT / "data" / "10221.db"
 
 
 def _match(
@@ -691,6 +694,138 @@ class TestParseExcludedShotpoints(unittest.TestCase):
     def test_range_and_list(self) -> None:
         self.assertEqual(parse_excluded_shotpoints("1001, 1005-1007"), {1001, 1005, 1006, 1007})
         self.assertEqual(parse_excluded_shotpoints("1007-1005"), {1005, 1006, 1007})
+
+    def test_ascending_and_descending_ranges_equivalent(self) -> None:
+        self.assertEqual(
+            parse_excluded_shotpoints("1001-1010"),
+            set(range(1001, 1011)),
+        )
+        self.assertEqual(parse_excluded_shotpoints("1010-1001"), set(range(1001, 1011)))
+
+    def test_spaced_and_unicode_dashes(self) -> None:
+        self.assertEqual(parse_excluded_shotpoints("1001 - 1010"), set(range(1001, 1011)))
+        self.assertEqual(parse_excluded_shotpoints("1010 \u2013 1001"), set(range(1001, 1011)))
+
+    def test_sequence_alias_lookup(self) -> None:
+        mapping = {"70": "1481-1461"}
+        self.assertEqual(excluded_text_for_sequence(mapping, "070"), "1481-1461")
+        self.assertEqual(
+            excluded_shotpoints_for_sequence(mapping, "070"),
+            set(range(1461, 1482)),
+        )
+
+
+@unittest.skipUnless(DB_10221.is_file(), f"database not found: {DB_10221}")
+class TestSurveySpec10221Exclude070(unittest.TestCase):
+    """Real 10221 / 1065P1A-070 navplan radial exclusion (user screenshot case)."""
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        from xpostmaps.core.database import Database
+        from xpostmaps.core.postplot_4d_diff import calculate_match_diff_rows
+        from xpostmaps.core.postplot_4d_matching import build_postplot_4d_rows
+        from xpostmaps.core.postplot_4d_plot_data import SequenceDiffSet
+
+        db = Database(DB_10221)
+        settings, map_data = db.load_project("10221", with_positions=True)
+        settings.postplot_4d_baseline = "navplan"
+        positions = db.load_positions("10221")
+        rows = build_postplot_4d_rows(map_data, settings, "navplan")
+        match = next(
+            r
+            for r in rows
+            if r.sequence_id.startswith("70.1065P1A-070.a070.p190")
+        )
+        diff_rows = db.load_postplot_4d_diffs(
+            "10221", match.baseline_kind, match.sequence_id
+        )
+        if not diff_rows:
+            diff_rows = calculate_match_diff_rows(
+                map_data,
+                settings,
+                positions,
+                match,
+                database=db,
+                project_name="10221",
+            )
+        cls.diff_set = SequenceDiffSet(match_row=match, diff_rows=diff_rows)
+        cls.excluded = parse_excluded_shotpoints("1481-1461")
+        cls.specs = [
+            SurveySpecRow(
+                statistic=StatType.MAX_VALUE,
+                metric="radial",
+                stat_value=12.0,
+                absolute=True,
+                severity=Severity.WARNING,
+            ),
+            SurveySpecRow(
+                statistic=StatType.MAX_CONSECUTIVE_FAILED,
+                metric="radial",
+                reference_value=10.0,
+                stat_value=8.0,
+                severity=Severity.ERROR,
+            ),
+            SurveySpecRow(
+                statistic=StatType.MAX_PCT_FAILURE,
+                metric="radial",
+                reference_value=7.5,
+                stat_value=10.0,
+                severity=Severity.ERROR,
+            ),
+        ]
+
+    def test_without_exclusion_matches_three_failures(self) -> None:
+        evaluation = evaluate_survey_specs([self.diff_set], self.specs, {})
+        self.assertFalse(evaluation.accepted)
+        self.assertTrue(evaluation.has_warning)
+        self.assertEqual(len(evaluation.failed_details), 3)
+
+    def test_exclusion_accepts_with_one_warning(self) -> None:
+        excluded_map = {"070": "1481-1461"}
+        evaluation = evaluate_survey_specs(
+            [self.diff_set], self.specs, excluded_by_sequence=excluded_map
+        )
+        self.assertTrue(evaluation.accepted)
+        self.assertTrue(evaluation.has_warning)
+        self.assertEqual(len(evaluation.failed_details), 1)
+
+    def test_exclusion_alias_key_70_equivalent_to_070(self) -> None:
+        flags_070 = flag_map_for_kind(
+            [self.diff_set],
+            self.specs,
+            "radial",
+            excluded_by_sequence={"070": "1481-1461"},
+        )
+        flags_70 = flag_map_for_kind(
+            [self.diff_set],
+            self.specs,
+            "radial",
+            excluded_by_sequence={"70": "1481-1461"},
+        )
+        self.assertEqual(flags_070, flags_70)
+
+    def test_no_flagged_shotpoints_inside_excluded_range(self) -> None:
+        flags = flag_map_for_kind(
+            [self.diff_set],
+            self.specs,
+            "radial",
+            excluded_by_sequence={"070": "1481-1461"},
+        )
+        flagged = {sp for bucket in flags.values() for sp in bucket}
+        overlap = flagged & self.excluded
+        self.assertEqual(overlap, set(), f"excluded SPs still flagged: {sorted(overlap)}")
+
+    def test_only_sp_1459_warns_after_exclusion(self) -> None:
+        flags = flag_map_for_kind(
+            [self.diff_set],
+            self.specs,
+            "radial",
+            excluded_by_sequence={"070": "1481-1461"},
+        )
+        g01 = flags.get("G01", {})
+        self.assertEqual(set(g01.keys()), {1459})
+        self.assertEqual(g01[1459], Severity.WARNING)
+        self.assertEqual(flags.get("G02", {}), {})
 
 
 @unittest.skipUnless(DB_7027.is_file(), f"database not found: {DB_7027}")

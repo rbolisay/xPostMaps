@@ -9,6 +9,7 @@ sequence/combined-sequence test, while ``Warning`` rows only annotate.
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from enum import Enum
 
@@ -382,6 +383,68 @@ def _combined_sequence_label(sets: list[SequenceDiffSet]) -> str:
     return ", ".join(numbers) if numbers else "—"
 
 
+def _sequence_number_aliases(sequence_no: str) -> list[str]:
+    """Equivalent sequence labels (``070`` / ``70``) for exclusion lookup."""
+    text = (sequence_no or "").strip()
+    if not text:
+        return []
+    aliases = [text]
+    if text.isdigit():
+        bare = str(int(text))
+        if bare not in aliases:
+            aliases.append(bare)
+        padded = bare.zfill(len(text))
+        if padded not in aliases:
+            aliases.append(padded)
+    return aliases
+
+
+def excluded_text_for_sequence(
+    excluded_map: dict[str, str],
+    sequence_no: str,
+) -> str:
+    """Return exclusion text for *sequence_no*, matching ``070`` and ``70`` keys."""
+    for key in _sequence_number_aliases(sequence_no):
+        text = (excluded_map.get(key) or "").strip()
+        if text:
+            return text
+    return ""
+
+
+def excluded_shotpoints_for_sequence(
+    excluded_map: dict[str, str],
+    sequence_no: str,
+) -> set[int]:
+    """Parsed exclusion set for *sequence_no* (alias-aware)."""
+    return parse_excluded_shotpoints(excluded_text_for_sequence(excluded_map, sequence_no))
+
+
+def _strip_excluded_flags(
+    sets: list[SequenceDiffSet],
+    flags: dict[str, dict[int, Severity]],
+    excluded_map: dict[str, str],
+) -> None:
+    """Remove any flagged shotpoints that fall inside an excluded range."""
+    if not flags or not excluded_map:
+        return
+    multi = len(sets) > 1
+    for diff_set in ordered_sequence_sets(sets):
+        sequence_no = diff_set.match_row.sequence_no
+        excluded = excluded_shotpoints_for_sequence(excluded_map, sequence_no)
+        if not excluded:
+            continue
+        for source_no in unique_sources_from_diff_rows(diff_set.diff_rows):
+            key = combined_source_key(source_no, sequence_no) if multi else source_no
+            bucket = flags.get(key)
+            if not bucket:
+                continue
+            for shotpoint in list(bucket.keys()):
+                if shotpoint in excluded:
+                    del bucket[shotpoint]
+            if not bucket:
+                del flags[key]
+
+
 def _iter_source_series(
     sets: list[SequenceDiffSet],
     kind: PlotKind,
@@ -394,7 +457,7 @@ def _iter_source_series(
     series: list[tuple[str, str, list[int], list[float]]] = []
     for diff_set in ordered_sequence_sets(sets):
         sequence_no = diff_set.match_row.sequence_no
-        excluded = parse_excluded_shotpoints(excluded_map.get(sequence_no, ""))
+        excluded = excluded_shotpoints_for_sequence(excluded_map, sequence_no)
         for source_no in unique_sources_from_diff_rows(diff_set.diff_rows):
             built = build_plot_series(
                 diff_set.diff_rows,
@@ -537,6 +600,7 @@ def flag_map_for_kind(
                     continue
                 if spec.severity == Severity.ERROR or shotpoint not in bucket:
                     bucket[shotpoint] = spec.severity
+    _strip_excluded_flags(sets, flags, excluded_map)
     return flags
 
 
@@ -806,26 +870,34 @@ def format_statistic(statistic: StatType, value: float | None) -> str:
     return f"{value:.2f}"
 
 
+_EXCLUDED_RANGE_RE = re.compile(r"^\s*(\d+)\s*-\s*(\d+)\s*$")
+# Unicode dash/minus variants often pasted from Word, Excel, or PDFs.
+_EXCLUDED_DASH_CHARS = re.compile(r"[\u2010-\u2015\u2212\uFE58\uFE63\uFF0D]")
+
+
+def _normalize_excluded_shotpoints_text(text: str) -> str:
+    """Normalize user-entered exclusion text before token parsing."""
+    return _EXCLUDED_DASH_CHARS.sub("-", (text or "").strip())
+
+
 def parse_excluded_shotpoints(text: str) -> set[int]:
-    """Parse shotpoint exclusion text (e.g. ``1001, 1002, 1005-1010``)."""
+    """Parse shotpoint exclusion text (e.g. ``1001, 1002, 1005-1010``).
+
+    Ranges may be ascending or descending (``1010-1001`` == ``1001-1010``).
+    Spaced hyphens and common Unicode dash characters are accepted.
+    """
     excluded: set[int] = set()
-    for part in (text or "").split(","):
+    normalized = _normalize_excluded_shotpoints_text(text)
+    for part in normalized.split(","):
         token = part.strip()
         if not token:
             continue
-        if "-" in token:
-            bounds = token.split("-", 1)
-            if len(bounds) != 2:
-                continue
-            try:
-                start = int(bounds[0].strip())
-                end = int(bounds[1].strip())
-            except ValueError:
-                continue
-            if start <= end:
-                excluded.update(range(start, end + 1))
-            else:
-                excluded.update(range(end, start + 1))
+        range_match = _EXCLUDED_RANGE_RE.match(token)
+        if range_match is not None:
+            start = int(range_match.group(1))
+            end = int(range_match.group(2))
+            lo, hi = (start, end) if start <= end else (end, start)
+            excluded.update(range(lo, hi + 1))
             continue
         try:
             excluded.add(int(token))

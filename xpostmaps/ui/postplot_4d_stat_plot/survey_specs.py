@@ -10,6 +10,7 @@ from PySide6.QtWidgets import (
     QHeaderView,
     QLabel,
     QLineEdit,
+    QPushButton,
     QSizePolicy,
     QTableWidget,
     QTableWidgetItem,
@@ -27,6 +28,7 @@ from xpostmaps.core.postplot_4d_survey_spec import (
     StatType,
     SurveyEvaluation,
     SurveySpecRow,
+    excluded_text_for_sequence,
     failed_details_for_sequence,
     metric_kind_from_str,
     severity_from_str,
@@ -35,6 +37,7 @@ from xpostmaps.core.postplot_4d_survey_spec import (
     stat_type_from_str,
 )
 from xpostmaps.ui.dialogs.legend_dialog import (
+    _apply_table_cell_button_width,
     _configure_legend_table,
     _legend_section_toolbar_button,
     _table_cell_button,
@@ -113,7 +116,7 @@ def _make_combo(items: list[tuple[str, object]], current: object) -> QComboBox:
 def _make_excluded_edit(text: str) -> QLineEdit:
     edit = QLineEdit(text)
     edit.setStyleSheet(_EXCLUDED_STYLE)
-    edit.setPlaceholderText("e.g. 1001, 1005-1010")
+    edit.setPlaceholderText("e.g. 1001, 1005-1010 (reverse OK)")
     edit.setFixedHeight(26)
     edit.setMinimumWidth(140)
     return edit
@@ -386,6 +389,7 @@ class _ResultSummary(QWidget):
         self._sequence_nos: list[str] = []
         self._excluded_by_sequence: dict[str, str] = {}
         self._failed_details: list[FailedSpecDetail] = []
+        self._rebuilding = False
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(8, 4, 8, 8)
@@ -426,7 +430,9 @@ class _ResultSummary(QWidget):
             if isinstance(edit, QLineEdit):
                 mapping[sequence_no] = edit.text().strip()
             else:
-                mapping[sequence_no] = self._excluded_by_sequence.get(sequence_no, "")
+                mapping[sequence_no] = excluded_text_for_sequence(
+                    self._excluded_by_sequence, sequence_no
+                )
         return mapping
 
     def set_evaluation(
@@ -446,7 +452,10 @@ class _ResultSummary(QWidget):
             self._failed_details = []
             self._overall.setText("Acceptance: — (no specs)")
             self._overall.setStyleSheet("color: #8b949e; font-size: 12px;")
-            self._rebuild_rows()
+            if self._table.rowCount() != len(sequence_nos):
+                self._rebuild_rows()
+            else:
+                self._update_evaluation_display()
             return
 
         self._failed_details = list(evaluation.failed_details)
@@ -459,7 +468,31 @@ class _ResultSummary(QWidget):
         else:
             self._overall.setText("Acceptance: FAIL")
             self._overall.setStyleSheet(f"font-size: 13px; {_FAIL_STYLE}")
-        self._rebuild_rows()
+        if self._table.rowCount() != len(sequence_nos):
+            self._rebuild_rows()
+        else:
+            self._update_evaluation_display()
+
+    def _failed_button_for_row(self, row_idx: int) -> QPushButton | None:
+        container = self._table.cellWidget(row_idx, self._COL_FAILED)
+        if container is None:
+            return None
+        btn = container.findChild(QPushButton)
+        return btn if isinstance(btn, QPushButton) else None
+
+    def _update_evaluation_display(self) -> None:
+        """Refresh acceptance and View buttons without replacing excluded edits."""
+        for row_idx, sequence_no in enumerate(self._sequence_nos):
+            btn = self._failed_button_for_row(row_idx)
+            if btn is None:
+                continue
+            label = self._failed_button_label(sequence_no)
+            btn.setText(label)
+            _apply_table_cell_button_width(btn, label)
+            has_failures = bool(
+                failed_details_for_sequence(self._failed_details, sequence_no)
+            )
+            btn.setEnabled(has_failures)
 
     def _failed_button_label(self, sequence_no: str) -> str:
         count = len(failed_details_for_sequence(self._failed_details, sequence_no))
@@ -478,6 +511,7 @@ class _ResultSummary(QWidget):
         )
 
     def _rebuild_rows(self) -> None:
+        self._rebuilding = True
         self._table.blockSignals(True)
         self._table.setRowCount(len(self._sequence_nos))
         for row_idx, sequence_no in enumerate(self._sequence_nos):
@@ -486,7 +520,7 @@ class _ResultSummary(QWidget):
             self._table.setItem(row_idx, self._COL_SEQUENCE, seq_item)
 
             excluded_edit = _make_excluded_edit(
-                self._excluded_by_sequence.get(sequence_no, "")
+                excluded_text_for_sequence(self._excluded_by_sequence, sequence_no)
             )
             excluded_edit.textChanged.connect(self._on_excluded_changed)
             self._table.setCellWidget(row_idx, self._COL_EXCLUDED, excluded_edit)
@@ -509,8 +543,11 @@ class _ResultSummary(QWidget):
             self._table.setCellWidget(row_idx, self._COL_FAILED, failed_container)
             self._table.setRowHeight(row_idx, 34)
         self._table.blockSignals(False)
+        self._rebuilding = False
         _fit_table_to_content(self._table, max_body_rows=3)
 
     def _on_excluded_changed(self) -> None:
+        if self._rebuilding:
+            return
         self._excluded_by_sequence = self.excluded_shotpoints()
         self.changed.emit()

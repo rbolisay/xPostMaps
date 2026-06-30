@@ -445,8 +445,21 @@ def save_survey_specs(rows: list[SurveySpecRow]) -> None:
     _write_settings(data)
 
 
-def load_excluded_shotpoints() -> dict[str, str]:
-    """Load saved excluded-shotpoint text keyed by sequence number."""
+def load_excluded_shotpoints(plot_key: str | None = None) -> dict[str, str]:
+    """Load saved excluded-shotpoint text keyed by sequence number.
+
+    When *plot_key* is supplied, exclusions are read from that line's plot
+    settings first; a legacy global map is used only as a fallback.
+    """
+    if plot_key:
+        blob = _plot_blob(plot_key)
+        scoped = blob.get("excluded_by_sequence")
+        if isinstance(scoped, dict) and scoped:
+            return {
+                str(key): str(value)
+                for key, value in scoped.items()
+                if str(key).strip()
+            }
     root = _read_settings().get(_EXCLUDED_SHOTPOINTS_KEY)
     if not isinstance(root, dict):
         return {}
@@ -457,12 +470,25 @@ def load_excluded_shotpoints() -> dict[str, str]:
     }
 
 
-def save_excluded_shotpoints(mapping: dict[str, str]) -> None:
-    """Persist excluded-shotpoint text keyed by sequence number."""
-    data = _read_settings()
-    data[_EXCLUDED_SHOTPOINTS_KEY] = {
+def save_excluded_shotpoints(
+    mapping: dict[str, str],
+    plot_key: str | None = None,
+) -> None:
+    """Persist excluded-shotpoint text keyed by sequence number.
+
+    When *plot_key* is supplied, exclusions are stored on that line's plot
+    settings blob (preferred). The legacy global map is no longer updated.
+    """
+    cleaned = {
         str(key): str(value)
         for key, value in mapping.items()
         if str(key).strip()
     }
+    if plot_key:
+        blob = _plot_blob(plot_key)
+        blob["excluded_by_sequence"] = cleaned
+        _write_plot_blob(plot_key, blob)
+        return
+    data = _read_settings()
+    data[_EXCLUDED_SHOTPOINTS_KEY] = cleaned
     _write_settings(data)
