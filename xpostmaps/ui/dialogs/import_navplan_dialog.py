@@ -8,7 +8,6 @@ from typing import Callable
 
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
-    QFileDialog,
     QHBoxLayout,
     QHeaderView,
     QLabel,
@@ -28,7 +27,7 @@ from xpostmaps.core.navplan_catalog_utils import (
     renumber_navplan_catalog,
 )
 from xpostmaps.ui.dialogs.base_dialog import SingleInstanceDialog
-from xpostmaps.ui.theme import apply_file_dialog_theme, themed_open_files
+from xpostmaps.ui.theme import themed_open_directory, themed_open_files
 
 _NAVPLAN_FILTER = (
     "Navplan Files (*.navplan *.p190 *.190 *.p111);;"
@@ -117,25 +116,11 @@ def _collect_from_folders(folders: list[str]) -> list[str]:
 
 
 def _themed_open_directories(parent: QWidget, title: str, initial_dir: str = "") -> list[str]:
-    """Show a dark-themed folder picker with a working select/Choose button.
-
-    Uses Directory mode so the dialog's accept button selects the current
-    folder (the previous ExistingFiles+ShowDirsOnly combo left the Open button
-    permanently disabled because no *file* could be selected).
-    """
-    picker = QFileDialog(parent, title)
-    if initial_dir and Path(initial_dir).is_dir():
-        picker.setDirectory(initial_dir)
-    picker.setFileMode(QFileDialog.FileMode.Directory)
-    picker.setOption(QFileDialog.Option.ShowDirsOnly, True)
-    picker.setOption(QFileDialog.Option.DontUseNativeDialog, True)
-    picker.setLabelText(QFileDialog.DialogLabel.Accept, "Choose")
-    apply_file_dialog_theme(picker)
-    if picker.exec() != QFileDialog.DialogCode.Accepted:
+    """Show a folder picker; native on Windows so network shares are browsable."""
+    folder = themed_open_directory(parent, title, initial_dir)
+    if not folder:
         return []
-    return _unique_existing_paths(
-        [path for path in picker.selectedFiles() if Path(path).is_dir()]
-    )
+    return _unique_existing_paths([folder])
 
 
 class ImportNavplanDialog:

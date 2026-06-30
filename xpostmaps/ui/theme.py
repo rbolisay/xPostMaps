@@ -608,8 +608,18 @@ def themed_open_files(
 
 
 def themed_open_directory(parent, title: str, start_dir: str = "") -> str:
-    """Show a dark-themed folder picker."""
+    """Show a folder picker.
+
+    On Windows the native dialog is used so users can browse network shares
+    (\\\\server\\share). Non-native Qt folder dialogs omit Network locations.
+    """
+    import sys
+
     from PySide6.QtWidgets import QFileDialog
+
+    if sys.platform == "win32":
+        path = QFileDialog.getExistingDirectory(parent, title, start_dir or "")
+        return path or ""
 
     picker = QFileDialog(parent, title, start_dir)
     picker.setFileMode(QFileDialog.FileMode.Directory)
@@ -621,3 +631,26 @@ def themed_open_directory(parent, title: str, start_dir: str = "") -> str:
         return ""
     selected = picker.selectedFiles()
     return selected[0] if selected else ""
+
+
+def themed_open_directory_widget(
+    parent,
+    title: str,
+    start_dir: str = "",
+    *,
+    modal: bool = False,
+) -> QFileDialog:
+    """Create a folder picker widget (native on Windows for network browse support)."""
+    import sys
+
+    from PySide6.QtWidgets import QFileDialog
+
+    picker = QFileDialog(parent, title, start_dir or "")
+    picker.setFileMode(QFileDialog.FileMode.Directory)
+    picker.setOption(QFileDialog.Option.ShowDirsOnly, True)
+    picker.setLabelText(QFileDialog.DialogLabel.Accept, "Choose")
+    if sys.platform != "win32":
+        picker.setOption(QFileDialog.Option.DontUseNativeDialog, True)
+        apply_file_dialog_theme(picker)
+    picker.setModal(modal)
+    return picker

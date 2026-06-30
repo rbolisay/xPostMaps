@@ -82,11 +82,16 @@ Section "TierMaps Application" SecMain
   File "staging\TierMaps.bat"
   File "staging\TierMaps.ico"
   File "staging\TierMaps.png"
+  File "staging\TierMaps_No_bg.png"
+  File "staging\TierMaps_Logo.png"
+  File "staging\TierMaps_Logo_grey.png"
   File "staging\run.py"
+  File "staging\preflight.py"
   File "staging\requirements.txt"
+  File "staging\license.txt"
 
   SetOutPath "$INSTDIR\data"
-  File "staging\data\.gitkeep"
+  File "staging\data\settings.json"
 
   SetOutPath "$INSTDIR\python"
   File /r /x "__pycache__" /x "*.pyc" /x "*.pyo" "staging\python\*"
@@ -97,6 +102,18 @@ Section "TierMaps Application" SecMain
   ; Verify bundled runtime landed where TierMaps.bat expects it.
   IfFileExists "$INSTDIR\python\pythonw.exe" +3 0
     MessageBox MB_ICONSTOP "Install failed: the bundled Python runtime (pythonw.exe) was not placed in $INSTDIR\python.$\r$\n$\r$\nPlease contact support."
+    Abort
+
+  IfFileExists "$INSTDIR\TierMaps_No_bg.png" +3 0
+    MessageBox MB_ICONSTOP "Install failed: application logo was not installed.$\r$\n$\r$\nPlease contact support."
+    Abort
+
+  IfFileExists "$INSTDIR\xpostmaps\assets\world_coastlines.json" +3 0
+    MessageBox MB_ICONSTOP "Install failed: bundled map assets were not installed.$\r$\n$\r$\nPlease contact support."
+    Abort
+
+  IfFileExists "$INSTDIR\python\Lib\site-packages\PySide6\plugins\platforms\qwindows.dll" +3 0
+    MessageBox MB_ICONSTOP "Install failed: bundled Qt libraries were not installed.$\r$\n$\r$\nPlease contact support."
     Abort
 
   WriteUninstaller "$INSTDIR\Uninstall.exe"

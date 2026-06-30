@@ -15,8 +15,6 @@ set "CACHE=installer\cache"
 set "PYVER=3.13.7"
 set "EMBED_ZIP=%CACHE%\python-%PYVER%-embed-amd64.zip"
 set "EMBED_URL=https://www.python.org/ftp/python/%PYVER%/python-%PYVER%-embed-amd64.zip"
-set "GET_PIP=%CACHE%\get-pip.py"
-set "GET_PIP_URL=https://bootstrap.pypa.io/get-pip.py"
 
 echo.
 echo ========================================
@@ -32,21 +30,42 @@ if errorlevel 1 (
 
 if not exist "%CACHE%" mkdir "%CACHE%"
 
-echo [1/7] Building TierMaps.ico from TierMaps.png...
-if not exist "TierMaps.png" (
-    echo ERROR: TierMaps.png not found in repository root.
-    exit /b 1
+echo [1/8] Checking required source files...
+for %%F in (
+    "TierMaps.png"
+    "TierMaps_No_bg.png"
+    "TierMaps_Logo.png"
+    "TierMaps_Logo_grey.png"
+    "run.py"
+    "preflight.py"
+    "requirements.txt"
+    "xpostmaps\assets\world_coastlines.json"
+    "xpostmaps\assets\world_land_polygons.json"
+) do (
+    if not exist %%F (
+        echo ERROR: Required file missing: %%F
+        exit /b 1
+    )
 )
+
 if not exist "venv\Scripts\python.exe" (
     echo ERROR: Development venv not found. Run install.bat first.
     exit /b 1
 )
-venv\Scripts\pip.exe install pillow --quiet
-if errorlevel 1 exit /b 1
+
+echo [2/8] Building TierMaps.ico from TierMaps.png...
+venv\Scripts\python.exe -m pip install pillow --quiet 2>nul
 venv\Scripts\python.exe installer\make_icon.py TierMaps.png installer\TierMaps.ico
 if errorlevel 1 exit /b 1
 
-echo [2/7] Preparing staging folder...
+echo [3/8] Syncing development venv with requirements.txt...
+venv\Scripts\python.exe -m pip install -r requirements.txt --quiet
+if errorlevel 1 (
+    echo ERROR: Failed to install requirements into development venv.
+    exit /b 1
+)
+
+echo [4/8] Preparing staging folder...
 if exist "%STAGE%" (
     powershell -NoProfile -Command "Remove-Item -LiteralPath '%STAGE%' -Recurse -Force -ErrorAction SilentlyContinue"
 )
@@ -54,20 +73,25 @@ mkdir "%STAGE%"
 mkdir "%STAGE%\data" 2>nul
 mkdir "%STAGE%\python\Lib\site-packages" 2>nul
 
-echo [3/7] Copying application files...
+echo [5/8] Copying application files...
 robocopy "xpostmaps" "%STAGE%\xpostmaps" /E /NFL /NDL /NJH /NJS /NC /NS /NP ^
     /XD __pycache__ .pytest_cache ^
     /XF *.pyc *.pyo
 if %ERRORLEVEL% GEQ 8 exit /b 1
 
 copy /Y "run.py" "%STAGE%\" >nul
+copy /Y "preflight.py" "%STAGE%\" >nul
 copy /Y "requirements.txt" "%STAGE%\" >nul
 copy /Y "installer\TierMaps.bat" "%STAGE%\TierMaps.bat" >nul
 copy /Y "TierMaps.png" "%STAGE%\TierMaps.png" >nul
+copy /Y "TierMaps_No_bg.png" "%STAGE%\TierMaps_No_bg.png" >nul
+copy /Y "TierMaps_Logo.png" "%STAGE%\TierMaps_Logo.png" >nul
+copy /Y "TierMaps_Logo_grey.png" "%STAGE%\TierMaps_Logo_grey.png" >nul
 copy /Y "installer\TierMaps.ico" "%STAGE%\TierMaps.ico" >nul
-echo. > "%STAGE%\data\.gitkeep"
+copy /Y "installer\default_settings.json" "%STAGE%\data\settings.json" >nul
+copy /Y "installer\license.txt" "%STAGE%\license.txt" >nul
 
-echo [4/7] Downloading Windows embeddable Python %PYVER%...
+echo [6/8] Downloading and extracting portable Python %PYVER%...
 if not exist "%EMBED_ZIP%" (
     powershell -NoProfile -Command ^
         "Invoke-WebRequest -Uri '%EMBED_URL%' -OutFile '%EMBED_ZIP%'"
@@ -77,7 +101,6 @@ if not exist "%EMBED_ZIP%" (
     )
 )
 
-echo [5/7] Extracting portable Python runtime...
 powershell -NoProfile -Command ^
     "Expand-Archive -LiteralPath '%EMBED_ZIP%' -DestinationPath '%STAGE%\python' -Force"
 if errorlevel 1 exit /b 1
@@ -91,47 +114,38 @@ for %%F in ("%STAGE%\python\python*._pth") do (
     )
 )
 
-if not exist "%GET_PIP%" (
-    powershell -NoProfile -Command ^
-        "Invoke-WebRequest -Uri '%GET_PIP_URL%' -OutFile '%GET_PIP%'"
-    if errorlevel 1 (
-        echo ERROR: Failed to download get-pip.py
-        exit /b 1
-    )
-)
-
-echo [6/7] Installing Python dependencies into portable runtime - may take several minutes...
-"%STAGE%\python\python.exe" "%GET_PIP%" --no-warn-script-location
-if errorlevel 1 exit /b 1
-
-"%STAGE%\python\python.exe" -m pip install --upgrade pip --no-warn-script-location
-if errorlevel 1 exit /b 1
-
-set "PYTHONNOUSERSITE=1"
-"%STAGE%\python\python.exe" -m pip install -r "%STAGE%\requirements.txt" ^
-    --no-warn-script-location --no-user --ignore-installed
-if errorlevel 1 (
-    echo ERROR: Failed to install Python dependencies into portable runtime.
+echo [7/8] Bundling Python libraries into install folder...
+robocopy "venv\Lib\site-packages" "%STAGE%\python\Lib\site-packages" /E /NFL /NDL /NJH /NJS /NC /NS /NP ^
+    /XD __pycache__ .pytest_cache pytest _pytest pluggy iniconfig Pygments ^
+    /XF *.pyc *.pyo
+if %ERRORLEVEL% GEQ 8 (
+    echo ERROR: Failed to copy bundled Python libraries.
     exit /b 1
 )
 
-echo       Verifying portable runtime...
-set "PYTHONNOUSERSITE=1"
-"%STAGE%\python\python.exe" -c "import PySide6, pyqtgraph, numpy, numba, pyproj, shapefile, OpenGL; print('OK')"
-if errorlevel 1 (
-    echo ERROR: Portable runtime verification failed.
-    exit /b 1
-)
+echo       Verifying bundled files...
+venv\Scripts\python.exe installer\verify_staging.py "%STAGE%"
+if errorlevel 1 exit /b 1
 
+echo       Running application smoke test...
+set "APP_ROOT=%CD%\%STAGE%\"
+set "PYTHONHOME=%APP_ROOT%python"
+set "PYDIR=%PYTHONHOME%\Lib\site-packages"
+set "PROJ_DIR=%PYDIR%\pyproj\proj_dir\share\proj"
+set "PATH=%PYTHONHOME%;%PYDIR%\PySide6;%PYDIR%\shiboken6;%PYDIR%\llvmlite\binding;%PATH%"
+set "QT_PLUGIN_PATH=%PYDIR%\PySide6\plugins"
+set "PROJ_LIB=%PROJ_DIR%"
+set "PROJ_DATA=%PROJ_DIR%"
+set "PYTHONPATH=%APP_ROOT%;%PYDIR%"
+set "PYTHONNOUSERSITE=1"
 set "QT_QPA_PLATFORM=offscreen"
-set "PYTHONNOUSERSITE=1"
-"%STAGE%\python\python.exe" -c "import sys; sys.path.insert(0, r'%CD%\%STAGE%'); from xpostmaps.ui.main_window import MainWindow; from PySide6.QtWidgets import QApplication; app=QApplication([]); MainWindow(); print('SMOKE_OK')"
+"%STAGE%\python\python.exe" "%STAGE%\preflight.py"
 if errorlevel 1 (
     echo ERROR: Application smoke test failed in staging.
     exit /b 1
 )
 
-echo [7/7] Compiling NSIS installer...
+echo [8/8] Compiling NSIS installer...
 if not exist "%DIST%" mkdir "%DIST%"
 pushd installer
 "%NSIS%" /V2 "TierMaps.nsi"
@@ -149,6 +163,6 @@ for %%F in ("%DIST%\TierMaps-*-Setup.exe") do (
     echo Size: %%~zF bytes
 )
 echo.
-echo The installer uses a portable embedded Python runtime and does not require
-echo Python to be installed on the target machine.
+echo The installer is fully self-contained. No Python or other dependencies
+echo are required on the target machine.
 exit /b 0

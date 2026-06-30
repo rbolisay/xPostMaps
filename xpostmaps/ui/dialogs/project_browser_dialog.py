@@ -28,7 +28,7 @@ from xpostmaps.core.db_browser_utils import (
     sqlite_project_rows,
 )
 from xpostmaps.ui.dialogs.base_dialog import SingleInstanceDialog
-from xpostmaps.ui.theme import apply_file_dialog_theme
+from xpostmaps.ui.theme import themed_open_directory_widget
 
 _PROJECT_NAME_ROLE = Qt.ItemDataRole.UserRole + 1
 
@@ -216,13 +216,13 @@ class ProjectBrowserDialog:
                     existing.raise_()
                     existing.activateWindow()
                     return
-                picker = QFileDialog(dialog, "Select Database Folder", state["directory"])
-                picker.setFileMode(QFileDialog.FileMode.Directory)
-                picker.setOption(QFileDialog.Option.ShowDirsOnly, True)
-                picker.setOption(QFileDialog.Option.DontUseNativeDialog, True)
-                picker.setModal(False)
+                picker = themed_open_directory_widget(
+                    dialog,
+                    "Select Database Folder",
+                    state["directory"],
+                    modal=False,
+                )
                 picker.setWindowModality(Qt.WindowModality.NonModal)
-                apply_file_dialog_theme(picker)
                 directory_dialog[0] = picker
 
                 def on_finished(result: int) -> None:
