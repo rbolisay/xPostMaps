@@ -328,6 +328,46 @@ def _restore_view_state(view: Postplot4DSurveyPlotsView) -> None:
     QApplication.processEvents()
 
 
+def _compose_survey_plot_page(
+    view: Postplot4DSurveyPlotsView,
+    options: Postplot4DSurveyPlotPdfOptions,
+    spec: SurveyPlotPageSpec,
+    *,
+    geom: _PlotPageGeometry,
+    logo_file: Path | None,
+    report_title: str,
+    dpi: int,
+) -> ComposedSurveyPlotPage | None:
+    image = _render_page_image(
+        view,
+        spec,
+        width=geom.plot_width,
+        height=geom.plot_height,
+        dpi=dpi,
+    )
+    if image is None or image.isNull():
+        return None
+    composed = QImage(geom.page_w, geom.page_h, QImage.Format.Format_ARGB32)
+    composed.fill(Qt.GlobalColor.white)
+    painter = QPainter(composed)
+    painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+    painter.setRenderHint(QPainter.RenderHint.TextAntialiasing, True)
+    _draw_survey_page_header(
+        painter,
+        content_left=geom.content_left,
+        content_top=geom.content_top,
+        content_width=geom.content_width,
+        dpi=dpi,
+        report_title=report_title,
+        plot_title=_header_plot_label(spec, options),
+        logo_file=logo_file,
+    )
+    plot_y = geom.content_top + geom.header_height
+    painter.drawImage(geom.content_left, plot_y, image)
+    painter.end()
+    return ComposedSurveyPlotPage(spec=spec, image=composed)
+
+
 def compose_survey_plot_pages(
     view: Postplot4DSurveyPlotsView,
     options: Postplot4DSurveyPlotPdfOptions,
@@ -346,35 +386,17 @@ def compose_survey_plot_pages(
     pages: list[ComposedSurveyPlotPage] = []
     try:
         for spec in page_specs:
-            image = _render_page_image(
+            page = _compose_survey_plot_page(
                 view,
+                options,
                 spec,
-                width=geom.plot_width,
-                height=geom.plot_height,
-                dpi=render_dpi,
-            )
-            if image is None or image.isNull():
-                continue
-            composed = QImage(geom.page_w, geom.page_h, QImage.Format.Format_ARGB32)
-            composed.fill(Qt.GlobalColor.white)
-            painter = QPainter(composed)
-            painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
-            painter.setRenderHint(QPainter.RenderHint.TextAntialiasing, True)
-            _draw_survey_page_header(
-                painter,
-                content_left=geom.content_left,
-                content_top=geom.content_top,
-                content_width=geom.content_width,
-                dpi=render_dpi,
-                report_title=report_title,
-                plot_title=_header_plot_label(spec, options),
+                geom=geom,
                 logo_file=logo_file,
+                report_title=report_title,
+                dpi=render_dpi,
             )
-            plot_x = geom.content_left
-            plot_y = geom.content_top + geom.header_height
-            painter.drawImage(plot_x, plot_y, image)
-            painter.end()
-            pages.append(ComposedSurveyPlotPage(spec=spec, image=composed))
+            if page is not None:
+                pages.append(page)
     finally:
         _restore_view_state(view)
     if not pages:
@@ -388,12 +410,40 @@ def render_survey_plot_preview_pages(
     *,
     logo_path: str = "",
 ) -> list[ComposedSurveyPlotPage]:
-    return compose_survey_plot_pages(
+    """Preview pages at lower DPI; first aerial page is re-captured after compose."""
+    dpi = STAT_PLOT_PDF_PREVIEW_DPI
+    pages = compose_survey_plot_pages(
         view,
         options,
         logo_path=logo_path,
-        dpi=STAT_PLOT_PDF_PREVIEW_DPI,
+        dpi=dpi,
     )
+    if not pages:
+        return pages
+    first = pages[0]
+    if first.spec.page_kind != SurveyPlotPageKind.AERIAL:
+        return pages
+
+    geom = _geometry(options, dpi)
+    logo_file = resolve_logo_path(logo_path)
+    report_title = options.report_title.strip() or DEFAULT_SURVEY_PLOT_PDF_REPORT_TITLE
+    view.refresh_all()
+    QApplication.processEvents()
+    try:
+        refreshed = _compose_survey_plot_page(
+            view,
+            options,
+            first.spec,
+            geom=geom,
+            logo_file=logo_file,
+            report_title=report_title,
+            dpi=dpi,
+        )
+    finally:
+        _restore_view_state(view)
+    if refreshed is not None:
+        pages[0] = refreshed
+    return pages
 
 
 def export_survey_plot_pdf(

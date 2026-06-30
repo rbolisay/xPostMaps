@@ -122,9 +122,14 @@ class _PieChartWidget(SurveyPanZoomWidget):
             return
 
         start = 90.0
-        label_font = QFont("Segoe UI", 10)
+        label_px = max(10, int(round(side * 0.042)))
+        label_font = QFont("Segoe UI")
+        label_font.setPixelSize(label_px)
         label_font.setWeight(QFont.Weight.DemiBold)
         painter.setFont(label_font)
+        label_pad_x = max(6, int(round(label_px * 0.35)))
+        label_pad_y = max(3, int(round(label_px * 0.2)))
+        label_radius = max(4, int(round(label_px * 0.12)))
 
         for slice_ in visible:
             span = 360.0 * slice_.value / total
@@ -144,10 +149,15 @@ class _PieChartWidget(SurveyPanZoomWidget):
                 label = f"{slice_.value:.1f}%"
                 metrics = painter.fontMetrics()
                 text_w = metrics.horizontalAdvance(label)
-                text_rect = QRectF(lx - text_w / 2 - 4, ly - metrics.height() / 2 - 2, text_w + 8, metrics.height() + 4)
+                text_rect = QRectF(
+                    lx - text_w / 2 - label_pad_x,
+                    ly - metrics.height() / 2 - label_pad_y,
+                    text_w + label_pad_x * 2,
+                    metrics.height() + label_pad_y * 2,
+                )
                 painter.setPen(Qt.PenStyle.NoPen)
                 painter.setBrush(QColor(13, 17, 23, 170))
-                painter.drawRoundedRect(text_rect, 4, 4)
+                painter.drawRoundedRect(text_rect, label_radius, label_radius)
                 painter.setPen(QColor("#ffffff"))
                 painter.drawText(text_rect, Qt.AlignmentFlag.AlignCenter, label)
 
