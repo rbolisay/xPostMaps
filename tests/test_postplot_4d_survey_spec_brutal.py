@@ -21,6 +21,7 @@ from xpostmaps.core.postplot_4d_survey_spec import (
     evaluate_spec_combined,
     evaluate_spec_for_sequence,
     evaluate_survey_specs,
+    flag_map_for_kind,
     format_shotpoint_ranges,
     parse_excluded_shotpoints,
 )
@@ -567,11 +568,101 @@ class TestCombinedEvaluation(unittest.TestCase):
         self.assertEqual(detail.shotpoints_text, "100-105")
         self.assertIn("consecutive", detail.statistic_text.lower())
 
+    def test_absolute_max_lists_each_exceeding_shotpoint(self) -> None:
+        rows = [
+            _row(100, crossline=5.0),
+            _row(101, crossline=15.0),
+            _row(102, crossline=8.0),
+            _row(103, crossline=13.0),
+        ]
+        ds = _diff_set(rows)
+        spec = SurveySpecRow(
+            statistic=StatType.MAX_VALUE,
+            metric="crossline",
+            stat_value=12.0,
+            absolute=True,
+            severity=Severity.WARNING,
+        )
+        evaluation = evaluate_survey_specs([ds], [spec])
+        self.assertTrue(evaluation.accepted)
+        self.assertTrue(evaluation.has_warning)
+        self.assertEqual(len(evaluation.failed_details), 1)
+        detail = evaluation.failed_details[0]
+        self.assertEqual(detail.shotpoints_text, "101, 103")
+        self.assertEqual(detail.severity, Severity.WARNING)
+
+    def test_separate_rows_for_each_failed_spec(self) -> None:
+        rows = [_row(100 + i, crossline=13.0) for i in range(5)]
+        ds = _diff_set(rows)
+        specs = [
+            SurveySpecRow(
+                statistic=StatType.MAX_VALUE,
+                metric="crossline",
+                stat_value=12.0,
+                absolute=True,
+                severity=Severity.WARNING,
+            ),
+            SurveySpecRow(
+                statistic=StatType.MAX_CONSECUTIVE_FAILED,
+                metric="crossline",
+                reference_value=10.0,
+                stat_value=3.0,
+                severity=Severity.ERROR,
+            ),
+        ]
+        evaluation = evaluate_survey_specs([ds], specs)
+        self.assertFalse(evaluation.accepted)
+        self.assertEqual(len(evaluation.failed_details), 2)
+        self.assertEqual(
+            {detail.severity for detail in evaluation.failed_details},
+            {Severity.WARNING, Severity.ERROR},
+        )
+
+
+class TestFlagMapForKind(unittest.TestCase):
+    def test_error_overrides_warning_on_same_shotpoint(self) -> None:
+        rows = [_row(100 + i, crossline=13.0) for i in range(5)]
+        ds = _diff_set(rows)
+        specs = [
+            SurveySpecRow(
+                statistic=StatType.MAX_VALUE,
+                metric="crossline",
+                stat_value=12.0,
+                absolute=True,
+                severity=Severity.WARNING,
+            ),
+            SurveySpecRow(
+                statistic=StatType.MAX_CONSECUTIVE_FAILED,
+                metric="crossline",
+                reference_value=10.0,
+                stat_value=3.0,
+                severity=Severity.ERROR,
+            ),
+        ]
+        flags = flag_map_for_kind([ds], specs, "crossline")
+        self.assertEqual(flags["G01"][100], Severity.ERROR)
+        self.assertEqual(len(flags["G01"]), 5)
+
 
 class TestFormatShotpointRanges(unittest.TestCase):
     def test_single_range_and_gaps(self) -> None:
-        self.assertEqual(format_shotpoint_ranges([1001, 1003, 1010, 1011, 1012]), "1001, 1003, 1010-1012")
+        self.assertEqual(
+            format_shotpoint_ranges([1001, 1003, 1010, 1011, 1012]),
+            "1001-1003, 1010-1012",
+        )
         self.assertEqual(format_shotpoint_ranges([]), "—")
+
+    def test_consecutive_integers_collapse(self) -> None:
+        self.assertEqual(
+            format_shotpoint_ranges([1001, 1002, 1003, 1004, 1005]),
+            "1001-1005",
+        )
+
+    def test_constant_step_along_line(self) -> None:
+        self.assertEqual(
+            format_shotpoint_ranges([1459, 1461, 1463, 1465, 1467, 1469]),
+            "1459-1469",
+        )
 
 
 class TestCombinedSpecEvaluation(unittest.TestCase):

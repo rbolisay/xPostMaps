@@ -50,6 +50,7 @@ from xpostmaps.core.postplot_4d_plot_settings import (
 from xpostmaps.core.postplot_4d_survey_spec import (
     SurveyEvaluation,
     evaluate_survey_specs,
+    flag_map_for_kind,
 )
 from xpostmaps.ui.postplot_4d_stat_plot.controls import PlotTabControls, YAxisControls
 from xpostmaps.ui.postplot_4d_stat_plot.plot_widget import PlotCanvas
@@ -626,6 +627,7 @@ class Postplot4DStatPlotView(QWidget):
     def _on_survey_specs_changed(self) -> None:
         self._autosave_survey_specs()
         self._evaluate_survey()
+        self._refresh_all_tabs()
 
     def _evaluate_survey(self) -> None:
         sequence_nos = combined_sequence_numbers(self._sets) if self._sets else []
@@ -679,6 +681,12 @@ class Postplot4DStatPlotView(QWidget):
         boundaries = controls.boundaries()
         y_min, y_max = self._y_axis.y_range()
         series_list = build_combined_plot_series(self._sets, kind)
+        flags = flag_map_for_kind(
+            self._sets,
+            self._survey_panel.rows(),
+            kind,
+            excluded_by_sequence=self._survey_panel.excluded_shotpoints(),
+        )
         page._canvas.set_combine_sources(self._combine_box.isChecked())
         page._canvas.render(
             series_list,
@@ -687,6 +695,7 @@ class Postplot4DStatPlotView(QWidget):
             y_min=y_min,
             y_max=y_max,
             auto_y=self._y_axis.auto_y(),
+            flags=flags,
         )
 
     def _refresh_current_tab(self) -> None:

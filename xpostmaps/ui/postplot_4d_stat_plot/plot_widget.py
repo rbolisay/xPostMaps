@@ -25,6 +25,7 @@ from xpostmaps.core.postplot_4d_plot_data import (
     SourceStyleRow,
     boundary_line_values,
 )
+from xpostmaps.core.postplot_4d_survey_spec import Severity
 from xpostmaps.ui.postplot_4d_stat_plot.plot_pen import boundary_pen, clone_pen, source_pen
 from xpostmaps.ui.postplot_4d_stat_plot.stat_plot_view_box import StatPlotViewBox
 from xpostmaps.ui.postplot_4d_stat_plot.theme import STAT_PLOT_SOURCE_TAB_STYLE
@@ -32,6 +33,10 @@ from xpostmaps.utils.symbology_units import DEFAULT_SCREEN_DPI
 
 _PLOT_BG = "#ffffff"
 _PLOT_FG = "#111827"
+# Per-shotpoint flag colours overriding the source marker colour: a shotpoint
+# failing an Error-severity survey spec is drawn red, a Warning one orange.
+_FLAG_ERROR_COLOR = "#ff0000"
+_FLAG_WARNING_COLOR = "#ff8c00"
 # Minimum on-screen height for an embedded plot. Kept modest so the whole 4D
 # Stat Plot window (plot + bottom tabs + toolbars) still fits on laptop screens
 # without the window growing taller than the display.
@@ -145,6 +150,27 @@ def _format_pick_value(kind: PlotKind, value: float) -> str:
     if kind in ("feather", "feather_diff"):
         return f"{value:.2f}"
     return f"{value:.3f}"
+
+
+def _symbol_styles_for_series(
+    shotpoints: list[int],
+    series_flags: dict[int, Severity] | None,
+    default_color: str,
+) -> tuple[list[QColor], list[QPen]]:
+    """Per-shotpoint marker colours; flagged shots override the source colour."""
+    brushes: list[QColor] = []
+    pens: list[QPen] = []
+    for shotpoint in shotpoints:
+        severity = (series_flags or {}).get(int(shotpoint))
+        if severity == Severity.ERROR:
+            color = _FLAG_ERROR_COLOR
+        elif severity == Severity.WARNING:
+            color = _FLAG_WARNING_COLOR
+        else:
+            color = default_color
+        brushes.append(QColor(color))
+        pens.append(pg.mkPen(color, width=1, cosmetic=True))
+    return brushes, pens
 
 
 class TimeSeriesPlotWidget(pg.PlotWidget):
@@ -298,6 +324,7 @@ class TimeSeriesPlotWidget(pg.PlotWidget):
         y_min: float | None,
         y_max: float | None,
         auto_y: bool,
+        flags: dict[str, dict[int, Severity]] | None = None,
     ) -> None:
         for item in self._curve_items:
             self.removeItem(item)
@@ -309,6 +336,7 @@ class TimeSeriesPlotWidget(pg.PlotWidget):
         self._set_selection_text("")
         self._selection_marker.hide()
 
+        flag_map = flags or {}
         style_by_source = _style_lookup(styles)
         all_values: list[float] = []
         all_x: list[float] = []
@@ -338,6 +366,16 @@ class TimeSeriesPlotWidget(pg.PlotWidget):
             # different styles looked like different thicknesses (also scaled up
             # in the PDF). Keep one consistent size for every source.
             symbol_size = _SOURCE_SYMBOL_SIZE_PX
+            series_flags = flag_map.get(series.source_no)
+            if series_flags:
+                symbol_brushes, symbol_pens = _symbol_styles_for_series(
+                    series.shotpoints,
+                    series_flags,
+                    style.color,
+                )
+            else:
+                symbol_brushes = QColor(style.color)
+                symbol_pens = pg.mkPen(style.color, width=1, cosmetic=True)
             curve = self.plot(
                 x_data,
                 y_data,
@@ -345,8 +383,8 @@ class TimeSeriesPlotWidget(pg.PlotWidget):
                 name=series.source_no,
                 symbol="o" if show_symbols else None,
                 symbolSize=symbol_size,
-                symbolBrush=QColor(style.color),
-                symbolPen=pg.mkPen(style.color, width=1, cosmetic=True),
+                symbolBrush=symbol_brushes,
+                symbolPen=symbol_pens,
                 connect="all",
             )
             self._curve_items.append(curve)
@@ -822,6 +860,7 @@ class SourceTabPlotHost(QWidget):
         y_min: float | None,
         y_max: float | None,
         auto_y: bool,
+        flags: dict[str, dict[int, Severity]] | None = None,
     ) -> None:
         while self._tabs.count():
             widget = self._tabs.widget(0)
@@ -830,6 +869,7 @@ class SourceTabPlotHost(QWidget):
                 widget.deleteLater()
         self._plots.clear()
 
+        flag_map = flags or {}
         style_by_source = _style_lookup(styles)
         for series in series_list:
             if not series.shotpoints:
@@ -847,6 +887,7 @@ class SourceTabPlotHost(QWidget):
                 y_min=y_min,
                 y_max=y_max,
                 auto_y=auto_y,
+                flags=flag_map,
             )
             self._tabs.addTab(plot, series.source_no)
             self._plots[series.source_no] = plot
@@ -925,6 +966,7 @@ class PlotCanvas(QWidget):
         y_min: float | None,
         y_max: float | None,
         auto_y: bool,
+        flags: dict[str, dict[int, Severity]] | None = None,
     ) -> None:
         while self._direct_layout.count():
             item = self._direct_layout.takeAt(0)
@@ -944,6 +986,7 @@ class PlotCanvas(QWidget):
                 y_min=y_min,
                 y_max=y_max,
                 auto_y=auto_y,
+                flags=flags,
             )
             self._direct_layout.addWidget(plot, stretch=1)
             self._combined_plot = plot
@@ -956,6 +999,7 @@ class PlotCanvas(QWidget):
                 y_min=y_min,
                 y_max=y_max,
                 auto_y=auto_y,
+                flags=flags,
             )
             self._direct_layout.addWidget(tabs, stretch=1)
             self._source_tabs = tabs

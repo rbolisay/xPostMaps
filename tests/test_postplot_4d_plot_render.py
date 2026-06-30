@@ -10,9 +10,12 @@ pytest.importorskip("PySide6")
 from PySide6.QtCore import QRect
 from PySide6.QtWidgets import QApplication
 
+from PySide6.QtGui import QColor
+
 from xpostmaps.core.postplot_4d_diff import Postplot4DDiffRow
 from xpostmaps.core.postplot_4d_matching import Postplot4DMatchRow
 from xpostmaps.core.postplot_4d_plot_data import BoundaryRow, build_plot_series, default_source_styles
+from xpostmaps.core.postplot_4d_survey_spec import Severity
 from xpostmaps.ui.postplot_4d_stat_plot.plot_widget import (
     PlotCanvas,
     TimeSeriesPlotWidget,
@@ -249,3 +252,28 @@ def test_plot_canvas_source_tabs_when_uncombined(qapp) -> None:
     assert canvas._source_tabs is not None
     assert len(canvas._source_tabs.all_plots()) == 2
     assert canvas.has_data()
+
+
+def test_plot_overrides_flagged_shotpoint_marker_colors(qapp) -> None:
+    match, rows = _sample_match_and_rows()
+    plot = TimeSeriesPlotWidget("crossline")
+    plot.resize(800, 480)
+    styles = default_source_styles(["G01"])
+    series = build_plot_series(rows, match, "crossline", "G01")
+    flags = {"G01": {100: Severity.WARNING, 101: Severity.ERROR}}
+    plot.render(
+        [series],
+        styles,
+        [],
+        y_min=None,
+        y_max=None,
+        auto_y=True,
+        flags=flags,
+    )
+    qapp.processEvents()
+    curve = plot._curve_items[0]
+    brushes = curve.opts.get("symbolBrush")
+    assert isinstance(brushes, list)
+    assert brushes[0].name() == QColor("#ff8c00").name()
+    assert brushes[1].name() == QColor("#ff0000").name()
+    assert brushes[2].name() == QColor("#22c55e").name()

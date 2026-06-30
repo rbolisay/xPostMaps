@@ -402,7 +402,7 @@ class _ResultSummary(QWidget):
         self._table = QTableWidget(0, 3)
         _configure_legend_table(self._table)
         self._table.setHorizontalHeaderLabels(
-            ["Sequence No.", "Excluded Shotpoints", "Failed Shotpoints"]
+            ["Sequence No.", "Excluded Shotpoints", "Failed/Warning Shotpoints"]
         )
         self._table.horizontalHeader().setSectionResizeMode(
             QHeaderView.ResizeMode.ResizeToContents

@@ -17,6 +17,7 @@ from xpostmaps.core.postplot_4d_plot_data import (
     PlotKind,
     SequenceDiffSet,
     build_plot_series,
+    combined_source_key,
     ordered_sequence_sets,
     primary_sequence_set,
     unique_sources_from_diff_rows,
@@ -192,6 +193,7 @@ class FailedSpecDetail:
     shotpoints_text: str
     statistic_text: str
     applies_to_all_sequences: bool = False
+    severity: Severity = Severity.ERROR
 
 
 def _apply_absolute(values: list[float], absolute: bool) -> list[float]:
@@ -380,16 +382,16 @@ def _combined_sequence_label(sets: list[SequenceDiffSet]) -> str:
     return ", ".join(numbers) if numbers else "—"
 
 
-def _all_source_series(
+def _iter_source_series(
     sets: list[SequenceDiffSet],
     kind: PlotKind,
     excluded_map: dict[str, str],
-) -> list[tuple[str, list[int], list[float]]]:
-    """Per-source shotpoint series: (sequence_no, shotpoints, values)."""
+) -> list[tuple[str, str, list[int], list[float]]]:
+    """Per-source series: (sequence_no, source_no, shotpoints, values) FSP -> LSP."""
     if not sets:
         return []
     direction_row = primary_sequence_set(sets).match_row
-    series: list[tuple[str, list[int], list[float]]] = []
+    series: list[tuple[str, str, list[int], list[float]]] = []
     for diff_set in ordered_sequence_sets(sets):
         sequence_no = diff_set.match_row.sequence_no
         excluded = parse_excluded_shotpoints(excluded_map.get(sequence_no, ""))
@@ -408,8 +410,134 @@ def _all_source_series(
                 shotpoints.append(shotpoint)
                 values.append(float(value))
             if shotpoints:
-                series.append((sequence_no, shotpoints, values))
+                series.append((sequence_no, source_no, shotpoints, values))
     return series
+
+
+def _all_source_series(
+    sets: list[SequenceDiffSet],
+    kind: PlotKind,
+    excluded_map: dict[str, str],
+) -> list[tuple[str, list[int], list[float]]]:
+    """Per-source shotpoint series: (sequence_no, shotpoints, values)."""
+    return [
+        (sequence_no, shotpoints, values)
+        for sequence_no, _source_no, shotpoints, values in _iter_source_series(
+            sets, kind, excluded_map
+        )
+    ]
+
+
+def _flag_shot_exceeds_max_value(value: float, spec: SurveySpecRow) -> bool:
+    """Per-shot test for Absolute Max: matches the combined statistic's absolute mode."""
+    sample = abs(value) if spec.absolute else value
+    return sample > float(spec.stat_value)
+
+
+def _failing_run_shotpoints(
+    shotpoints: list[int],
+    values: list[float],
+    metric_limit: float,
+    max_allowed: float,
+) -> list[int]:
+    """Shotpoints belonging to consecutive runs longer than *max_allowed*.
+
+    A run is a maximal sequence of shotpoints each exceeding *metric_limit*; only
+    runs whose length exceeds the allowed consecutive count are returned (these
+    are the shotpoints that fail the Max Consecutive Failed Shotpoint spec).
+    """
+    threshold = int(round(float(max_allowed)))
+    flagged: list[int] = []
+    current: list[int] = []
+    for shotpoint, value in zip(shotpoints, values, strict=False):
+        if _shot_exceeds_metric_limit(value, metric_limit):
+            current.append(shotpoint)
+            continue
+        if len(current) > threshold:
+            flagged.extend(current)
+        current = []
+    if len(current) > threshold:
+        flagged.extend(current)
+    return flagged
+
+
+def _flagged_points_by_source(
+    sets: list[SequenceDiffSet],
+    spec: SurveySpecRow,
+    excluded_map: dict[str, str],
+) -> dict[tuple[str, str], list[int]]:
+    """Map (sequence_no, source_no) -> flagged shotpoints for a failed spec.
+
+    Average is a whole-line statistic with no individual offending shotpoints, so
+    it yields nothing here (it is reported as a whole-line row instead).
+    """
+    result: dict[tuple[str, str], list[int]] = {}
+    if spec.statistic == StatType.AVERAGE:
+        return result
+    for sequence_no, source_no, shotpoints, values in _iter_source_series(
+        sets, spec.metric, excluded_map
+    ):
+        flagged: list[int] = []
+        if spec.statistic == StatType.MAX_VALUE:
+            flagged = [
+                shotpoint
+                for shotpoint, value in zip(shotpoints, values, strict=False)
+                if _flag_shot_exceeds_max_value(value, spec)
+            ]
+        elif spec.statistic == StatType.MAX_PCT_FAILURE:
+            flagged = [
+                shotpoint
+                for shotpoint, value in zip(shotpoints, values, strict=False)
+                if _shot_exceeds_metric_limit(value, spec.reference_value)
+            ]
+        elif spec.statistic == StatType.MAX_CONSECUTIVE_FAILED:
+            flagged = _failing_run_shotpoints(
+                shotpoints, values, spec.reference_value, spec.stat_value
+            )
+        if flagged:
+            result[(sequence_no, source_no)] = flagged
+    return result
+
+
+def flag_map_for_kind(
+    sets: list[SequenceDiffSet],
+    specs: list[SurveySpecRow],
+    kind: PlotKind,
+    excluded_by_sequence: dict[str, str] | None = None,
+) -> dict[str, dict[int, Severity]]:
+    """Per-series flagged shotpoints + severity for one metric *kind*.
+
+    The returned mapping is keyed exactly like the plotted series
+    (``combined_source_key`` when several sequences are combined, otherwise the
+    plain source label) so the time-series plot can recolour flagged shotpoint
+    markers (red for Error, orange for Warning). Only specs that *fail* (with
+    Error or Warning severity) contribute; Error wins when both apply to the
+    same shotpoint.
+    """
+    excluded_map = excluded_by_sequence or {}
+    flags: dict[str, dict[int, Severity]] = {}
+    if not sets or not specs:
+        return flags
+    multi = len(sets) > 1
+    for spec in specs:
+        if spec.metric != kind:
+            continue
+        result, _details = evaluate_spec_combined(sets, spec, excluded_map)
+        if result.passed or not result.applicable:
+            continue
+        for (sequence_no, source_no), shotpoints in _flagged_points_by_source(
+            sets, spec, excluded_map
+        ).items():
+            key = (
+                combined_source_key(source_no, sequence_no) if multi else source_no
+            )
+            bucket = flags.setdefault(key, {})
+            for shotpoint in shotpoints:
+                if bucket.get(shotpoint) == Severity.ERROR:
+                    continue
+                if spec.severity == Severity.ERROR or shotpoint not in bucket:
+                    bucket[shotpoint] = spec.severity
+    return flags
 
 
 def _pooled_values(
@@ -443,20 +571,43 @@ def _longest_failed_streak(
 
 
 def format_shotpoint_ranges(shotpoints: list[int]) -> str:
-    """Format shotpoints as comma-separated values and ranges (e.g. 1001, 1003, 1010-1020)."""
+    """Format shotpoints as comma-separated values and ranges (e.g. 1001-1005).
+
+    Consecutive integers collapse to a single range (1001, 1002, …, 1005 →
+    ``1001-1005``). Shotpoints with a constant step along the line (e.g. every
+    other SP: 1459, 1461, …, 1481) collapse the same way (``1459-1481``).
+    """
     unique = sorted(set(shotpoints))
     if not unique:
         return "—"
     parts: list[str] = []
-    start = end = unique[0]
+    run_start = unique[0]
+    run_end = unique[0]
+    run_step: int | None = None
+
     for shotpoint in unique[1:]:
-        if shotpoint == end + 1:
-            end = shotpoint
+        gap = shotpoint - run_end
+        if gap <= 0:
             continue
-        parts.append(str(start) if start == end else f"{start}-{end}")
-        start = end = shotpoint
-    parts.append(str(start) if start == end else f"{start}-{end}")
+        if run_step is None:
+            run_step = gap
+            run_end = shotpoint
+            continue
+        if gap == run_step:
+            run_end = shotpoint
+            continue
+        parts.append(_format_shotpoint_run(run_start, run_end))
+        run_start = run_end = shotpoint
+        run_step = None
+
+    parts.append(_format_shotpoint_run(run_start, run_end))
     return ", ".join(parts)
+
+
+def _format_shotpoint_run(start: int, end: int) -> str:
+    if start == end:
+        return str(start)
+    return f"{start}-{end}"
 
 
 def format_limit_value(spec: SurveySpecRow) -> str:
@@ -507,49 +658,52 @@ def _details_for_failed_spec(
     ]
     combined_label = _combined_sequence_label(sets)
 
-    if spec.statistic in _REFERENCE_STATS:
-        by_sequence: dict[str, list[int]] = {seq: [] for seq in sequence_nos}
-        if spec.statistic == StatType.MAX_CONSECUTIVE_FAILED:
-            worst: list[int] = []
-            worst_sequence = sequence_nos[0] if sequence_nos else "—"
-            for sequence_no, shotpoints, values in _all_source_series(
-                sets, spec.metric, excluded_map
-            ):
-                streak = _longest_failed_streak(shotpoints, values, spec.reference_value)
-                if len(streak) > len(worst):
-                    worst = streak
-                    worst_sequence = sequence_no
-            if worst:
-                by_sequence[worst_sequence] = worst
-        else:
-            for sequence_no, shotpoint, value in _pooled_values(
-                sets, spec.metric, excluded_map
-            ):
-                if _shot_exceeds_metric_limit(value, spec.reference_value):
-                    by_sequence.setdefault(sequence_no, []).append(shotpoint)
-
-        details: list[FailedSpecDetail] = []
-        for sequence_no in sequence_nos:
-            shotpoints = by_sequence.get(sequence_no, [])
-            if not shotpoints:
-                continue
-            details.append(
-                FailedSpecDetail(
-                    sequence_no=sequence_no,
-                    shotpoints_text=format_shotpoint_ranges(shotpoints),
-                    statistic_text=reason,
-                )
+    # Average is a whole-line statistic: there are no individual offending
+    # shotpoints, so report it as a single combined row.
+    if spec.statistic == StatType.AVERAGE:
+        return [
+            FailedSpecDetail(
+                sequence_no=combined_label,
+                shotpoints_text="—",
+                statistic_text=reason,
+                applies_to_all_sequences=True,
+                severity=spec.severity,
             )
-        return details
+        ]
 
-    return [
-        FailedSpecDetail(
-            sequence_no=combined_label,
-            shotpoints_text="—",
-            statistic_text=reason,
-            applies_to_all_sequences=True,
+    # Absolute Max, Max Percentage of Failure and Max Consecutive Failed Shotpoint
+    # all attribute the offending shotpoints; list them per sequence.
+    by_sequence: dict[str, list[int]] = {}
+    for (sequence_no, _source_no), shotpoints in _flagged_points_by_source(
+        sets, spec, excluded_map
+    ).items():
+        by_sequence.setdefault(sequence_no, []).extend(shotpoints)
+
+    details: list[FailedSpecDetail] = []
+    for sequence_no in sequence_nos:
+        shotpoints = by_sequence.get(sequence_no, [])
+        if not shotpoints:
+            continue
+        details.append(
+            FailedSpecDetail(
+                sequence_no=sequence_no,
+                shotpoints_text=format_shotpoint_ranges(shotpoints),
+                statistic_text=reason,
+                severity=spec.severity,
+            )
         )
-    ]
+
+    if not details:
+        details.append(
+            FailedSpecDetail(
+                sequence_no=combined_label,
+                shotpoints_text="—",
+                statistic_text=reason,
+                applies_to_all_sequences=True,
+                severity=spec.severity,
+            )
+        )
+    return details
 
 
 def evaluate_spec_combined(
