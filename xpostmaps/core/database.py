@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import sqlite3
 import time
@@ -438,6 +439,27 @@ class Database:
                     ON postplot_4d_preplot_shotpoints(project_id, file_path, line_name)
                 """
             )
+
+        self._conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS postplot_4d_survey_plot_cache (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                project_id INTEGER NOT NULL,
+                baseline_kind TEXT NOT NULL,
+                source_fingerprint TEXT NOT NULL,
+                payload BLOB NOT NULL,
+                updated_at TEXT NOT NULL,
+                FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE,
+                UNIQUE(project_id, baseline_kind)
+            )
+            """
+        )
+        self._conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_postplot_4d_survey_plot_cache_lookup
+                ON postplot_4d_survey_plot_cache(project_id, baseline_kind)
+            """
+        )
 
         self._conn.commit()
 
@@ -1431,6 +1453,63 @@ class Database:
             )
         return grouped
 
+    def load_all_postplot_4d_diffs_plot_lite(
+        self,
+        project_name: str,
+        baseline_kind: str,
+    ) -> dict[str, list[Postplot4DDiffRow]]:
+        """Load plot-only diff columns for every sequence in one query.
+
+        Skips baseline/source coordinates and lat/long strings so large surveys
+        (e.g. 7027 with ~1M rows) load faster for Survey Plots.
+        """
+        project_id = self.get_project_id(project_name)
+        if project_id is None:
+            return {}
+        rows = self._conn.execute(
+            """
+            SELECT sequence_id, shotpoint, crossline_m, inline_m, radial_m,
+                   navplan_feather_deg, line_feather_deg,
+                   vessel_id, firing_source_id
+            FROM postplot_4d_diffs
+            WHERE project_id=? AND baseline_kind=?
+            ORDER BY sequence_id, shotpoint
+            """,
+            (project_id, baseline_kind),
+        ).fetchall()
+        grouped: dict[str, list[Postplot4DDiffRow]] = {}
+        for row in rows:
+            sequence_id = str(row["sequence_id"] or "")
+            if not sequence_id:
+                continue
+            nav_feather = row["navplan_feather_deg"]
+            line_feather = row["line_feather_deg"]
+            grouped.setdefault(sequence_id, []).append(
+                Postplot4DDiffRow(
+                    shotpoint=int(row["shotpoint"]),
+                    baseline_x=0.0,
+                    baseline_y=0.0,
+                    baseline_latitude="",
+                    baseline_longitude="",
+                    source_x=0.0,
+                    source_y=0.0,
+                    source_latitude="",
+                    source_longitude="",
+                    crossline_m=float(row["crossline_m"]),
+                    inline_m=float(row["inline_m"]),
+                    radial_m=float(row["radial_m"]),
+                    navplan_feather_deg=(
+                        None if nav_feather is None else float(nav_feather)
+                    ),
+                    line_feather_deg=(
+                        None if line_feather is None else float(line_feather)
+                    ),
+                    vessel_id=str(row["vessel_id"] or ""),
+                    firing_source_id=str(row["firing_source_id"] or ""),
+                )
+            )
+        return grouped
+
     def has_postplot_4d_diffs(
         self,
         project_name: str,
@@ -1490,6 +1569,84 @@ class Database:
             (project_id, baseline_kind, sequence_id),
         ).fetchone()
         return str(row["updated_at"] or "") if row else ""
+
+    def survey_plot_diff_signature(
+        self,
+        project_name: str,
+        baseline_kind: str,
+        sequence_ids: list[str],
+    ) -> str:
+        """Compact signature of saved diff rows for matched survey sequences."""
+        if not sequence_ids:
+            return ""
+        project_id = self.get_project_id(project_name)
+        if project_id is None:
+            return ""
+        placeholders = ",".join("?" for _ in sequence_ids)
+        rows = self._conn.execute(
+            f"""
+            SELECT sequence_id, COUNT(*) AS row_count, MAX(updated_at) AS updated_at
+            FROM postplot_4d_diffs
+            WHERE project_id=? AND baseline_kind=? AND sequence_id IN ({placeholders})
+            GROUP BY sequence_id
+            ORDER BY sequence_id
+            """,
+            (project_id, baseline_kind, *sequence_ids),
+        ).fetchall()
+        parts = [
+            (str(row["sequence_id"]), int(row["row_count"] or 0), str(row["updated_at"] or ""))
+            for row in rows
+        ]
+        return hashlib.sha256(
+            json.dumps(parts, separators=(",", ":")).encode()
+        ).hexdigest()[:32]
+
+    def load_survey_plot_cache(
+        self,
+        project_name: str,
+        baseline_kind: str,
+    ) -> bytes | None:
+        project_id = self.get_project_id(project_name)
+        if project_id is None:
+            return None
+        row = self._conn.execute(
+            """
+            SELECT payload
+            FROM postplot_4d_survey_plot_cache
+            WHERE project_id=? AND baseline_kind=?
+            """,
+            (project_id, baseline_kind),
+        ).fetchone()
+        if row is None:
+            return None
+        payload = row["payload"]
+        return bytes(payload) if payload is not None else None
+
+    def save_survey_plot_cache(
+        self,
+        project_name: str,
+        baseline_kind: str,
+        *,
+        fingerprint: str,
+        payload: bytes,
+    ) -> None:
+        project_id = self.get_project_id(project_name)
+        if project_id is None:
+            return
+        now = self._now()
+        self._conn.execute(
+            """
+            INSERT INTO postplot_4d_survey_plot_cache (
+                project_id, baseline_kind, source_fingerprint, payload, updated_at
+            ) VALUES (?, ?, ?, ?, ?)
+            ON CONFLICT(project_id, baseline_kind) DO UPDATE SET
+                source_fingerprint=excluded.source_fingerprint,
+                payload=excluded.payload,
+                updated_at=excluded.updated_at
+            """,
+            (project_id, baseline_kind, fingerprint, payload, now),
+        )
+        self._conn.commit()
 
     def delete_postplot_4d_diffs_for_files(
         self,

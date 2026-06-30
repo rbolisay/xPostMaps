@@ -38,6 +38,7 @@ from xpostmaps.core.postplot_4d_diff import (
     source_has_streamers,
 )
 from xpostmaps.core.postplot_4d_diff_worker import DiffStatRecalcWorker, Single4DStatCalcWorker
+from xpostmaps.core.postplot_4d_survey_plots_worker import SurveyPlotsLoadWorker
 from xpostmaps.core.postplot_4d_matching import (
     BaselineKind,
     Postplot4DMatchRow,
@@ -54,8 +55,10 @@ from xpostmaps.core.postplot_4d_plot_data import (
 from xpostmaps.parsers.metadata_parser import parse_file_metadata
 from xpostmaps.ui.dialog_size_utils import center_widget_on_screen, postplot_4d_dialog_size
 from xpostmaps.ui.dialogs.postplot_4d_plot_pdf_dialog import Postplot4DStatPlotPdfDialog
+from xpostmaps.ui.dialogs.postplot_4d_survey_plot_pdf_dialog import Postplot4DSurveyPlotPdfDialog
 from xpostmaps.ui.dialogs.base_dialog import SingleInstanceDialog
 from xpostmaps.ui.postplot_4d_stat_plot import Postplot4DStatPlotView
+from xpostmaps.ui.postplot_4d_survey_plots import Postplot4DSurveyPlotsView
 
 CoordMode = Literal["en", "lat"]
 
@@ -310,6 +313,7 @@ class Postplot4DDialog:
         diff_rows: list[Postplot4DDiffRow] = []
         bulk_recalc_worker: DiffStatRecalcWorker | None = None
         single_recalc_worker: Single4DStatCalcWorker | None = None
+        survey_load_worker: SurveyPlotsLoadWorker | None = None
         bulk_recalc_launch_pending = False
         host_dialog: SingleInstanceDialog | None = None
         crs_note: QLabel | None = None
@@ -759,9 +763,9 @@ class Postplot4DDialog:
             state["active_match"] = None
             state["active_sets"] = []
             stack.setCurrentIndex(0)
-            _autosize_dialog_width(host_dialog, table)
             if host_dialog is not None:
                 host_dialog.setWindowTitle("Postplot 4D")
+                _frame_and_center_dialog()
 
         def _plottable_matches() -> list[Postplot4DMatchRow]:
             """Matched rows (current baseline) that have saved 4D Stat data, in
@@ -1021,6 +1025,101 @@ class Postplot4DDialog:
                 plot_view=plot_view,
                 logo_path=settings.logo_path,
                 default_output_dir=default_dir,
+            )
+
+        def show_survey_plots_view() -> None:
+            nonlocal survey_load_worker
+            if survey_load_worker is not None and survey_load_worker.isRunning():
+                return
+            if database is None or not database.db_path or not project_name.strip():
+                QMessageBox.information(
+                    host_dialog or parent,
+                    "Survey Plots",
+                    "Survey Plots requires a project database with saved 4D Stat data.",
+                )
+                return
+            active_baseline = state["baseline"]
+            assert active_baseline in ("navplan", "preplot")
+            matched = [row for row in rows_for(active_baseline) if row.has_match]
+            if not matched:
+                QMessageBox.information(
+                    host_dialog or parent,
+                    "Survey Plots",
+                    "No matched lines for the current baseline.",
+                )
+                return
+            if host_dialog is not None:
+                host_dialog.setWindowTitle("Survey Plots")
+                _frame_and_center_dialog()
+            stack.setCurrentIndex(3)
+            survey_plots_view.set_loading(
+                True,
+                "Loading saved 4D Stat data from project database…",
+            )
+            survey_plots_btn.setEnabled(False)
+            survey_load_worker = SurveyPlotsLoadWorker(
+                database.db_path,
+                project_name.strip(),
+                active_baseline,
+                matched,
+                parent=host_dialog or parent,
+            )
+            survey_load_worker.progress.connect(
+                lambda message: survey_plots_view.set_loading(True, message),
+                Qt.ConnectionType.QueuedConnection,
+            )
+            survey_load_worker.cached_ready.connect(_on_survey_plots_cached)
+            survey_load_worker.finished_ok.connect(_on_survey_plots_loaded)
+            survey_load_worker.finished_failed.connect(_on_survey_plots_load_failed)
+            survey_load_worker.finished.connect(_on_survey_load_worker_finished)
+            survey_load_worker.start()
+
+        def _on_survey_plots_cached(result) -> None:
+            survey_plots_view.apply_load_result(result, from_cache=True)
+            survey_plots_view.set_loading(
+                True,
+                "Checking for new or changed lines…",
+            )
+
+        def _on_survey_plots_loaded(result) -> None:
+            survey_plots_view.apply_load_result(result)
+            survey_plots_btn.setEnabled(True)
+
+        def _on_survey_plots_load_failed(message: str) -> None:
+            survey_plots_view.set_loading(False)
+            survey_plots_btn.setEnabled(True)
+            stack.setCurrentIndex(0)
+            if host_dialog is not None:
+                host_dialog.setWindowTitle("Postplot 4D")
+            QMessageBox.information(
+                host_dialog or parent,
+                "Survey Plots",
+                message,
+            )
+
+        def _on_survey_load_worker_finished() -> None:
+            nonlocal survey_load_worker
+            survey_load_worker = None
+            survey_plots_btn.setEnabled(True)
+
+        def show_main_from_survey_plots() -> None:
+            show_main_view()
+
+        def export_survey_plot_pdf() -> None:
+            if not survey_plots_view.diff_sets():
+                return
+            default_dir = (
+                Path(database.db_path).parent
+                if database is not None and database.db_path
+                else Path.cwd()
+            )
+            baseline = state.get("baseline", "survey")
+            Postplot4DSurveyPlotPdfDialog.open(
+                host_dialog or parent,
+                survey_view=survey_plots_view,
+                logo_path=settings.logo_path,
+                default_output_dir=default_dir,
+                baseline_kind=str(baseline),
             )
 
         def _persist_note() -> str:
@@ -1457,7 +1556,8 @@ class Postplot4DDialog:
                 f"{sum(1 for row in rows if row.has_match)} matched imported line(s)"
             )
             _fit_table(table)
-            _autosize_dialog_width(host_dialog, table)
+            if stack.currentIndex() == 0 and host_dialog is not None:
+                _frame_and_center_dialog()
             if crs_note is not None:
                 crs_note.setText(_crs_note_for_match(None))
 
@@ -1491,7 +1591,7 @@ class Postplot4DDialog:
             refresh_table()
 
         def build(dialog: SingleInstanceDialog) -> None:
-            nonlocal summary, table, stack, diff_title, diff_table, diff_summary, coord_toggle, recalc_btn, bulk_recalc_btn, host_dialog, crs_note, diff_crs_note, plot_view, plot_btn, diff_table_panel, diff_toolbar
+            nonlocal summary, table, stack, diff_title, diff_table, diff_summary, coord_toggle, recalc_btn, bulk_recalc_btn, host_dialog, crs_note, diff_crs_note, plot_view, plot_btn, diff_table_panel, diff_toolbar, survey_plots_view, survey_plots_btn, main_page
             host_dialog = dialog
             layout = dialog.content_layout
             _clear_layout(layout)
@@ -1528,6 +1628,11 @@ class Postplot4DDialog:
             baseline_row.addWidget(navplan_radio)
             baseline_row.addWidget(preplot_radio)
             baseline_row.addStretch()
+            survey_plots_btn = QPushButton("Survey Plots")
+            survey_plots_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+            survey_plots_btn.setMinimumSize(130, 32)
+            survey_plots_btn.clicked.connect(show_survey_plots_view)
+            baseline_row.addWidget(survey_plots_btn)
             bulk_recalc_btn = QPushButton(_BULK_RECALC_LABEL)
             bulk_recalc_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
             bulk_recalc_btn.setMinimumSize(170, 32)
@@ -1622,9 +1727,15 @@ class Postplot4DDialog:
             plot_view.load_preplot_requested.connect(load_preplot_by_text)
             plot_view.setVisible(False)
 
+            survey_plots_view = Postplot4DSurveyPlotsView(parent=main_page)
+            survey_plots_view.back_requested.connect(show_main_from_survey_plots)
+            survey_plots_view.export_pdf_requested.connect(export_survey_plot_pdf)
+            survey_plots_view.setVisible(False)
+
             stack.addWidget(main_page)
             stack.addWidget(diff_page)
             stack.addWidget(plot_view)
+            stack.addWidget(survey_plots_view)
             layout.addWidget(stack, stretch=1)
 
             def _on_stack_changed(index: int) -> None:
@@ -1634,14 +1745,28 @@ class Postplot4DDialog:
                 recalc_btn.setVisible(on_table)
                 plot_btn.setVisible(on_table)
                 plot_view.setVisible(index == 2)
+                survey_plots_view.setVisible(index == 3)
                 if index == 2:
                     plot_view.refresh()
+                if index == 3:
+                    survey_plots_view.refresh()
 
             stack.currentChanged.connect(_on_stack_changed)
 
             if not hasattr(dialog, "_xpost_bulk_recalc_hook"):
                 dialog.finished.connect(_cancel_bulk_recalc_if_running)
                 dialog._xpost_bulk_recalc_hook = True
+
+            def _cancel_survey_load_if_running() -> None:
+                nonlocal survey_load_worker
+                if survey_load_worker is not None and survey_load_worker.isRunning():
+                    survey_load_worker.requestInterruption()
+                    survey_load_worker.wait(2000)
+                survey_load_worker = None
+
+            if not hasattr(dialog, "_xpost_survey_load_hook"):
+                dialog.finished.connect(_cancel_survey_load_if_running)
+                dialog._xpost_survey_load_hook = True
 
             invalidate_row_cache()
             if isinstance(state["active_match"], Postplot4DMatchRow):
@@ -1660,6 +1785,9 @@ class Postplot4DDialog:
         recalc_btn = QPushButton()
         bulk_recalc_btn = QPushButton()
         plot_view = Postplot4DStatPlotView()
+        survey_plots_view = Postplot4DSurveyPlotsView()
+        survey_plots_btn = QPushButton()
+        main_page = QWidget()
         plot_btn = QPushButton()
         diff_table_panel = QWidget()
         diff_toolbar = QHBoxLayout()

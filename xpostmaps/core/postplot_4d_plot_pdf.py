@@ -108,6 +108,7 @@ def _draw_page_header(
     line_label: str,
     time_series_label: str,
     logo_file: Path | None,
+    time_series_prefix: str | None = "Time Series: ",
 ) -> None:
     pad = max(4, int(4 / 25.4 * dpi))
     gap = max(2, int(2 / 25.4 * dpi))
@@ -148,10 +149,16 @@ def _draw_page_header(
         painter.drawText(content_left, y + meta_metrics.ascent(), line_label)
         y += meta_metrics.height() + 1
     if time_series_label:
+        if time_series_prefix is None:
+            detail = time_series_label
+        elif time_series_prefix:
+            detail = f"{time_series_prefix}{time_series_label}"
+        else:
+            detail = time_series_label
         painter.drawText(
             content_left,
             y + meta_metrics.ascent(),
-            f"Time Series: {time_series_label}",
+            detail,
         )
 
 
