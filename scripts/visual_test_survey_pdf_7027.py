@@ -22,7 +22,9 @@ from xpostmaps.core.postplot_4d_survey_plot_pdf import (
     export_survey_plot_pdf,
     iter_survey_plot_page_specs,
     render_survey_plot_preview_pages,
+    resolve_survey_plot_output_path,
 )
+from xpostmaps.core.survey_plot_pdf_guardrails import validate_aerial_page_image
 from xpostmaps.core.postplot_4d_survey_plots_worker import SurveyPlotsLoadWorker
 from xpostmaps.ui.postplot_4d_survey_plots.survey_plots_view import Postplot4DSurveyPlotsView
 
@@ -112,17 +114,9 @@ def _assert_page(page, index: int) -> list[str]:
 
     kind = page.spec.page_kind.value
     if kind == "aerial":
-        width = image.width()
-        left = _sample_colored(image, x0, width // 3, y0, y1)
-        right = _sample_colored(image, 2 * width // 3, x1 - 180, y0, y1)
-        legend = _sample_colored(image, x1 - 170, x1 - 4, y0, y1)
-        if left < 8 or right < 8:
-            errors.append(
-                f"page {index + 1} ({page.spec.page_key}): heatmap not at full extent "
-                f"(left={left}, right={right})"
-            )
-        if legend < 8:
-            errors.append(f"page {index + 1} ({page.spec.page_key}): legend too sparse")
+        errors.extend(
+            validate_aerial_page_image(image, page_key=page.spec.page_key)
+        )
 
     if kind == "histogram":
         center_x = (x0 + x1) // 2

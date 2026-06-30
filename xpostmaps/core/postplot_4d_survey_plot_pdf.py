@@ -25,6 +25,7 @@ from xpostmaps.core.postplot_4d_plot_pdf import (
     _page_layout_pixels,
     resolve_logo_path,
 )
+from xpostmaps.core.survey_plot_pdf_guardrails import validate_aerial_plot_body
 from xpostmaps.ui.postplot_4d_survey_plots.survey_plots_view import Postplot4DSurveyPlotsView
 
 DEFAULT_SURVEY_PLOT_PDF_REPORT_TITLE = "Survey 4D Report"
@@ -299,12 +300,19 @@ def _render_page_image(
             return None
         canvas.render(heatmap, force=True)
         QApplication.processEvents()
-        return canvas.capture_image(
+        image = canvas.capture_image(
             width=width,
             height=height,
             for_pdf=True,
             dpi=dpi,
         )
+        errors = validate_aerial_plot_body(image, page_key=spec.page_key)
+        if errors:
+            raise RuntimeError(
+                "Survey plot PDF aerial layout regression: "
+                + "; ".join(errors)
+            )
+        return image
     if spec.page_kind == SurveyPlotPageKind.HISTOGRAM:
         hist_canvas = view.histogram_canvas(kind)
         if hist_canvas is None:

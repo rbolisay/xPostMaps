@@ -2,17 +2,25 @@
 
 from pathlib import Path
 
+import numpy as np
 import pytest
 
 pytest.importorskip("PySide6")
 
+from PySide6.QtWidgets import QApplication
+
 from xpostmaps.core.postplot_4d_diff import Postplot4DDiffRow
 from xpostmaps.core.postplot_4d_matching import Postplot4DMatchRow
 from xpostmaps.core.postplot_4d_plot_data import SequenceDiffSet
+from xpostmaps.core.postplot_4d_survey_plot_data import AerialHeatmapData
 from xpostmaps.core.postplot_4d_survey_plot_pdf import (
     Postplot4DSurveyPlotPdfOptions,
     iter_survey_plot_page_specs,
     resolve_survey_plot_output_path,
+)
+from xpostmaps.core.survey_plot_pdf_guardrails import validate_aerial_plot_body
+from xpostmaps.ui.postplot_4d_survey_plots.aerial_heatmap_canvas import (
+    AerialHeatmapCanvas,
 )
 
 
@@ -137,3 +145,46 @@ def test_iter_survey_plot_page_specs_respects_flags() -> None:
     titles = {spec.page_key: spec.plot_title for spec in specs}
     assert titles["aerial:crossline"] == "crossline aerial"
     assert titles["histogram:inline"] == "inline histogram"
+
+
+def _synthetic_aerial_heatmap() -> AerialHeatmapData:
+    rows, cols = 48, 28
+    grid = np.linspace(-12.0, 12.0, rows * cols, dtype=np.float64).reshape(rows, cols)
+    return AerialHeatmapData(
+        image=grid,
+        sequence_labels=[str(1000 + index) for index in range(cols)],
+        sequence_min=1000,
+        sequence_max=1000 + cols - 1,
+        shot_min=500,
+        shot_max=500 + rows - 1,
+        value_limit=15.0,
+        source_no="001",
+        kind="crossline",
+        map_label="Synthetic aerial regression grid",
+    )
+
+
+@pytest.mark.parametrize("dpi", [150, 600])
+def test_aerial_pdf_capture_fills_plot_band_at_export_sizes(dpi: int) -> None:
+    """Guardrail: PDF aerial raster must fill the plot band even on a small widget."""
+    qapp = QApplication.instance() or QApplication([])
+    canvas = AerialHeatmapCanvas()
+    canvas.resize(320, 240)
+    canvas.show()
+    qapp.processEvents()
+
+    canvas.render(_synthetic_aerial_heatmap())
+    qapp.processEvents()
+
+    plot_w = 1800 if dpi >= 600 else 900
+    plot_h = 1100 if dpi >= 600 else 650
+    body = canvas.capture_image(
+        width=plot_w,
+        height=plot_h,
+        for_pdf=True,
+        dpi=dpi,
+    )
+    assert not body.isNull()
+
+    errors = validate_aerial_plot_body(body, page_key=f"aerial@{dpi}dpi")
+    assert not errors, "; ".join(errors)

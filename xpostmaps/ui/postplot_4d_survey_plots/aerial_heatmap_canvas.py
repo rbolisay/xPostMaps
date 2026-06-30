@@ -316,15 +316,20 @@ class AerialHeatmapCanvas(QWidget):
             )
 
         body_h = max(1, height)
+        old_plot_size = self._plot.size()
+        old_legend_plot_size = self._legend_plot.size()
         self._legend_plot.setYLink(None)
         self._apply_full_extent(reset_view=True)
         self._viewbox.zoom_to_extent()
         QApplication.processEvents()
         legend_w, _bar_w, _axis_w, _tick_font, unit_px = self._apply_legend_pdf_layout(dpi)
+        plot_w = max(1, width - legend_w)
         try:
+            self._plot.resize(plot_w, body_h)
+            self._legend_plot.resize(legend_w, body_h)
+            self._apply_full_extent(reset_view=True)
             self._viewbox.zoom_to_extent()
             QApplication.processEvents()
-            plot_w = max(1, width - legend_w)
             plot_body = render_pyqtgraph_plot_for_pdf(
                 self._plot,
                 width=plot_w,
@@ -338,6 +343,8 @@ class AerialHeatmapCanvas(QWidget):
                 dpi=dpi,
             )
         finally:
+            self._plot.resize(old_plot_size)
+            self._legend_plot.resize(old_legend_plot_size)
             self._legend_plot.setYLink(self._plot)
             self._restore_legend_ui_layout()
             apply_screen_axis_styles(self._plot, bottom_tick_offset=10)
