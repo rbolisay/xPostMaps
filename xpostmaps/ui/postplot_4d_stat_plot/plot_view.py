@@ -243,6 +243,24 @@ class Postplot4DStatPlotView(QWidget):
         back_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         back_btn.setMinimumSize(80, 32)
         back_btn.clicked.connect(self.back_requested.emit)
+        plot_tips = QLabel(
+            "Hold Right Click to Pan on Time Series Plot\n"
+            "Double Right Click On the Time Series Plot to reset Zoom\n"
+            "Use Mouse Scroll to Zoom In/Out in Time Series Plot\n"
+            "Left Click drag right to Zoom Window\n"
+            "Left Click Drag Left to Select Shotpoints"
+        )
+        plot_tips.setWordWrap(True)
+        plot_tips.setAlignment(
+            Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignTop
+        )
+        plot_tips.setStyleSheet("color: #6e7681; font-size: 10px;")
+        back_col = QWidget()
+        back_col_layout = QVBoxLayout(back_col)
+        back_col_layout.setContentsMargins(0, 0, 0, 0)
+        back_col_layout.setSpacing(4)
+        back_col_layout.addWidget(back_btn, alignment=Qt.AlignmentFlag.AlignRight)
+        back_col_layout.addWidget(plot_tips, alignment=Qt.AlignmentFlag.AlignRight)
         self._subline_nav = _SublineNavigator(parent=self)
         self._subline_nav.previous_requested.connect(self.previous_subline_requested.emit)
         self._subline_nav.next_requested.connect(self.next_subline_requested.emit)
@@ -257,7 +275,7 @@ class Postplot4DStatPlotView(QWidget):
         toolbar.addStretch()
         toolbar.addWidget(self._subline_nav, alignment=top)
         toolbar.addStretch()
-        toolbar.addWidget(back_btn, alignment=top)
+        toolbar.addWidget(back_col, alignment=top)
         root.addLayout(toolbar)
 
         self._title = QLabel("")
