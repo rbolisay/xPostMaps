@@ -1050,7 +1050,8 @@ class Postplot4DDialog:
                 return
             if host_dialog is not None:
                 host_dialog.setWindowTitle("Survey Plots")
-                _frame_and_center_dialog()
+                if stack.currentIndex() != 3:
+                    _frame_and_center_dialog()
             stack.setCurrentIndex(3)
             survey_plots_view.set_loading(
                 True,
@@ -1084,6 +1085,8 @@ class Postplot4DDialog:
         def _on_survey_plots_loaded(result) -> None:
             survey_plots_view.apply_load_result(result)
             survey_plots_btn.setEnabled(True)
+            if host_dialog is not None and stack.currentIndex() == 3:
+                _frame_and_center_dialog()
 
         def _on_survey_plots_load_failed(message: str) -> None:
             survey_plots_view.set_loading(False)

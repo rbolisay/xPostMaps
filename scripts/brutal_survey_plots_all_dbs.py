@@ -29,6 +29,7 @@ from xpostmaps.core.postplot_4d_survey_plot_pdf import (  # noqa: E402
 )
 from xpostmaps.core.postplot_4d_survey_plot_data import (  # noqa: E402
     combined_survey_extent,
+    ordered_preplot_column_sets,
     validate_aerial_heatmap_axes,
     validate_histogram_sample_count,
     validate_pie_chart_stats,
@@ -104,9 +105,10 @@ def _assert_visual_image(image, *, label: str, require_colorbar: bool = False) -
 
 def _validate_load_result(result, extent) -> list[str]:
     errors: list[str] = []
-    if result.sequence_count != extent.sequence_count:
+    preplot_count = len(ordered_preplot_column_sets(result.sets))
+    if extent.sequence_count != preplot_count:
         errors.append(
-            f"sequence_count {result.sequence_count} != {extent.sequence_count}"
+            f"preplot_count {preplot_count} != extent columns {extent.sequence_count}"
         )
     if result.shotpoint_count != extent.shotpoint_row_count:
         errors.append(
@@ -274,9 +276,12 @@ def run_case(case: DbCase) -> dict[str, object]:
 
     result = result_box[0]
     extent = combined_survey_extent(result.sets)
+    preplot_count = len(ordered_preplot_column_sets(result.sets))
     print(
         f"[{case.label}] load {load_s:.1f}s — "
-        f"{result.sequence_count} seq ({extent.sequence_min}..{extent.sequence_max}), "
+        f"{result.sequence_count} seq, {preplot_count} preplot cols "
+        f"({extent.sequence_labels[0] if extent.sequence_labels else '?'}.."
+        f"{extent.sequence_labels[-1] if extent.sequence_labels else '?'}), "
         f"shots {extent.shot_min}-{extent.shot_max}, "
         f"{result.shotpoint_count:,} rows, kinds={result.available_kinds}, "
         f"pies={len(result.pie_charts)}"
@@ -404,8 +409,9 @@ def run_case(case: DbCase) -> dict[str, object]:
             "ui_pngs": len(ui_pngs),
             "pdf_kb": pdf_kb,
             "extent": (
-                f"seq {extent.sequence_count} "
-                f"({extent.sequence_min}..{extent.sequence_max}), "
+                f"{preplot_count} preplots "
+                f"({extent.sequence_labels[0] if extent.sequence_labels else '?'}.."
+                f"{extent.sequence_labels[-1] if extent.sequence_labels else '?'}), "
                 f"shots {extent.shot_min}-{extent.shot_max}, "
                 f"{extent.shotpoint_row_count:,} rows"
             ),

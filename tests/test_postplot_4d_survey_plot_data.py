@@ -72,15 +72,15 @@ def test_combined_survey_extent_axes() -> None:
     sets = [_make_set([1.0, -2.0, 3.0])]
     extent = combined_survey_extent(sets)
     assert extent.sequence_count == 1
-    assert extent.sequence_min == 1
-    assert extent.sequence_max == 1
+    assert extent.sequence_labels == ["LineA"]
     assert extent.shot_min == 1000
     assert extent.shot_max == 1002
     assert extent.shotpoint_row_count == 3
     heatmap = build_survey_aerial_heatmap(sets, "crossline")
     assert heatmap is not None
-    assert heatmap.sequence_min == 1
-    assert heatmap.sequence_max == 1
+    assert heatmap.sequence_labels == ["LineA"]
+    assert heatmap.shot_min == 1000
+    assert heatmap.shot_max == 1002
     assert validate_aerial_heatmap_axes(heatmap, extent) == []
 
 
@@ -90,12 +90,62 @@ def test_build_survey_aerial_heatmap_axes() -> None:
     sets = [_make_set([1.0, -2.0, 3.0])]
     heatmap = build_survey_aerial_heatmap(sets, "crossline")
     assert heatmap is not None
-    assert heatmap.sequence_labels == ["001"]
-    assert heatmap.sequence_min == 1
-    assert heatmap.sequence_max == 1
+    assert heatmap.sequence_labels == ["LineA"]
     assert heatmap.shot_min == 1000
     assert heatmap.shot_max == 1002
     assert heatmap.image.shape == (3, 1)
+
+
+def test_preplot_column_layers_sequences() -> None:
+    from xpostmaps.core.postplot_4d_survey_plot_data import build_survey_aerial_heatmap
+
+    def _set_for_sequence(
+        sequence_no: str,
+        *,
+        shotpoint: int,
+        value: float,
+    ) -> SequenceDiffSet:
+        match = Postplot4DMatchRow(
+            baseline_name="1305R1",
+            baseline_kind="navplan",
+            line_name="AcqLine",
+            subline="001",
+            sequence_no=sequence_no,
+            first_sp=shotpoint,
+            last_sp=shotpoint,
+            line_direction="Up-line",
+            sequence_id=f"seq-{sequence_no}",
+        )
+        row = Postplot4DDiffRow(
+            shotpoint=shotpoint,
+            baseline_x=0.0,
+            baseline_y=0.0,
+            baseline_latitude="",
+            baseline_longitude="",
+            source_x=0.0,
+            source_y=0.0,
+            source_latitude="",
+            source_longitude="",
+            crossline_m=value,
+            inline_m=value,
+            radial_m=value,
+            firing_source_id="001",
+        )
+        return SequenceDiffSet(match_row=match, diff_rows=[row])
+
+    sets = [
+        _set_for_sequence("1", shotpoint=1000, value=1.0),
+        _set_for_sequence("1", shotpoint=1001, value=11.0),
+        _set_for_sequence("3", shotpoint=1000, value=3.0),
+        _set_for_sequence("5", shotpoint=1000, value=5.0),
+    ]
+    heatmap = build_survey_aerial_heatmap(sets, "crossline")
+    assert heatmap is not None
+    assert heatmap.sequence_labels == ["1305R1"]
+    assert heatmap.image.shape == (2, 1)
+    grid = np.asarray(heatmap.image)
+    assert float(grid[1, 0]) == 5.0
+    assert float(grid[0, 0]) == 11.0
 
 
 def test_cumulative_histogram_degrees_axis() -> None:

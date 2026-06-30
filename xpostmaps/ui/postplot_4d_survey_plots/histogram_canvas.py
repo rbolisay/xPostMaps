@@ -6,14 +6,17 @@ import numpy as np
 import pyqtgraph as pg
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QImage
-from PySide6.QtWidgets import QSizePolicy, QVBoxLayout, QWidget
+from PySide6.QtWidgets import QApplication, QSizePolicy, QVBoxLayout, QWidget
 
 from xpostmaps.core.postplot_4d_survey_plot_data import CumulativeHistogram
 from xpostmaps.ui.postplot_4d_survey_plots.survey_plot_navigation import (
     apply_plot_extent,
     create_survey_plot_widget,
 )
-from xpostmaps.ui.postplot_4d_survey_plots.survey_plot_pdf_render import compose_survey_plot_image
+from xpostmaps.ui.postplot_4d_survey_plots.survey_plot_pdf_render import (
+    apply_screen_axis_styles,
+    compose_survey_plot_image,
+)
 
 _PLOT_BG = "#ffffff"
 _PLOT_FG = "#111827"
@@ -73,6 +76,7 @@ class HistogramCanvas(QWidget):
 
     def render(self, histogram: CumulativeHistogram) -> None:
         self._histogram = histogram
+        apply_screen_axis_styles(self._plot, bottom_tick_offset=4)
         if self._bars is not None:
             self._plot.removeItem(self._bars)
             self._bars = None
@@ -138,11 +142,24 @@ class HistogramCanvas(QWidget):
                 Qt.TransformationMode.SmoothTransformation,
             )
 
-        title_text = title.strip() or self._title
-        return compose_survey_plot_image(
-            self._plot,
-            width=width,
-            height=height,
-            title=title_text,
-            dpi=dpi,
-        )
+        width = max(int(width), 1)
+        height = max(int(height), 1)
+        old_size = self._plot.size()
+        try:
+            self._plot.resize(width, height)
+            if self._histogram is not None:
+                self.render(self._histogram)
+            QApplication.processEvents()
+            return compose_survey_plot_image(
+                self._plot,
+                width=width,
+                height=height,
+                dpi=dpi,
+                include_title=False,
+            )
+        finally:
+            self._plot.resize(old_size)
+            if self._histogram is not None:
+                self.render(self._histogram)
+            apply_screen_axis_styles(self._plot, bottom_tick_offset=4)
+            QApplication.processEvents()

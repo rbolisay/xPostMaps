@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
+
 import pyqtgraph as pg
 from PySide6.QtCore import QPointF, Qt
 from PySide6.QtGui import QMouseEvent, QPainter
@@ -13,6 +15,18 @@ from xpostmaps.ui.theme import apply_menu_theme
 
 class SurveyPlotViewBox(MapViewBox):
     """Survey plot navigation: right-drag pan, scroll zoom, reset-only context menu."""
+
+    def __init__(self, *args, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        self._after_reset_cb: Callable[[], None] | None = None
+
+    def set_after_reset(self, callback: Callable[[], None] | None) -> None:
+        self._after_reset_cb = callback
+
+    def zoom_to_extent(self) -> None:
+        super().zoom_to_extent()
+        if self._after_reset_cb is not None:
+            self._after_reset_cb()
 
     def _show_pending_menu(self) -> None:
         if self._pending_menu_pos is None:

@@ -91,6 +91,35 @@ def test_resolve_survey_plot_output_path_adds_extension() -> None:
     assert resolve_survey_plot_output_path(options) == Path("out/report.pdf")
 
 
+def test_render_pyqtgraph_plot_for_pdf_restores_axis_font() -> None:
+    from PySide6.QtGui import QFont
+    from PySide6.QtWidgets import QApplication
+
+    from xpostmaps.ui.postplot_4d_survey_plots.survey_plot_navigation import (
+        create_survey_plot_widget,
+    )
+    from xpostmaps.ui.postplot_4d_survey_plots.survey_plot_pdf_render import (
+        _SCREEN_AXIS_FONT,
+        render_pyqtgraph_plot_for_pdf,
+    )
+
+    qapp = QApplication.instance() or QApplication([])
+    plot, _viewbox = create_survey_plot_widget(background="#ffffff")
+    plot.resize(640, 420)
+    plot.show()
+    qapp.processEvents()
+
+    left_axis = plot.getPlotItem().getAxis("left")
+    left_axis.setStyle(tickFont=QFont(_SCREEN_AXIS_FONT))
+    before = left_axis.style["tickFont"].pixelSize()
+
+    render_pyqtgraph_plot_for_pdf(plot, width=900, height=500, dpi=150)
+    QApplication.processEvents()
+
+    after = left_axis.style["tickFont"].pixelSize()
+    assert after == before
+
+
 def test_iter_survey_plot_page_specs_respects_flags() -> None:
     view = _FakeSurveyView(["crossline", "inline"])
     options = Postplot4DSurveyPlotPdfOptions(

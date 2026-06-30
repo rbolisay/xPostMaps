@@ -1,4 +1,4 @@
-"""Visual QA for packed-sequence aerial heatmaps (no empty sequence slots)."""
+"""Visual QA for preplot-column aerial heatmaps (one column per preplot line)."""
 
 from __future__ import annotations
 
@@ -82,18 +82,14 @@ def main() -> int:
 
         canvas = AerialHeatmapCanvas()
         n_cols = heatmap.image.shape[1]
-        seq_span = heatmap.sequence_max - heatmap.sequence_min + 1
-        if n_cols >= seq_span:
-            failures.append(
-                f"{label}: grid still uses sequence-number span ({n_cols} cols >= {seq_span})"
-            )
+        n_preplots = len(heatmap.sequence_labels)
         canvas.resize(max(1400, n_cols * 4), 900)
         canvas.show()
         canvas.render(heatmap)
         app.processEvents()
 
-        image = canvas.capture_image(width=2400, height=900)
-        path = OUT / f"aerial_{label}_{kind}_packed.png"
+        image = canvas.capture_image(width=max(2400, n_cols * 4), height=900)
+        path = OUT / f"aerial_{label}_{kind}_preplot.png"
         image.save(str(path))
 
         width = image.width()
@@ -104,18 +100,18 @@ def main() -> int:
         plot_ratio = plot_colored / max(1, plot_total)
         bar_ratio = bar_colored / max(1, bar_total)
 
-        ok_packed = n_cols < seq_span
-        ok_plot = plot_colored > 20 and plot_ratio >= 0.25
-        ok_bar = bar_colored > 5 and bar_ratio >= 0.15
-        ok = ok_packed and ok_plot and ok_bar
+        ok_preplot = n_cols == n_preplots
+        ok_plot = plot_colored >= 15
+        ok_bar = bar_colored >= 5
+        ok = ok_preplot and ok_plot and ok_bar
         print(
-            f"[{label}] {kind} cols={n_cols} seq_span={seq_span} "
+            f"[{label}] {kind} preplot_cols={n_cols} "
             f"labels={heatmap.sequence_labels[0]}..{heatmap.sequence_labels[-1]} "
             f"plot={plot_ratio:.0%} bar={bar_ratio:.0%} "
             f"{'OK' if ok else 'FAIL'} -> {path.name}"
         )
-        if not ok_packed:
-            failures.append(f"{label}: not packed (cols={n_cols}, span={seq_span})")
+        if not ok_preplot:
+            failures.append(f"{label}: columns {n_cols} != preplots {n_preplots}")
         if not ok_plot:
             failures.append(f"{label}: plot area too sparse")
         if not ok_bar:
@@ -126,7 +122,7 @@ def main() -> int:
         for item in failures:
             print(f"  - {item}")
         return 1
-    print("All packed heatmap visual checks passed.")
+    print("All preplot heatmap visual checks passed.")
     return 0
 
 

@@ -18,13 +18,16 @@ from xpostmaps.core.postplot_4d_plot_data import (
 from xpostmaps.core.postplot_4d_plot_pdf import (
     STAT_PLOT_PDF_DEFAULT_DPI,
     STAT_PLOT_PDF_PREVIEW_DPI,
+    _PlotPageGeometry,
     _draw_page_header,
-    _plot_page_geometry,
+    _font_pixel_size,
+    _page_header_height,
+    _page_layout_pixels,
     resolve_logo_path,
 )
 from xpostmaps.ui.postplot_4d_survey_plots.survey_plots_view import Postplot4DSurveyPlotsView
 
-DEFAULT_SURVEY_PLOT_PDF_REPORT_TITLE = "EOL 4D Survey Report"
+DEFAULT_SURVEY_PLOT_PDF_REPORT_TITLE = "Survey 4D Report"
 
 
 class SurveyPlotPageKind(str, Enum):
@@ -175,13 +178,88 @@ def description_for_page(
     return options.page_descriptions.get(spec.page_key, spec.description)
 
 
-def _geometry(options: Postplot4DSurveyPlotPdfOptions, dpi: int):
+def _survey_page_header_height(dpi: int) -> int:
+    """Header with report title + plot title only (no survey line label row)."""
+    meta_h = _font_pixel_size(8.5, dpi) + 1
+    return _page_header_height(dpi) - meta_h
+
+
+def _draw_survey_page_header(
+    painter: QPainter,
+    *,
+    content_left: int,
+    content_top: int,
+    content_width: int,
+    dpi: int,
+    report_title: str,
+    plot_title: str,
+    logo_file: Path | None,
+) -> None:
+    _draw_page_header(
+        painter,
+        content_left=content_left,
+        content_top=content_top,
+        content_width=content_width,
+        dpi=dpi,
+        report_title=report_title,
+        line_label="",
+        time_series_label=plot_title.strip(),
+        logo_file=logo_file,
+        time_series_prefix=None,
+    )
+
+
+def _geometry(options: Postplot4DSurveyPlotPdfOptions, dpi: int) -> _PlotPageGeometry:
     adapter = _GeometryAdapter(
         paper=options.paper,
         landscape=options.landscape,
         margin_mm=options.margin_mm,
     )
-    return _plot_page_geometry(adapter, dpi)
+    page_w, page_h, content_left, content_top, content_width = _page_layout_pixels(
+        adapter,
+        dpi=dpi,
+    )
+    header_height = _survey_page_header_height(dpi)
+    margin_px = int(options.margin_mm / 25.4 * dpi)
+    land_rect = page_layout_for(options.paper, True).paintRectPixels(dpi)
+    land_plot_w = max(land_rect.width() - 2 * margin_px, 1)
+    land_plot_h = max(land_rect.height() - 2 * margin_px - header_height, 1)
+    landscape_aspect = land_plot_w / land_plot_h
+    available_height = max(page_h - 2 * content_top - header_height, 1)
+    plot_width = content_width
+    plot_height = min(available_height, max(1, int(round(plot_width / landscape_aspect))))
+    return _PlotPageGeometry(
+        page_w=page_w,
+        page_h=page_h,
+        content_left=content_left,
+        content_top=content_top,
+        content_width=content_width,
+        header_height=header_height,
+        plot_width=plot_width,
+        plot_height=plot_height,
+    )
+
+
+def _header_plot_label(
+    spec: SurveyPlotPageSpec,
+    options: Postplot4DSurveyPlotPdfOptions,
+) -> str:
+    title = spec.plot_title.strip()
+    desc = description_for_page(spec, options).strip()
+    if desc and desc != title:
+        return f"{title} — {desc}" if title else desc
+    return title
+
+
+def _prepare_view_for_capture(
+    view: Postplot4DSurveyPlotsView,
+    spec: SurveyPlotPageSpec,
+) -> None:
+    view.prepare_for_pdf_capture(
+        page_kind=spec.page_kind.value,
+        metric_kind=spec.metric_kind,
+        pie_index=spec.pie_index,
+    )
 
 
 def _render_page_image(
@@ -192,6 +270,7 @@ def _render_page_image(
     height: int,
     dpi: int,
 ) -> QImage | None:
+    _prepare_view_for_capture(view, spec)
     sets = view.diff_sets()
     cache = view.metric_cache()
     if spec.page_kind == SurveyPlotPageKind.PIE:
@@ -218,12 +297,11 @@ def _render_page_image(
         heatmap = view.heatmap_cache().get(kind)
         if heatmap is None:
             return None
-        canvas.render(heatmap)
+        canvas.render(heatmap, force=True)
         QApplication.processEvents()
         return canvas.capture_image(
             width=width,
             height=height,
-            title=spec.plot_title,
             for_pdf=True,
             dpi=dpi,
         )
@@ -239,7 +317,6 @@ def _render_page_image(
         return hist_canvas.capture_image(
             width=width,
             height=height,
-            title=spec.plot_title,
             for_pdf=True,
             dpi=dpi,
         )
@@ -247,7 +324,7 @@ def _render_page_image(
 
 
 def _restore_view_state(view: Postplot4DSurveyPlotsView) -> None:
-    view.refresh()
+    view.restore_after_pdf_export()
     QApplication.processEvents()
 
 
@@ -263,9 +340,9 @@ def compose_survey_plot_pages(
         raise ValueError("Select at least one survey plot to include in the PDF.")
 
     render_dpi = dpi if dpi is not None else options.dpi
-    survey_label = "Survey: All matched lines"
     logo_file = resolve_logo_path(logo_path)
     geom = _geometry(options, render_dpi)
+    report_title = options.report_title.strip() or DEFAULT_SURVEY_PLOT_PDF_REPORT_TITLE
     pages: list[ComposedSurveyPlotPage] = []
     try:
         for spec in page_specs:
@@ -283,19 +360,15 @@ def compose_survey_plot_pages(
             painter = QPainter(composed)
             painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
             painter.setRenderHint(QPainter.RenderHint.TextAntialiasing, True)
-            _draw_page_header(
+            _draw_survey_page_header(
                 painter,
                 content_left=geom.content_left,
                 content_top=geom.content_top,
                 content_width=geom.content_width,
                 dpi=render_dpi,
-                report_title=(
-                    options.report_title.strip() or DEFAULT_SURVEY_PLOT_PDF_REPORT_TITLE
-                ),
-                line_label=survey_label,
-                time_series_label=description_for_page(spec, options),
+                report_title=report_title,
+                plot_title=_header_plot_label(spec, options),
                 logo_file=logo_file,
-                time_series_prefix=None if not description_for_page(spec, options).strip() else "",
             )
             plot_x = geom.content_left
             plot_y = geom.content_top + geom.header_height
@@ -335,9 +408,9 @@ def export_survey_plot_pdf(
         raise ValueError("Select at least one survey plot to include in the PDF.")
 
     export_dpi = options.dpi
-    survey_label = "Survey: All matched lines"
     logo_file = resolve_logo_path(logo_path)
     geom = _geometry(options, export_dpi)
+    report_title = options.report_title.strip() or DEFAULT_SURVEY_PLOT_PDF_REPORT_TITLE
     layout = page_layout_for(options.paper, options.landscape)
     writer = QPdfWriter(str(output_path))
     writer.setResolution(export_dpi)
@@ -367,19 +440,15 @@ def export_survey_plot_pdf(
                 writer.newPage()
             rendered_any = True
             painter.fillRect(page_rect, Qt.GlobalColor.white)
-            _draw_page_header(
+            _draw_survey_page_header(
                 painter,
                 content_left=origin_x + geom.content_left,
                 content_top=origin_y + geom.content_top,
                 content_width=geom.content_width,
                 dpi=export_dpi,
-                report_title=(
-                    options.report_title.strip() or DEFAULT_SURVEY_PLOT_PDF_REPORT_TITLE
-                ),
-                line_label=survey_label,
-                time_series_label=description_for_page(spec, options),
+                report_title=report_title,
+                plot_title=_header_plot_label(spec, options),
                 logo_file=logo_file,
-                time_series_prefix=None if not description_for_page(spec, options).strip() else "",
             )
             plot_x = origin_x + geom.content_left
             plot_y = origin_y + geom.content_top + geom.header_height

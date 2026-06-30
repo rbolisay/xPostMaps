@@ -1,4 +1,4 @@
-"""Sequence × shotpoint aerial heatmap for survey-wide 4D plots."""
+"""Preplot × shotpoint aerial heatmap for survey-wide 4D plots."""
 
 from __future__ import annotations
 
@@ -6,7 +6,8 @@ import numpy as np
 import pyqtgraph as pg
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QFont, QImage, QPainter
-from PySide6.QtWidgets import QLabel, QSizePolicy, QVBoxLayout, QWidget
+from PySide6.QtWidgets import QLabel, QScrollArea, QSizePolicy, QVBoxLayout, QWidget
+from PySide6.QtWidgets import QApplication
 
 from xpostmaps.core.postplot_4d_plot_data import PLOT_KIND_UNITS, PlotKind
 from xpostmaps.core.postplot_4d_survey_plot_data import (
@@ -18,7 +19,7 @@ from xpostmaps.ui.postplot_4d_survey_plots.survey_plot_navigation import (
     create_survey_plot_widget,
 )
 from xpostmaps.ui.postplot_4d_survey_plots.survey_plot_pdf_render import (
-    draw_survey_plot_title,
+    apply_screen_axis_styles,
     render_pyqtgraph_plot_for_pdf,
 )
 from xpostmaps.ui.postplot_4d_survey_plots.survey_plot_title_edit import SurveyPlotTitleEdit
@@ -26,8 +27,6 @@ from xpostmaps.ui.postplot_4d_survey_plots.survey_plot_title_edit import SurveyP
 _PLOT_BG = "#ffffff"
 _PLOT_FG = "#111827"
 _MIN_HEIGHT = 320
-_MIN_PX_PER_SEQUENCE = 4
-_MIN_HEATMAP_WIDTH = 640
 _LEGEND_WIDTH = 96
 _LEGEND_BAR_WIDTH = 22
 _LEGEND_AXIS_WIDTH = 54
@@ -53,7 +52,7 @@ def _diverging_colormap() -> pg.ColorMap:
     colors = [
         (185, 28, 28, 255),
         (234, 179, 8, 255),
-        (29, 78, 216, 255),
+        (34, 197, 94, 255),
         (234, 179, 8, 255),
         (185, 28, 28, 255),
     ]
@@ -70,6 +69,17 @@ def _paintable_grid(grid: np.ndarray) -> np.ndarray:
     return fill_aerial_heatmap_gaps(_display_grid(grid))
 
 
+def _legend_pdf_metrics(dpi: int) -> tuple[int, int, int, QFont, int]:
+    scale = max(dpi / 96.0, 1.0)
+    width = max(136, int(round(152 * scale)))
+    bar_width = max(26, int(round(32 * scale)))
+    axis_width = max(72, int(round(92 * scale)))
+    tick_font = QFont("Arial")
+    tick_font.setPixelSize(max(8, int(round(10 * scale))))
+    unit_px = max(10, int(round(11 * scale)))
+    return width, bar_width, axis_width, tick_font, unit_px
+
+
 class AerialHeatmapCanvas(QWidget):
     """Heatmap: x = sequence numbers, y = shot numbers, legend = signed values."""
 
@@ -79,6 +89,7 @@ class AerialHeatmapCanvas(QWidget):
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
 
         self._scroll_root = QWidget()
+        self._scroll_root.setMinimumWidth(0)
         scroll_layout = QVBoxLayout(self._scroll_root)
         scroll_layout.setContentsMargins(0, 0, 0, 0)
         scroll_layout.setSpacing(4)
@@ -89,7 +100,7 @@ class AerialHeatmapCanvas(QWidget):
 
         self._plot, self._viewbox = create_survey_plot_widget(background=_PLOT_BG)
         self._plot.showGrid(x=False, y=False)
-        self._plot.setLabel("bottom", "Sequence numbers")
+        self._plot.setLabel("bottom", "Preplot number")
         self._plot.setLabel("left", "Shot number")
         self._plot.getPlotItem().hideAxis("top")
         self._plot.getPlotItem().hideAxis("right")
@@ -149,7 +160,12 @@ class AerialHeatmapCanvas(QWidget):
 
         self._data: AerialHeatmapData | None = None
         self._data_key: tuple[int, int, int, float] | None = None
+        self._scroll: QScrollArea | None = None
+        self._viewbox.set_after_reset(self._on_reset_extent)
         self._viewbox.sigRangeChanged.connect(lambda *_args: self._sync_legend_layout())
+
+    def set_scroll_area(self, scroll: QScrollArea) -> None:
+        self._scroll = scroll
 
     def scroll_widget(self) -> QWidget:
         """Plot + title for horizontal scrolling (legend stays fixed separately)."""
@@ -171,7 +187,28 @@ class AerialHeatmapCanvas(QWidget):
         plot_height = max(self._plot.height(), self._plot.sizeHint().height())
         self._legend_root.setMinimumHeight(top + unit_height + plot_height)
 
-    def render(self, data: AerialHeatmapData | None) -> None:
+    def _on_reset_extent(self) -> None:
+        if self._scroll is None:
+            return
+        self._scroll.horizontalScrollBar().setValue(0)
+        self._scroll.verticalScrollBar().setValue(0)
+        self._sync_legend_layout()
+
+    def _apply_full_extent(self, *, reset_view: bool) -> None:
+        if self._data is None:
+            return
+        grid = np.asarray(self._data.image, dtype=np.float64)
+        n_cols = grid.shape[1]
+        shot_min = int(self._data.shot_min)
+        shot_max = int(self._data.shot_max)
+        apply_plot_extent(
+            self._viewbox,
+            (-0.5, n_cols - 0.5),
+            (shot_min - 0.5, shot_max + 0.5),
+            reset_view=reset_view,
+        )
+
+    def render(self, data: AerialHeatmapData | None, *, force: bool = False) -> None:
         if data is None:
             self._data = None
             self._data_key = None
@@ -183,11 +220,13 @@ class AerialHeatmapCanvas(QWidget):
         grid = np.asarray(data.image, dtype=np.float64)
         limit = float(data.value_limit)
         cache_key = (id(data), grid.shape[0], grid.shape[1], limit)
-        if cache_key == self._data_key:
+        if cache_key == self._data_key and not force:
             self._sync_legend_layout()
             return
         self._data = data
         self._data_key = cache_key
+
+        apply_screen_axis_styles(self._plot, bottom_tick_offset=10)
 
         n_cols = grid.shape[1]
         n_rows = grid.shape[0]
@@ -195,7 +234,6 @@ class AerialHeatmapCanvas(QWidget):
         shot_max = int(data.shot_max)
 
         self._title.reset_default(data.map_label)
-        self._scroll_root.setMinimumWidth(max(_MIN_HEATMAP_WIDTH, n_cols * _MIN_PX_PER_SEQUENCE))
 
         painted = _paintable_grid(grid)
         self._image.setColorMap(self._cmap)
@@ -210,12 +248,38 @@ class AerialHeatmapCanvas(QWidget):
         self._plot.getAxis("bottom").setTicks([x_ticks])
         y_ticks = _shot_axis_ticks(shot_min, shot_max)
         self._plot.getAxis("left").setTicks([y_ticks])
-        apply_plot_extent(
-            self._viewbox,
-            (-0.5, n_cols - 0.5),
-            (shot_min - 0.5, shot_max + 0.5),
+        self._apply_full_extent(reset_view=True)
+        self._sync_legend_layout()
+
+    def _apply_legend_pdf_layout(self, dpi: int) -> tuple[int, int, int, QFont, int]:
+        legend_w, bar_w, axis_w, tick_font, unit_px = _legend_pdf_metrics(dpi)
+        self._legend_root.setFixedWidth(legend_w)
+        self._legend_plot.setFixedWidth(legend_w)
+        self._colorbar.layout.setColumnFixedWidth(1, bar_w)
+        right_axis = self._colorbar.getAxis("right")
+        right_axis.setWidth(axis_w)
+        right_axis.setStyle(
+            tickFont=tick_font,
+            autoExpandTextSpace=True,
+            tickTextOffset=max(4, int(round(5 * max(dpi / 96.0, 1.0)))),
         )
         self._sync_legend_layout()
+        QApplication.processEvents()
+        return legend_w, bar_w, axis_w, tick_font, unit_px
+
+    def _restore_legend_ui_layout(self) -> None:
+        self._legend_root.setFixedWidth(_LEGEND_WIDTH)
+        self._legend_plot.setFixedWidth(_LEGEND_WIDTH)
+        self._colorbar.layout.setColumnFixedWidth(1, _LEGEND_BAR_WIDTH)
+        self._colorbar.getAxis("right").setWidth(_LEGEND_AXIS_WIDTH)
+        legend_tick_font = QFont("Arial", 8)
+        self._colorbar.getAxis("right").setStyle(
+            tickFont=legend_tick_font,
+            autoExpandTextSpace=True,
+            tickTextOffset=2,
+        )
+        self._sync_legend_layout()
+        QApplication.processEvents()
 
     def title_text(self) -> str:
         return self._title.title_text()
@@ -251,40 +315,59 @@ class AerialHeatmapCanvas(QWidget):
                 Qt.TransformationMode.SmoothTransformation,
             )
 
-        title_text = title.strip() or self._title.title_text()
-        image = QImage(width, height, QImage.Format.Format_ARGB32)
-        image.fill(Qt.GlobalColor.white)
-        painter = QPainter(image)
-        top_pad = draw_survey_plot_title(
-            painter,
-            x=8,
-            y=0,
-            width=width,
-            title=title_text,
-            dpi=dpi,
-        )
-        painter.end()
+        body_h = max(1, height)
+        self._legend_plot.setYLink(None)
+        self._apply_full_extent(reset_view=True)
+        self._viewbox.zoom_to_extent()
+        QApplication.processEvents()
+        legend_w, _bar_w, _axis_w, _tick_font, unit_px = self._apply_legend_pdf_layout(dpi)
+        try:
+            self._viewbox.zoom_to_extent()
+            QApplication.processEvents()
+            plot_w = max(1, width - legend_w)
+            plot_body = render_pyqtgraph_plot_for_pdf(
+                self._plot,
+                width=plot_w,
+                height=body_h,
+                dpi=dpi,
+            )
+            legend_body = render_pyqtgraph_plot_for_pdf(
+                self._legend_plot,
+                width=legend_w,
+                height=body_h,
+                dpi=dpi,
+            )
+        finally:
+            self._legend_plot.setYLink(self._plot)
+            self._restore_legend_ui_layout()
+            apply_screen_axis_styles(self._plot, bottom_tick_offset=10)
+            apply_screen_axis_styles(self._legend_plot, bottom_tick_offset=4)
+            self._apply_full_extent(reset_view=True)
 
-        body_h = max(1, height - top_pad)
-        plot_w = max(1, width - _LEGEND_WIDTH)
-        plot_body = render_pyqtgraph_plot_for_pdf(
-            self._plot,
-            width=plot_w,
-            height=body_h,
-            dpi=dpi,
-        )
-        legend_body = self._legend_root.grab().toImage().scaled(
-            _LEGEND_WIDTH,
-            body_h,
-            Qt.AspectRatioMode.IgnoreAspectRatio,
-            Qt.TransformationMode.SmoothTransformation,
-        )
         composed = QImage(width, height, QImage.Format.Format_ARGB32)
         composed.fill(Qt.GlobalColor.white)
         composer = QPainter(composed)
-        composer.drawImage(0, 0, image)
-        composer.drawImage(0, top_pad, plot_body)
-        composer.drawImage(plot_w, top_pad, legend_body)
+        composer.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        composer.setRenderHint(QPainter.RenderHint.TextAntialiasing, True)
+        composer.drawImage(0, 0, plot_body)
+        composer.drawImage(plot_w, 0, legend_body)
+        unit_text = self._legend_unit.text().strip()
+        if unit_text:
+            unit_font = QFont("Arial")
+            unit_font.setPixelSize(unit_px)
+            unit_font.setWeight(QFont.Weight.DemiBold)
+            composer.setFont(unit_font)
+            composer.setPen(Qt.GlobalColor.black)
+            metrics = composer.fontMetrics()
+            unit_y = max(4, int(round(6 * max(dpi / 96.0, 1.0))))
+            composer.drawText(
+                plot_w,
+                unit_y + metrics.ascent(),
+                legend_w,
+                metrics.height(),
+                int(Qt.AlignmentFlag.AlignHCenter),
+                unit_text,
+            )
         composer.end()
         return composed
 

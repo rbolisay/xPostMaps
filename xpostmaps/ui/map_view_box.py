@@ -124,12 +124,13 @@ class MapViewBox(pg.ViewBox):
     def mouseClickEvent(self, ev) -> None:
         if ev.button() == Qt.MouseButton.RightButton:
             ev.accept()
-            if self._right_drag_moved:
-                self._right_drag_moved = False
-                return
             if ev.double():
                 self._menu_timer.stop()
+                self._right_drag_moved = False
                 self.zoom_to_extent()
+                return
+            if self._right_drag_moved:
+                self._right_drag_moved = False
                 return
             self._pending_menu_pos = ev.screenPos().toPoint()
             self._menu_timer.start()

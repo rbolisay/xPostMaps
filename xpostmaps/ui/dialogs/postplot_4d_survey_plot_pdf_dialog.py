@@ -207,6 +207,7 @@ class Postplot4DSurveyPlotPdfDialog:
             preview_layout.addLayout(nav_row)
             preview_scroll = QScrollArea()
             preview_scroll.setWidgetResizable(True)
+            preview_scroll.setFrameShape(QScrollArea.Shape.StyledPanel)
             preview_scroll.setWidget(preview_host)
             body.addWidget(left, stretch=0)
             body.addWidget(preview_scroll, stretch=1)
@@ -292,17 +293,25 @@ class Postplot4DSurveyPlotPdfDialog:
                 prev_page_btn.setEnabled(preview_index > 0)
                 next_page_btn.setEnabled(preview_index < total - 1)
 
+            def _preview_display_size() -> QSize:
+                viewport = preview_scroll.viewport()
+                return QSize(
+                    max(320, viewport.width() - 16 if viewport else 420),
+                    max(240, viewport.height() - 48 if viewport else 360),
+                )
+
             def refresh_preview() -> None:
                 nonlocal preview_pages, preview_index, page_specs
                 _store_current_description()
                 opts = current_options()
                 try:
-                    page_specs = iter_survey_plot_page_specs(survey_view, opts)
-                    preview_pages = render_survey_plot_preview_pages(
+                    composed = render_survey_plot_preview_pages(
                         survey_view,
                         opts,
                         logo_path=logo_path,
                     )
+                    preview_pages = composed
+                    page_specs = [page.spec for page in composed]
                 except ValueError as exc:
                     preview_pages = []
                     page_specs = []
@@ -310,10 +319,17 @@ class Postplot4DSurveyPlotPdfDialog:
                     preview_label.setPixmap(QPixmap())
                     _sync_page_nav()
                     return
-                preview_index = 0
+                if not preview_pages:
+                    preview_index = 0
+                    preview_label.setText("No pages selected.")
+                    preview_label.setPixmap(QPixmap())
+                    _sync_page_nav()
+                    return
+                preview_index = max(0, min(preview_index, len(preview_pages) - 1))
                 _load_description_for_current_page()
                 _show_preview_page()
                 _sync_page_nav()
+                QTimer.singleShot(0, _show_preview_page)
 
             def _show_preview_page() -> None:
                 if not preview_pages:
@@ -322,13 +338,14 @@ class Postplot4DSurveyPlotPdfDialog:
                     return
                 index = max(0, min(preview_index, len(preview_pages) - 1))
                 image = preview_pages[index].image
+                if image.isNull():
+                    preview_label.setText("Preview unavailable")
+                    preview_label.setPixmap(QPixmap())
+                    return
                 pixmap = QPixmap.fromImage(image)
-                viewport = preview_scroll.viewport()
-                max_w = max(320, viewport.width() - 16 if viewport else 420)
-                max_h = max(240, viewport.height() - 48 if viewport else 360)
+                target = _preview_display_size()
                 scaled = pixmap.scaled(
-                    max_w,
-                    max_h,
+                    target,
                     Qt.AspectRatioMode.KeepAspectRatio,
                     Qt.TransformationMode.SmoothTransformation,
                 )
@@ -343,6 +360,8 @@ class Postplot4DSurveyPlotPdfDialog:
                 opts = current_options()
                 out_path = resolve_survey_plot_output_path(opts)
                 try:
+                    survey_view.refresh_all()
+                    QApplication.processEvents()
                     export_survey_plot_pdf(
                         survey_view,
                         out_path,

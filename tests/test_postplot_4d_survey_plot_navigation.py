@@ -52,6 +52,7 @@ def test_survey_plot_pan_scroll_and_reset_extent(qapp) -> None:
     assert (zoomed_x[1] - zoomed_x[0]) < (start_x[1] - start_x[0])
     assert (zoomed_y[1] - zoomed_y[0]) < (start_y[1] - start_y[0])
 
+    viewbox._right_drag_moved = True
     viewbox.zoom_to_extent()
     reset_x, reset_y = viewbox.viewRange()
     assert reset_x == pytest.approx(start_x)

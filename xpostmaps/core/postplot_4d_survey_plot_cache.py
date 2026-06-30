@@ -24,7 +24,7 @@ from xpostmaps.core.postplot_4d_survey_plot_data import (
 from xpostmaps.core.postplot_4d_plot_settings import load_survey_specs
 from xpostmaps.core.postplot_4d_survey_spec import Severity, StatType, SurveySpecRow
 
-SURVEY_PLOT_CACHE_VERSION = 1
+SURVEY_PLOT_CACHE_VERSION = 3
 _MANIFEST_NAME = "manifest.json"
 
 

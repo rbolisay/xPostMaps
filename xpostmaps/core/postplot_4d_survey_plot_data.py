@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+import re
 from dataclasses import dataclass, field
 
 import numpy as np
@@ -22,6 +23,7 @@ from xpostmaps.core.postplot_4d_plot_data import (
     unique_sources_from_diff_rows,
 )
 from xpostmaps.core.postplot_4d_diff import feather_diff_deg, Postplot4DDiffRow
+from xpostmaps.core.postplot_4d_matching import Postplot4DMatchRow, sequence_sort_key
 from xpostmaps.core.postplot_4d_plot_settings import load_survey_specs
 from xpostmaps.core.postplot_4d_survey_spec import (
     Severity,
@@ -68,10 +70,10 @@ class SurveyPlotsLoadResult:
 
 @dataclass
 class AerialHeatmapData:
-    """Sequence × shotpoint heatmap for one metric and primary source."""
+    """Preplot (x) × shotpoint (y) heatmap for one metric and primary source."""
 
     image: object  # np.ndarray float64, NaN = gap
-    sequence_labels: list[str]
+    sequence_labels: list[str]  # packed x-axis labels (preplot numbers)
     sequence_min: int
     sequence_max: int
     shot_min: int
@@ -133,9 +135,9 @@ class CumulativeHistogram:
 
 @dataclass(frozen=True)
 class CombinedSurveyExtent:
-    """Combined x/y extent for survey-wide plots across all sequences."""
+    """Combined x/y extent for survey-wide plots across all preplot columns."""
 
-    sequence_labels: list[str]
+    sequence_labels: list[str]  # preplot numbers, one per heatmap column
     sequence_min: int
     sequence_max: int
     shot_min: int
@@ -145,7 +147,7 @@ class CombinedSurveyExtent:
 
 
 def parse_sequence_number(label: str, *, fallback: int = 0) -> int:
-    """Parse a sequence label to its numeric axis value."""
+    """Parse a numeric label for axis metadata."""
     text = (label or "").strip()
     if not text:
         return fallback
@@ -158,21 +160,68 @@ def parse_sequence_number(label: str, *, fallback: int = 0) -> int:
         return fallback
 
 
+def _natural_preplot_sort_key(text: str) -> tuple:
+    parts = re.split(r"(\d+)", text or "")
+    key: list[tuple[int, int | str]] = []
+    for part in parts:
+        if not part:
+            continue
+        if part.isdigit():
+            key.append((0, int(part)))
+        else:
+            key.append((1, part.upper()))
+    return tuple(key)
+
+
+def _preplot_line_key(match_row: Postplot4DMatchRow) -> str:
+    return (match_row.baseline_name or match_row.line_name or "").strip()
+
+
+def ordered_preplot_column_groups(
+    sets: list[SequenceDiffSet],
+) -> list[tuple[str, list[SequenceDiffSet]]]:
+    """One heatmap column per preplot line; sequences oldest-first for back-to-front paint."""
+    grouped: dict[str, list[SequenceDiffSet]] = {}
+    for item in sets:
+        preplot = _preplot_line_key(item.match_row)
+        if not preplot:
+            continue
+        grouped.setdefault(preplot, []).append(item)
+    columns: list[tuple[str, list[SequenceDiffSet]]] = []
+    for preplot, members in grouped.items():
+        ordered = sorted(members, key=lambda entry: sequence_sort_key(entry.match_row))
+        columns.append((preplot, ordered))
+    columns.sort(key=lambda pair: (_natural_preplot_sort_key(pair[0]), pair[0].upper()))
+    return columns
+
+
+def ordered_preplot_column_sets(
+    sets: list[SequenceDiffSet],
+) -> list[tuple[str, SequenceDiffSet]]:
+    """One entry per preplot column (latest sequence only — prefer ordered_preplot_column_groups)."""
+    return [
+        (preplot, members[-1])
+        for preplot, members in ordered_preplot_column_groups(sets)
+    ]
+
+
 def combined_survey_extent(sets: list[SequenceDiffSet]) -> CombinedSurveyExtent:
-    """Shot and sequence bounds aggregated across every loaded sequence."""
-    ordered = ordered_sequence_sets(sets)
-    sequence_labels = [item.match_row.sequence_no for item in ordered]
+    """Shot and preplot bounds for survey-wide aerial plots (all sequences layered per preplot)."""
+    columns = ordered_preplot_column_groups(sets)
+    sequence_labels = [preplot for preplot, _members in columns]
     sequence_numbers = [
         parse_sequence_number(label, fallback=index)
         for index, label in enumerate(sequence_labels)
     ]
     shots: set[int] = set()
     row_count = 0
-    for item in ordered:
+    for item in sets:
         row_count += len(item.diff_rows)
-        for row in item.diff_rows:
-            if row.shotpoint > 0:
-                shots.add(int(row.shotpoint))
+    for _preplot, members in columns:
+        for item in members:
+            for row in item.diff_rows:
+                if row.shotpoint > 0:
+                    shots.add(int(row.shotpoint))
     if not sequence_numbers:
         return CombinedSurveyExtent(
             sequence_labels=sequence_labels,
@@ -432,24 +481,25 @@ def build_survey_aerial_heatmap(
     *,
     source_no: str | None = None,
 ) -> AerialHeatmapData | None:
-    """Build sequence (x) × shotpoint (y) heatmap for the primary source."""
-    ordered = ordered_sequence_sets(sets)
-    if not ordered:
+    """Build preplot (x) × shotpoint (y) heatmap for the primary source."""
+    columns = ordered_preplot_column_groups(sets)
+    if not columns:
         return None
     source = source_no or _primary_survey_source(sets)
     shots: set[int] = set()
-    for item in ordered:
-        for row in item.diff_rows:
-            if row.shotpoint > 0:
-                shots.add(int(row.shotpoint))
+    for _preplot, members in columns:
+        for item in members:
+            for row in item.diff_rows:
+                if row.shotpoint > 0:
+                    shots.add(int(row.shotpoint))
     if not shots:
         return None
     shot_min = min(shots)
     shot_max = max(shots)
     n_rows = shot_max - shot_min + 1
-    n_cols = len(ordered)
+    n_cols = len(columns)
     grid = np.full((n_rows, n_cols), np.nan, dtype=np.float64)
-    sequence_labels = [item.match_row.sequence_no for item in ordered]
+    sequence_labels = [preplot for preplot, _members in columns]
     sequence_numbers = [
         parse_sequence_number(label, fallback=index)
         for index, label in enumerate(sequence_labels)
@@ -457,19 +507,20 @@ def build_survey_aerial_heatmap(
     seq_min = min(sequence_numbers)
     seq_max = max(sequence_numbers)
 
-    for col, item in enumerate(ordered):
-        for row in item.diff_rows:
-            label = normalize_source_label(
-                row.firing_source_id,
-                fallback_index=1,
-            )
-            if label != source:
-                continue
-            value = _metric_at_row(row, kind)
-            if value is None:
-                continue
-            row_index = shot_max - int(row.shotpoint)
-            grid[row_index, col] = float(value)
+    for col, (_preplot, members) in enumerate(columns):
+        for item in members:
+            for row in item.diff_rows:
+                label = normalize_source_label(
+                    row.firing_source_id,
+                    fallback_index=1,
+                )
+                if label != source:
+                    continue
+                value = _metric_at_row(row, kind)
+                if value is None:
+                    continue
+                row_index = shot_max - int(row.shotpoint)
+                grid[row_index, col] = float(value)
 
     if not np.isfinite(grid).any():
         return None

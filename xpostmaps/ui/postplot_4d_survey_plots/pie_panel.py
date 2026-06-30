@@ -7,6 +7,7 @@ import math
 from PySide6.QtCore import Qt, QRectF, QSize
 from PySide6.QtGui import QFont, QImage, QPainter, QColor, QPen
 from PySide6.QtWidgets import (
+    QApplication,
     QFrame,
     QGridLayout,
     QHBoxLayout,
@@ -79,7 +80,7 @@ def _format_metric(value: float | None, unit: str) -> str:
 
 
 class _PieChartWidget(SurveyPanZoomWidget):
-    """Donut-style pie with percentage labels on slices."""
+    """Pie chart with percentage labels on slices."""
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
@@ -109,13 +110,6 @@ class _PieChartWidget(SurveyPanZoomWidget):
             side,
             side,
         )
-        inner_scale = 0.52
-        inner = QRectF(
-            outer.center().x() - side * inner_scale / 2,
-            outer.center().y() - side * inner_scale / 2,
-            side * inner_scale,
-            side * inner_scale,
-        )
 
         visible = [slice_ for slice_ in self._slices if slice_.value > 0.05]
         total = sum(slice_.value for slice_ in visible)
@@ -136,7 +130,7 @@ class _PieChartWidget(SurveyPanZoomWidget):
             span = 360.0 * slice_.value / total
             color = QColor(slice_.color)
             painter.setBrush(color)
-            painter.setPen(QPen(QColor("#0d1117"), 2))
+            painter.setPen(Qt.PenStyle.NoPen)
             painter.drawPie(outer, int(start * 16), int(-span * 16))
 
             if span >= 8.0:
@@ -159,9 +153,6 @@ class _PieChartWidget(SurveyPanZoomWidget):
 
             start -= span
 
-        painter.setBrush(QColor(_CARD_BG))
-        painter.setPen(QPen(QColor(_CARD_BORDER), 1))
-        painter.drawEllipse(inner)
         painter.end()
 
 
@@ -428,16 +419,31 @@ class SurveySpecPiePanel(QWidget):
         for_pdf: bool,
         dpi: int,
     ) -> QImage:
-        page.resize(max(page.width(), 900), max(page.height(), 640))
+        page._pie.reset_view()
+        layout_w = max(width, 960)
+        layout_h = max(height, 680)
+        page.resize(layout_w, layout_h)
+        page.layout().activate()
+        QApplication.processEvents()
+
+        if for_pdf:
+            page.resize(width, height)
+            page.layout().activate()
+            QApplication.processEvents()
+            image = QImage(width, height, QImage.Format.Format_ARGB32)
+            image.fill(QColor("#ffffff"))
+            page.render(image)
+            return image
+
         widget_image = page.grab().toImage()
-        bg = "#ffffff" if for_pdf else "#0d1117"
+        bg = "#0d1117"
         image = QImage(width, height, QImage.Format.Format_ARGB32)
         image.fill(QColor(bg))
         painter = QPainter(image)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
         painter.setRenderHint(QPainter.RenderHint.TextAntialiasing, True)
         top = 0
-        if title.strip() and not for_pdf:
+        if title.strip():
             font = QFont("Segoe UI")
             font.setPixelSize(max(12, int(round(12 * dpi / 96.0))))
             font.setWeight(QFont.Weight.Bold)

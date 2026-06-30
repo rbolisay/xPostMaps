@@ -4,10 +4,12 @@ from __future__ import annotations
 
 from PySide6.QtCore import Qt, QTimer, Signal
 from PySide6.QtWidgets import (
+    QApplication,
     QHBoxLayout,
     QLabel,
     QPushButton,
     QScrollArea,
+    QSizePolicy,
     QTabWidget,
     QVBoxLayout,
     QWidget,
@@ -85,6 +87,7 @@ class _AerialTabPage(QWidget):
         self._scroll.setFrameShape(QScrollArea.Shape.NoFrame)
         self._canvas = AerialHeatmapCanvas(parent=self)
         self._scroll.setWidget(self._canvas.scroll_widget())
+        self._canvas.set_scroll_area(self._scroll)
         layout.addWidget(self._scroll, stretch=1)
         layout.addWidget(self._canvas.legend_widget(), alignment=Qt.AlignmentFlag.AlignTop)
 
@@ -154,6 +157,8 @@ class Postplot4DSurveyPlotsView(QWidget):
         super().__init__(parent)
         self.setObjectName("surveyPlotsRoot")
         self.setStyleSheet(STAT_PLOT_VIEW_STYLE)
+        self.setMinimumSize(0, 0)
+        self.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
         self._sets: list[SequenceDiffSet] = []
         self._streamers_detected = False
         self._available_kinds: list[PlotKind] = []
@@ -410,3 +415,31 @@ class Postplot4DSurveyPlotsView(QWidget):
         if key is not None:
             self._rendered_keys.discard(key)
         self.refresh_current_tab()
+
+    def restore_after_pdf_export(self) -> None:
+        """Reset plot widgets after PDF capture mutates axis/layout state."""
+        self._rendered_keys.clear()
+        self.refresh_all()
+
+    def prepare_for_pdf_capture(
+        self,
+        *,
+        page_kind: str,
+        metric_kind: str | None = None,
+        pie_index: int | None = None,
+    ) -> None:
+        """Show the widget tree needed for off-screen PDF/preview capture."""
+        if page_kind == "pie":
+            if self._tabs.indexOf(self._pie_panel) >= 0:
+                self._tabs.setCurrentWidget(self._pie_panel)
+            if pie_index is not None:
+                self._pie_panel.select_page(pie_index)
+        elif metric_kind is not None:
+            panel = self._metric_panels.get(metric_kind)  # type: ignore[arg-type]
+            if panel is not None and self._tabs.indexOf(panel) >= 0:
+                self._tabs.setCurrentWidget(panel)
+                if page_kind == "aerial":
+                    panel.sub_tabs.setCurrentWidget(panel._aerial_page)
+                elif page_kind == "histogram":
+                    panel.sub_tabs.setCurrentWidget(panel._histogram_page)
+        QApplication.processEvents()
