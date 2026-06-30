@@ -271,9 +271,12 @@ def test_plot_overrides_flagged_shotpoint_marker_colors(qapp) -> None:
         flags=flags,
     )
     qapp.processEvents()
+    assert len(plot._flag_items) == 2
+    flagged_x = sorted(
+        float(x)
+        for scatter in plot._flag_items
+        for x in (scatter.getData()[0] or [])
+    )
+    assert flagged_x == [100.0, 101.0]
     curve = plot._curve_items[0]
-    brushes = curve.opts.get("symbolBrush")
-    assert isinstance(brushes, list)
-    assert brushes[0].name() == QColor("#ff8c00").name()
-    assert brushes[1].name() == QColor("#ff0000").name()
-    assert brushes[2].name() == QColor("#22c55e").name()
+    assert QColor(curve.opts.get("symbolBrush")).name() == QColor("#22c55e").name()

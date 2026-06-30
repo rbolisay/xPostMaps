@@ -152,27 +152,6 @@ def _format_pick_value(kind: PlotKind, value: float) -> str:
     return f"{value:.3f}"
 
 
-def _symbol_styles_for_series(
-    shotpoints: list[int],
-    series_flags: dict[int, Severity] | None,
-    default_color: str,
-) -> tuple[list[QColor], list[QPen]]:
-    """Per-shotpoint marker colours; flagged shots override the source colour."""
-    brushes: list[QColor] = []
-    pens: list[QPen] = []
-    for shotpoint in shotpoints:
-        severity = (series_flags or {}).get(int(shotpoint))
-        if severity == Severity.ERROR:
-            color = _FLAG_ERROR_COLOR
-        elif severity == Severity.WARNING:
-            color = _FLAG_WARNING_COLOR
-        else:
-            color = default_color
-        brushes.append(QColor(color))
-        pens.append(pg.mkPen(color, width=1, cosmetic=True))
-    return brushes, pens
-
-
 class TimeSeriesPlotWidget(pg.PlotWidget):
     """Single time-series plot with navigation, point pick, and stats overlay."""
 
@@ -181,6 +160,7 @@ class TimeSeriesPlotWidget(pg.PlotWidget):
         self._kind = kind
         self._curve_items: list[pg.PlotDataItem] = []
         self._boundary_items: list[pg.InfiniteLine] = []
+        self._flag_items: list[pg.ScatterPlotItem] = []
         self._pick_points: list[tuple[float, float, str]] = []
         self._extent_x: tuple[float, float] | None = None
         self._extent_y: tuple[float, float] | None = None
@@ -330,8 +310,11 @@ class TimeSeriesPlotWidget(pg.PlotWidget):
             self.removeItem(item)
         for item in self._boundary_items:
             self.removeItem(item)
+        for item in self._flag_items:
+            self.removeItem(item)
         self._curve_items.clear()
         self._boundary_items.clear()
+        self._flag_items.clear()
         self._pick_points.clear()
         self._set_selection_text("")
         self._selection_marker.hide()
@@ -366,16 +349,6 @@ class TimeSeriesPlotWidget(pg.PlotWidget):
             # different styles looked like different thicknesses (also scaled up
             # in the PDF). Keep one consistent size for every source.
             symbol_size = _SOURCE_SYMBOL_SIZE_PX
-            series_flags = flag_map.get(series.source_no)
-            if series_flags:
-                symbol_brushes, symbol_pens = _symbol_styles_for_series(
-                    series.shotpoints,
-                    series_flags,
-                    style.color,
-                )
-            else:
-                symbol_brushes = QColor(style.color)
-                symbol_pens = pg.mkPen(style.color, width=1, cosmetic=True)
             curve = self.plot(
                 x_data,
                 y_data,
@@ -383,8 +356,8 @@ class TimeSeriesPlotWidget(pg.PlotWidget):
                 name=series.source_no,
                 symbol="o" if show_symbols else None,
                 symbolSize=symbol_size,
-                symbolBrush=symbol_brushes,
-                symbolPen=symbol_pens,
+                symbolBrush=QColor(style.color),
+                symbolPen=pg.mkPen(style.color, width=1, cosmetic=True),
                 connect="all",
             )
             self._curve_items.append(curve)
@@ -393,6 +366,8 @@ class TimeSeriesPlotWidget(pg.PlotWidget):
             all_x.extend(x_data.tolist())
             for shotpoint, value in zip(x_data.tolist(), y_data.tolist(), strict=False):
                 self._pick_points.append((shotpoint, value, series.source_no))
+
+        self._draw_flag_markers(series_list, flag_map)
 
         for boundary in boundaries:
             base_pen = boundary_pen(boundary)
@@ -456,6 +431,56 @@ class TimeSeriesPlotWidget(pg.PlotWidget):
 
         self._update_stats_overlay(all_values)
         self._schedule_repaint()
+
+    def _draw_flag_markers(
+        self,
+        series_list: list[PlotSeries],
+        flag_map: dict[str, dict[int, Severity]],
+    ) -> None:
+        """Overlay red/orange markers on survey-spec flagged shotpoints.
+
+        Source curves keep their configured colours; PyQtGraph does not reliably
+        render per-point ``symbolBrush`` arrays on ``PlotDataItem``, so flagged
+        shotpoints are drawn as scatter items above the source markers.
+        """
+        if not flag_map:
+            return
+        error_x: list[float] = []
+        error_y: list[float] = []
+        warn_x: list[float] = []
+        warn_y: list[float] = []
+        for series in series_list:
+            series_flags = flag_map.get(series.source_no)
+            if not series_flags:
+                continue
+            for shotpoint, value in zip(
+                series.shotpoints, series.values, strict=False
+            ):
+                severity = series_flags.get(int(shotpoint))
+                if severity == Severity.ERROR:
+                    error_x.append(float(shotpoint))
+                    error_y.append(float(value))
+                elif severity == Severity.WARNING:
+                    warn_x.append(float(shotpoint))
+                    warn_y.append(float(value))
+
+        for xs, ys, color in (
+            (warn_x, warn_y, _FLAG_WARNING_COLOR),
+            (error_x, error_y, _FLAG_ERROR_COLOR),
+        ):
+            if not xs:
+                continue
+            scatter = pg.ScatterPlotItem(
+                x=xs,
+                y=ys,
+                size=_SOURCE_SYMBOL_SIZE_PX + 2,
+                brush=pg.mkBrush(QColor(color)),
+                pen=pg.mkPen(QColor(color), width=1, cosmetic=True),
+                symbol="o",
+            )
+            scatter.setZValue(150)
+            self.addItem(scatter)
+            self._flag_items.append(scatter)
 
     def _schedule_repaint(self) -> None:
         def _repaint() -> None:
@@ -536,6 +561,13 @@ class TimeSeriesPlotWidget(pg.PlotWidget):
             line.setPen(_scale_pen(qpen, scale * boundary_boost))
         backup["boundaries"] = boundary_backup
 
+        flag_backup: list[tuple[pg.ScatterPlotItem, float]] = []
+        for scatter in self._flag_items:
+            base_size = float(scatter.opts.get("size", _SOURCE_SYMBOL_SIZE_PX + 2))
+            flag_backup.append((scatter, base_size))
+            scatter.setSize(max(2.0, base_size * sym_scale))
+        backup["flags"] = flag_backup
+
         axis_backup: dict[str, object] = {}
         tick_px = max(7, int(round(8.5 * scale)))
         tick_font = QFont("Segoe UI")
@@ -577,6 +609,8 @@ class TimeSeriesPlotWidget(pg.PlotWidget):
                 curve.setSymbolPen(sym_pen)
         for line, pen in backup.get("boundaries", []):  # type: ignore[misc]
             line.setPen(pen)
+        for scatter, base_size in backup.get("flags", []):  # type: ignore[misc]
+            scatter.setSize(base_size)
         for axis_name, tick_font in backup.get("axes", {}).items():  # type: ignore[misc]
             axis = self.getAxis(axis_name)
             axis.setPen(pg.mkPen(_PLOT_FG))
